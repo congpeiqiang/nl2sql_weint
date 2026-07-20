@@ -62,6 +62,7 @@ Y = LLM(Q, S, C, P, T | θ)
 2. **Step 2** → 加载 `nl2sql-subproblem`：**Subproblem Agent** 将问题分解为子句级子问题 `C`（JSON 格式）
 3. **Step 3** → 加载 `nl2sql-query-plan`：**Query Plan Agent** 基于 CoT 生成步骤式执行计划 `P`（**绝对禁止输出 SQL 代码！**）
 4. **Step 4** → 加载 `nl2sql-sql-generation`：**SQL Generation Agent** 将计划翻译为可执行 SQL `Y`
+4.5. **Step 4.5** → 加载 `nl2sql-sql-validate`：**SQL Validation Agent** 对生成的 SQL 进行三层校验（语法/Schema、安全性、性能）。通过→继续；阻断→返回 Step 4 修正。
 5. **Step 5** → **SQL 验证（可选）：** 如果 WrenAI MDL 可用，使用 `wren dry-plan --sql '...'` 在执行前验证 SQL 语义正确性。仅解析验证，不访问数据库。
 6. **Step 6** → **执行 SQL**：成功 → 结束；失败 → 进入 Phase 3
 
@@ -79,7 +80,7 @@ Y = LLM(Q, S, C, P, T | θ)
 
 使用 `load_skill(name)` **按需加载** Agent 技能。**绝对不要在流程开始时一次性加载所有技能**——这会严重浪费上下文窗口。
 
-**技能名称列表：** `sql-of-thought`（编排器）、`wrenai`（语义层，Phase 0/2.5）、`nl2sql-schema-linking`、`nl2sql-subproblem`、`nl2sql-query-plan`、`nl2sql-sql-generation`、`nl2sql-correction`。
+**技能名称列表：** `sql-of-thought`（编排器）、`wrenai`（语义层，Phase 0/2.5）、`nl2sql-schema-linking`、`nl2sql-subproblem`、`nl2sql-query-plan`、`nl2sql-sql-generation`、`nl2sql-sql-validate`（校验）、`nl2sql-correction`。
 
 详细的技能清单、加载时机、模型分配策略和引用文件说明，请参阅记忆文件 `AGENTS.md`。
 

@@ -73,6 +73,10 @@ description: "触发条件：用户提出需要从数据库中查询数据的问
          SQL生成智能体：问题 + 查询计划 → 可执行SQL
          后处理：去除尾部多余分号、自然语言片段
 
+步骤4.5 → load_skill("nl2sql-sql-validate")
+         SQL校验智能体：语法(wren dry-plan) + 安全性 + 性能校验
+         通过 → 继续；阻断 → 返回步骤4修正；警告 → 记录后继续
+
 步骤5（可选）→ WrenAI 干运行验证
 
          决策逻辑：
@@ -145,6 +149,7 @@ llmwiki MCP服务器提供Schema知识检索：
 | `compile_wiki` | 阶段一 | 从导入的Schema源构建结构化Wiki |
 | `search_pages` | 阶段二（步骤1） | 为自然语言问题找到相关表/列 |
 | `query_wiki` | 阶段二（步骤1-2） | 对Schema关系提出有依据的问题 |
+| `wren dry-plan` | 步骤4.5 | SQL语法和Schema一致性校验 |
 | `wiki_status` | 阶段一 | 检查编译状态和完整性 |
 | `lint_wiki` | 阶段一 | 验证Schema文档质量 |
 
