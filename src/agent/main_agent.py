@@ -16,7 +16,7 @@ from langchain_core.messages import HumanMessage
 from agent.llms.model import deepseek_model
 from agent.tools.mcp_tool import tools
 
-base_dir = Path(r"D:\code_work_space\llm\nl2sql\src\workspace").resolve()
+base_dir = Path(r"D:\code_work_space\llm\nl2sql\src\agent\workspace").resolve()
 
 # 从文件加载系统提示词，与 memory 参考手册分离以优化上下文窗口
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompt" / "SYSTEM_PROMPT.md"

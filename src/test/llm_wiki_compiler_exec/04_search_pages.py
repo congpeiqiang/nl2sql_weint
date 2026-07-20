@@ -1,68 +1,26 @@
 """
-语义搜索表结构
+语义搜索表结构（可搜索 entities/）
 
 使用 MultiServerMCPClient 连接 llm-wiki-compiler MCP 服务器。
+配置集中在 mcp_config.py 中，调用辅助在 mcp_helper.py 中。
 """
 
 import asyncio
-import json
-import sys
-from pathlib import Path
+from mcp_helper import get_llmwiki_tool, print_result
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-
-from langchain_mcp_adapters.client import MultiServerMCPClient
-
-WIKI_ROOT = 'D:\\code_work_space\\llm\\LLM-Wiki-Project\\chinook_autoIncrement'
-
-
-async def get_llmwiki_tool(name):
-    client = MultiServerMCPClient({
-        "llmwiki": {
-            "transport": "stdio",
-            "command": "npx",
-            "args": [
-                "llm-wiki-compiler", "serve",
-                "--root", WIKI_ROOT
-            ],
-            "env": {
-                "LLMWIKI_PROVIDER": "openai",
-                "LLMWIKI_MODEL": "deepseek-chat",
-                "OPENAI_API_KEY": "sk-97dc8af1edbb468f868ddad89cedda78",
-                "OPENAI_BASE_URL": "https://api.deepseek.com",
-            },
-        }
-    })
-    tools = await client.get_tools()
-    for tool in tools:
-        if tool.name == name:
-            return tool
-    raise ValueError(f"Tool not found: {name}")
-
-
-def print_result(result):
-    if isinstance(result, str):
-        try:
-            parsed = json.loads(result)
-            print(json.dumps(parsed, ensure_ascii=False, indent=2))
-        except (json.JSONDecodeError, TypeError):
-            print(result[:3000])
-    elif isinstance(result, (list, dict)):
-        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    else:
-        print(str(result)[:3000])
+TOOL_NAME = "search_pages"
+TOOL_ARGS = {"question": "artist 表和 album 表的结构和列定义"}
 
 
 async def main():
-    args = {"question": "artist 表和 album 表的结构和列定义"}
     print("=" * 60)
-    print(f"TOOL: search_pages")
-    print(f"ARGS: {json.dumps(args, ensure_ascii=False)}")
+    print(f"TOOL: {TOOL_NAME}")
+    print(f"ARGS: {TOOL_ARGS}")
     print("=" * 60)
     print()
 
-    tool = await get_llmwiki_tool("search_pages")
-    result = await tool.ainvoke(args)
+    tool = await get_llmwiki_tool(TOOL_NAME)
+    result = await tool.ainvoke(TOOL_ARGS)
     print_result(result)
 
 
