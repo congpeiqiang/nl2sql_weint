@@ -117,5 +117,5 @@ Expected EA: ~45.3% — hallucination issues, high latency (3x slower), missing 
 1. **Start with hybrid**: Most cost-effective for production use
 2. **Upgrade reasoning agents first**: If accuracy is low, upgrade Schema Linking and Query Plan to reasoning models before upgrading generation agents
 3. **Monitor error patterns**: If generation agents produce many syntax errors → upgrade to better model. If they produce logically wrong SQL → upgrade the Query Plan agent
-4. **Cache schema wiki**: Once compiled via llmwiki, reuse across queries — the Schema Linking cost drops significantly
+4. **缓存 MDL**: 通过 `wren context build` 构建后跨查询复用 — the Schema Linking cost drops significantly
 5. **Track correction frequency**: If >50% of queries enter the correction loop → upgrade the Query Plan agent (better initial plans reduce correction needs)

@@ -24,6 +24,33 @@ class Settings(BaseSettings):
     LOG_FILE: str = os.getenv("LOG_FILE", "agentic_rag.log")
     ENABLE_DETAILED_LOGGING: bool = os.getenv("ENABLE_DETAILED_LOGGING", "true").lower() == "true"
 
+    # MySQL 多数据库配置（支持 _N 后缀）
+    @staticmethod
+    def get_databases() -> list[dict]:
+        """从 .env 读取所有数据库配置，返回列表"""
+        dbs = []
+        i = 1
+        while True:
+            name = os.getenv(f"DB_{i}_NAME")
+            if not name:
+                break
+            dbs.append({
+                "name": name,
+                "host": os.getenv(f"DB_{i}_HOST", "localhost"),
+                "port": int(os.getenv(f"DB_{i}_PORT", "3306")),
+                "user": os.getenv(f"DB_{i}_USER", "root"),
+                "password": os.getenv(f"DB_{i}_PASSWORD", ""),
+            })
+            i += 1
+        return dbs
+
+    # 默认数据库（取 DB_1_* 作为默认值）
+    DB_HOST: str = os.getenv("DB_1_HOST", "localhost")
+    DB_PORT: int = int(os.getenv("DB_1_PORT", "3306"))
+    DB_NAME: str = os.getenv("DB_1_NAME", "")
+    DB_USER: str = os.getenv("DB_1_USER", "root")
+    DB_PASSWORD: str = os.getenv("DB_1_PASSWORD", "")
+
     # LangSmith配置
     LANGSMITH_TRACING: bool = os.getenv("LANGSMITH_TRACING", "false").lower() == "true"
     LANGSMITH_ENDPOINT: str = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
@@ -34,6 +61,7 @@ class Settings(BaseSettings):
     class Config:
         case_sensitive = True
         env_file = ".env"
+        extra = "ignore"  # 允许 .env 中的 DB_N_* 等未定义字段
 
     def validate_configuration(self) -> List[str]:
         """

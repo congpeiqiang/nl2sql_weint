@@ -14,14 +14,14 @@
 │              Schema Knowledge Preparation                            │
 │                                                                      │
 │  ┌─────────────┐   ┌──────────────┐   ┌──────────────┐             │
-│  │ ingest_     │──→│ compile_     │──→│ wiki_status  │             │
-│  │ source      │   │ wiki         │   │ (verify)     │             │
+│  │ ingest_     │──→│ compile_     │──→│ wren context show  │             │
+│  │ (verify)    │
 │  └─────────────┘   └──────────────┘   └──────────────┘             │
 │                                                                      │
-│  Uses: llm-wiki-compiler MCP server                                  │
-│  Purpose: Build structured knowledge wiki from schema docs           │
+│  Uses: wren context show-compiler MCP server                                  │
+│  Purpose: Build MDL from database schema                             │
 └─────────────────────┬───────────────────────────────────────────────┘
-                      │ (if wiki already compiled, skip)
+                      │ (if MDL already built, skip)
                       ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                  PHASE 2: SEQUENTIAL PIPELINE                       │
@@ -29,7 +29,7 @@
 │  Step 1: Schema Linking Agent                                        │
 │  ┌─────────────────────────────────────────────────┐                │
 │  │ Input: Q + db_id                                │                │
-│  │ Process: search_pages → query_wiki               │                │
+│  │ Process: wren context show → wren context show               │                │
 │  │         → CoT schema linking reasoning           │                │
 │  │ Output: Cropped Schema (S)                       │                │
 │  └────────────────────┬────────────────────────────┘                │
@@ -121,7 +121,7 @@
 
 | Condition | Action |
 |-----------|--------|
-| Schema wiki already compiled and up-to-date | → Skip Phase 1 |
+| target/mdl.json exists and schema unchanged | → Skip Phase 1 |
 | Question is trivial (single table, no joins/aggregation) | → Steps 2-3 can be simplified but NOT skipped |
 | SQL succeeds on first attempt | → Skip Phase 3 entirely |
 

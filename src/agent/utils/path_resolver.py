@@ -176,6 +176,34 @@ def _sanitize_chart_result(result: Any, is_chart: bool) -> Any:
     return result
 
 
+def _inject_db_name(tool_name: str, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
+    """将前端选择的 db_name 从 LangGraph configurable 注入到 run_sql 工具调用中。"""
+    if tool_name != "run_sql":
+        return args, kwargs
+
+    # 检查参数中是否已有 db_name
+    if args and len(args) == 1 and isinstance(args[0], dict):
+        if args[0].get("db_name"):
+            return args, kwargs
+    if kwargs.get("db_name"):
+        return args, kwargs
+
+    # 从 LangGraph config 中读取 db_name
+    try:
+        from langgraph.config import get_config
+        config = get_config()
+        db_name = config.get("configurable", {}).get("db_name", "")
+        if db_name:
+            if args and len(args) == 1 and isinstance(args[0], dict):
+                args = ({**args[0], "db_name": db_name},)
+            else:
+                kwargs = {**kwargs, "db_name": db_name}
+    except Exception:
+        pass
+
+    return args, kwargs
+
+
 def wrap_tool(tool: Any) -> Any:
     """Wrap a langchain BaseTool to auto-resolve virtual paths in arguments.
 
@@ -197,6 +225,7 @@ def wrap_tool(tool: Any) -> Any:
         @wraps(original_run)
         def wrapped_run(*args: Any, **kwargs: Any) -> Any:
             new_args, new_kwargs = _resolve_args(args, kwargs)
+            new_args, new_kwargs = _inject_db_name(tool.name, new_args, new_kwargs)
             try:
                 return _sanitize_chart_result(original_run(*new_args, **new_kwargs), is_chart)
             except Exception as e:
@@ -210,6 +239,7 @@ def wrap_tool(tool: Any) -> Any:
         @wraps(original_arun)
         async def wrapped_arun(*args: Any, **kwargs: Any) -> Any:
             new_args, new_kwargs = _resolve_args(args, kwargs)
+            new_args, new_kwargs = _inject_db_name(tool.name, new_args, new_kwargs)
             try:
                 return _sanitize_chart_result(await original_arun(*new_args, **new_kwargs), is_chart)
             except Exception as e:

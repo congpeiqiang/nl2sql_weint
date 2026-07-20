@@ -54,26 +54,26 @@
 
 ---
 
-## 3. MCP 工具手册（`llm-wiki-compiler`）
+## 3. MCP 工具手册（`wren context show-compiler`）
 
 ### 3.1 MCP 工具速查
 
 | MCP 工具 | 使用阶段 | 用途 | 是否需要 LLM |
 |----------|---------|------|-------------|
-| `ingest_source` | Phase 1 | 加载 Schema 文档（DDL、数据字典） | 否 |
-| `compile_wiki` | Phase 1 | 编译结构化 Wiki（提取概念 → 生成页面） | 是 |
-| `search_pages` | Step 1 | 语义搜索相关表/列，**返回完整页面内容** | 是 |
-| `query_wiki` | Step 1 | 自然语言问答（如 FK 关系查询） | 是 |
-| `read_page` | — | 按 slug 读取页面（**仅搜 concepts/ 和 queries/**） | 否 |
-| `wiki_status` | Phase 1 | 检查编译状态、陈旧/孤立页面 | 否 |
-| `lint_wiki` | Phase 1 | 验证 Wiki 质量（断裂链接、重复等） | 否 |
+| `wren context show` | Phase 1 | 加载 Schema 文档（DDL、数据字典） | 否 |
+| `wren context build` | Phase 1 | 构建 MDL（models/* → target/mdl.json） | 是 |
+| `wren context show` | Step 1 | 语义搜索相关表/列，**返回完整页面内容** | 是 |
+| `wren context show` | Step 1 | 自然语言问答（如 FK 关系查询） | 是 |
+| `wren context show` | — | 按 slug 读取页面（**仅搜 concepts/ 和 queries/**） | 否 |
+| `wren context show` | Phase 1 | 检查编译状态、陈旧/孤立页面 | 否 |
+| `wren context validate` | Phase 1 | 验证 MDL 完整性 | 否 |
 
-### 3.2 search_pages 使用要点（关键）
+### 3.2 wren context show 使用要点（关键）
 
-**`search_pages` 返回的 `pages[].body` 已包含页面的完整 markdown 内容**（所有列定义、字段类型、外键关系等），无需额外调用 `read_page`。
+**`wren context show` 返回的 `pages[].body` 已包含页面的完整 markdown 内容**（所有列定义、字段类型、外键关系等），无需额外调用 `wren context show`。
 
 ```json
-// search_pages 返回结构
+// wren context show 返回结构
 {
   "pages": [
     {
@@ -88,17 +88,17 @@
 }
 ```
 
-**常见错误：** 在 `search_pages` 之后再调用 `read_page({ slug: pages[0].slug })`。
-- `read_page` 硬编码搜索目录为 `[concepts/, queries/]`，**不搜索 `entities/`**
-- 当 `search_pages` 返回 entity 页面时（如 `entities/customer-表`），`read_page` 会报 `Page not found`
-- **正确做法：** 直接使用 `search_pages` 返回的 `pages[].body`，不需要二次读取
+**常见错误：** 在 `wren context show` 之后再调用 `wren context show({ slug: pages[0].slug })`。
+- `wren context show` 硬编码搜索目录为 `[concepts/, queries/]`，**不搜索 `entities/`**
+- 当 `wren context show` 返回 entity 页面时（如 `entities/customer-表`），`wren context show` 会报 `Page not found`
+- **正确做法：** 直接使用 `wren context show` 返回的 `pages[].body`，不需要二次读取
 
 ### 3.3 核心使用原则
 
-- **Schema Wiki 复用：** 一次编译，多次查询。同一数据库的所有 NL2SQL 请求共享已编译的 Wiki。
-- **Wiki 更新判断：** 如果用户提到 Schema 有变化，先调用 `wiki_status` 确认是否需要重新 `ingest_source` + `compile_wiki`。
-- **所有 Schema 引用都要有来源：** Schema Linking Agent 输出中应标注 llmwiki 页面 slug 作为来源引用。
-- **不要用 read_page 二次读取：** `search_pages` 已返回完整内容。`read_page` 仅在已知页面在 `concepts/` 或 `queries/` 下且只需读单页时使用。
+- **MDL 复用：** 一次构建，多次查询。同一数据库的所有 NL2SQL 请求共享同一个 MDL。
+- **MDL 更新判断：** 如果 Schema 有变化，先调用 `wren context validate` 确认是否需要重新 `python skills/sql-of-thought/scripts/gen_models_mysql.py` + `wren context build`。
+- **所有 Schema 引用都要有来源：** Schema Linking Agent 输出中应标注 wren context show 页面 slug 作为来源引用。
+- **不要用 wren context show 二次读取：** `wren context show` 已返回完整内容。`wren context show` 仅在已知页面在 `concepts/` 或 `queries/` 下且只需读单页时使用。
 
 ---
 
@@ -118,23 +118,23 @@
 | `wren dry-plan --sql '...'` | Step 5 | 干运行验证 SQL（仅解析，不访问 DB） |
 | `wren memory recall` | Step 7 | 检索相似历史正确查询（辅助纠错） |
 
-### 4.2 MDL 与 llmwiki 的关系
+### 4.2 MDL 与 wren context show 的关系
 
-| 维度 | llmwiki | WrenAI MDL |
+| 维度 | wren context show | WrenAI MDL |
 |------|---------|-----------|
 | 关注点 | Schema 结构文档 | 业务语义层 |
 | 内容 | 表名、列名、FK 关系、数据模式 | 枚举值含义、列单位、指标定义 |
-| 格式 | Markdown Wiki 页面 | YAML/JSON 语义模型 |
+| 格式 | YAML/JSON 语义模型 | 结构化数据 |
 | 生成方式 | LLM 编译源代码 | CLI 自动生成 + 人工丰富 |
 | 在流水线中 | Schema Linking 的主力 | Schema Linking 的增强上下文 |
 
-两者**互补不冲突**：llmwiki 回答"有什么表和列"，MDL 回答"这些表和列在业务上代表什么"。
+两者**互补不冲突**：wren context show 回答"有什么表和列"，MDL 回答"这些表和列在业务上代表什么"。
 
 ### 4.3 核心使用原则
 
 - **首次使用必做 Phase 0：** 新数据库需要 `generate-mdl` → `enrich-context` 建立语义层
 - **日常查询推荐 dry-plan：** 在 SQL 执行前用 `wren dry-plan` 验证，避免无效执行
-- **MDL 不替代 llmwiki：** Schema Linking 仍以 llmwiki 为主，MDL 提供业务语义补充
+- **MDL 不替代 wren context show：** Schema Linking 仍以 wren context show 为主，MDL 提供业务语义补充
 
 ## 5. 混合模型策略
 
@@ -173,7 +173,7 @@
 [数据库返回的结果]
 
 ## 流程追溯
-- Phase 1: Schema Wiki [已就绪/已编译]（N 个页面）
+- Phase 1: WrenAI MDL [已就绪]（N 个模型）
 - Step 1 (Schema Linking): [使用的表] → [LLM 调用次数]
 - Step 2 (Subproblem): [识别到的子句] → [LLM 调用次数]
 - Step 3 (Query Plan): [计划步骤数] → [LLM 调用次数]
@@ -227,7 +227,7 @@
 **处理流程：**
 
 ```
-Phase 1: Schema Wiki 就绪（employees 表已编译）
+Phase 1: WrenAI MDL 就绪（employee_t 模型已构建）
 Step 1: Schema Linking → employees 表，name 列，hire_date 列
 Step 2: Subproblem → {SELECT: "员工姓名和入职日期"}
 Step 3: Query Plan → "1. 读取 employees 表。2. 提取 name 和 hire_date 列。"
@@ -242,7 +242,7 @@ Step 5: 执行成功
 **处理流程：**
 
 ```
-Phase 1: Schema Wiki 就绪（employees, departments 已编译）
+Phase 1: WrenAI MDL 就绪（employee_t, department_t 已构建）
 Step 1: Schema Linking → employees(name, salary, dept_id), departments(id, dept_name)
 Step 2: Subproblem → {SELECT: 员工名+薪资+部门名, JOIN: 通过 dept_id, WHERE: 薪资>部门平均}
 Step 3: Query Plan → "1. 计算每个部门的平均薪资（子查询）。2. JOIN employees 和 departments。3. 筛选薪资>对应部门平均值的员工。"
@@ -264,7 +264,7 @@ Correction Loop (尝试 1):
 | 错误类型 | 处理策略 |
 |---------|---------|
 | 语法错误（`syntax`） | 直接根据 DB 引擎错误信息修正，通常 1 次即可修复 |
-| Schema 链接错误（`schema_link`） | 重新检查 llmwiki 中 FK 定义，验证列名拼写 |
+| Schema 链接错误（`schema_link`） | 重新检查 wren context show 中 FK 定义，验证列名拼写 |
 | Join/聚合逻辑错误 | 需 CoT 诊断，检查 JOIN 条件和 GROUP BY 是否正确 |
 | 意图不匹配（逻辑正确但结果不对） | 重新分析 NL 问题，对比 Query Plan 与实际 SQL |
 
@@ -275,7 +275,7 @@ Correction Loop (尝试 1):
 
 ### 8.3 降级策略
 
-当 llmwiki 不可用时：
+当 wren context show 不可用时：
 
 1. 提示用户手动提供相关表的 DDL 或 Schema 描述
 2. 询问用户涉及的表名和列名

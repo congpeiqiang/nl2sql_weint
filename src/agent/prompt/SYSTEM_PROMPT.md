@@ -44,15 +44,12 @@ Y = LLM(Q, S, C, P, T | θ)
 
 ### Phase 1：Schema 知识准备（预流水线）
 
-**目的：** 确保数据库 Schema 知识库（llmwiki）已就绪。
+**目的：** 确保 WrenAI MDL 已就绪。
 
-使用 `llm-wiki-compiler` MCP 工具链
 
-> **重要：** `search_pages` 返回的 `pages[].body` 已包含页面的**完整 markdown 内容**（所有列定义、字段类型、FK 关系等）。**不要**在 `search_pages` 之后再调用 `read_page`——`read_page` 只能搜索 `concepts/` 和 `queries/` 目录，无法读取 `entities/` 下的表实体页面，会导致 `Page not found` 错误。直接使用 `search_pages` 返回的 `pages[].body` 即可。完成 4 个步骤：`ingest_source` → `compile_wiki` → `wiki_status` → `lint_wiki`。
 
-> **重要逻辑：** 如果目标数据库的 Schema Wiki 已经编译过且状态正常，则跳过此阶段直接进入 Phase 2。判断依据：调用 `wiki_status` 检查编译状态。
+> **重要逻辑：** 如果 WrenAI MDL 已构建且 `wren context validate` 通过，跳过此阶段。
 
-> **注意：** Phase 0（WrenAI MDL）和 Phase 1（llmwiki）是互补的——MDL 提供业务语义（枚举值、单位、指标），llmwiki 提供 Schema 结构文档（表、列、FK 关系）。两者独立运行，不冲突。
 
 ### Phase 2：顺序流水线（主流程）
 
@@ -79,7 +76,7 @@ Y = LLM(Q, S, C, P, T | θ)
 
 使用 `load_skill(name)` **按需加载** Agent 技能。**绝对不要在流程开始时一次性加载所有技能**——这会严重浪费上下文窗口。
 
-**技能名称列表：** `sql-of-thought`（编排器）、`wrenai`（语义层，Phase 0/2.5）、`nl2sql-schema-linking`、`nl2sql-subproblem`、`nl2sql-query-plan`、`nl2sql-sql-generation`、`nl2sql-correction`。
+**技能名称列表：** `sql-of-thought`（编排器）、`nl2sql-schema-linking`、`nl2sql-subproblem`、`nl2sql-query-plan`、`nl2sql-sql-generation`、`nl2sql-correction`。
 
 详细的技能清单、加载时机、模型分配策略和引用文件说明，请参阅记忆文件 `AGENTS.md`。
 
@@ -245,11 +242,9 @@ renderChart({
 [//]: # "> 不要一次性加载所有技能。每一步只加载当前需要的技能。上下文窗口是宝贵的资源。"
 
 [//]: #
-[//]: # "> ⚠️ **llmwiki 是 Schema 的唯一入口**"
 
 [//]: # ">"
 
-[//]: # "> 所有表名、列名、FK 关系都通过 llmwiki 获取。不在 Prompt 中硬编码 Schema 信息。"
 
 [//]: #
 [//]: # "> ⚠️ **纠错从零开始**"

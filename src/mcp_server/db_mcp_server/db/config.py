@@ -43,30 +43,31 @@ class McpSqlConfig:
         self.config = config
 
     @classmethod
-    def from_env(cls) -> "McpSqlConfig":
-        """Build configuration from central :mod:`app.core.config`."""
+    def from_env(cls, db_name: str = "") -> "McpSqlConfig":
+        """从 .env 读取数据库配置。db_name 为空时取第一个，未找到抛异常。"""
         db_type = settings.DB_TYPE
         extra = _parse_kv_config(settings.DB_EXTRA_CONFIG)
+        dbs = settings.get_databases()
 
-        if db_type in ("sqlite", "duckdb"):
-            path = settings.SQLITE_DB_PATH or extra.pop("database_path", "")
-            if not path:
-                raise ValueError(
-                    f"SQLITE_DB_PATH is required when DB_TYPE={db_type}"
-                )
-            config: Dict[str, Any] = {"database_path": path}
-            config.update(extra)
-            return cls(db_type=db_type, config=config)
+        if not dbs:
+            raise ValueError("未在 .env 中配置任何数据库（需要 DB_1_NAME=...）")
 
-        # Base relational config
+        # db_name 为空时取第一个（服务启动时用）
+        target_name = db_name or dbs[0]["name"]
+        target = next((d for d in dbs if d["name"] == target_name), None)
+        if not target:
+            available = [d["name"] for d in dbs]
+            raise ValueError(
+                f"数据库 '{db_name}' 未在 .env 中配置。可用: {available}"
+            )
+
         config = {
-            "host": settings.DB_HOST,
-            "port": settings.DB_PORT,
-            "database": settings.DB_NAME,
-            "user": settings.DB_USER,
-            "password": settings.DB_PASSWORD,
+            "host": target["host"],
+            "port": target["port"],
+            "database": target["name"],
+            "user": target["user"],
+            "password": target["password"],
         }
-        # Drop empty values so extra can cleanly override
         config = {k: v for k, v in config.items() if v}
         config.update(extra)
         return cls(db_type=db_type, config=config)

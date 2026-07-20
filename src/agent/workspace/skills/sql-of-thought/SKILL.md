@@ -40,17 +40,17 @@ description: "触发条件：用户提出需要从数据库中查询数据的问
 | Schema 已变更但 MDL 未更新 | `wren context validate` 报错 | 重新 `generate-mdl` |
 | 用户明确要求 | 用户提到"语义层""MDL""业务上下文" | 按需加载对应 workflow |
 
-> 如果 MDL 已存在且有效，跳过此阶段。Phase 0 和 Phase 1 独立并行——MDL 建立业务语义，llmwiki 建立 Schema 结构文档。
+> 如果 MDL 已存在且有效，跳过此阶段。Phase 0 和 Phase 1 独立并行——MDL 建立业务语义，wren context show 建立 Schema 结构文档。
 
 ### 阶段一：Schema知识准备（流水线前置）
 
-在主流水线执行之前，通过 **llm-wiki-compiler** MCP服务器确保数据库Schema知识可用：
+在主流水线执行之前，通过 **wren context show-compiler** MCP服务器确保数据库Schema知识可用：
 
-1. **导入Schema文档** — 使用 `ingest_source` 加载数据库Schema文档、ER图、数据字典
-2. **编译Wiki** — 使用 `compile_wiki` 提取表和关系的结构化实体/概念页面
-3. **验证状态** — 使用 `wiki_status` 确认所有Schema实体已编译且没有遗漏
+1. **导入Schema文档** — 使用 `wren context show` 加载数据库Schema文档、ER图、数据字典
+2. **构建 MDL** — 使用 `wren context build` 生成 `target/mdl.json`
+3. **验证状态** — 使用 `wren context show` 确认所有Schema实体已编译且没有遗漏
 
-> 如果Schema Wiki已经编译完成，跳过此阶段。
+> 如果 target/mdl.json 已存在且 Schema 无变更，跳过此阶段。
 
 ### 阶段二：顺序流水线（主流程）
 
@@ -59,7 +59,7 @@ description: "触发条件：用户提出需要从数据库中查询数据的问
 ```
 步骤1 → load_skill("nl2sql-schema-linking")
          Schema关联智能体：自然语言问题 → 裁剪后的Schema
-         使用 llmwiki MCP：search_pages、query_wiki 进行表/列发现
+         使用 wren context show MCP：wren context show、wren context show 进行表/列发现
 
 步骤2 → load_skill("nl2sql-subproblem")
          子问题智能体：问题 + Schema → JSON子问题
@@ -135,18 +135,18 @@ description: "触发条件：用户提出需要从数据库中查询数据的问
 
 > 此混合方案可降低约30%成本，同时保持约85%的执行准确率。
 
-## MCP集成：llm-wiki-compiler
+## MCP集成：wren context show-compiler
 
-llmwiki MCP服务器提供Schema知识检索：
+wren context show MCP服务器提供Schema知识检索：
 
 | MCP工具 | 流水线阶段 | 用途 |
 |---------|-----------|------|
-| `ingest_source` | 阶段一 | 加载Schema文档、ER图、数据字典 |
-| `compile_wiki` | 阶段一 | 从导入的Schema源构建结构化Wiki |
-| `search_pages` | 阶段二（步骤1） | 为自然语言问题找到相关表/列 |
-| `query_wiki` | 阶段二（步骤1-2） | 对Schema关系提出有依据的问题 |
-| `wiki_status` | 阶段一 | 检查编译状态和完整性 |
-| `lint_wiki` | 阶段一 | 验证Schema文档质量 |
+| `wren context show` | 阶段一 | 加载Schema文档、ER图、数据字典 |
+| `wren context build` | 阶段一 | 从 models/* 构建 target/mdl.json |
+| `wren context show` | 阶段二（步骤1） | 为自然语言问题找到相关表/列 |
+| `wren context show` | 阶段二（步骤1-2） | 对Schema关系提出有依据的问题 |
+| `wren context show` | 阶段一 | 检查编译状态和完整性 |
+| `wren context show` | 阶段一 | 验证Schema文档质量 |
 
 ### WrenAI 工具（可选增强）
 
@@ -172,7 +172,7 @@ llmwiki MCP服务器提供Schema知识检索：
 （查询人数超过10人的部门中员工的平均薪资）
 
 → 阶段零：检查MDL是否存在 → 不存在则 `wren generate-mdl`（约30秒）
-→ 阶段一：确保HR数据库的Schema Wiki已编译
+→ 阶段一：确保 WrenAI MDL 已构建
 → 步骤1：Schema关联 → 识别 `employees` 和 `departments` 表、`salary` 列、`dept_id` 外键
 → 步骤2：子问题分解 → {"GROUP BY": "department", "HAVING": "COUNT(*) > 10", "SELECT": "AVG(salary)"}
 → 步骤3：查询计划 → "1. 通过dept_id连接employees和departments表。2. 按部门分组。3. 筛选人数>10的组。4. 计算每个符合条件的组的平均薪资。"

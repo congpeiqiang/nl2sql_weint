@@ -66,21 +66,24 @@ class NL2SQLMcpSqlServer:
 
     def __init__(self, config: Optional[McpSqlConfig] = None):
         self._config = config or McpSqlConfig.from_env()
-        self._runner = None
+        self._runner_cache: dict = {}  # db_name → runner
         self._context = _build_tool_context()
         self.mcp = FastMCP("NL2SQL SQL")
         self._register_tools()
 
-    def _get_runner(self):
-        """Lazy-load the SqlRunner instance."""
-        if self._runner is None:
-            runner_cls = _load_runner_class(self._config.db_type)
-            self._runner = runner_cls(**self._config.config)
-        return self._runner
+    def _get_runner(self, db_name: str):
+        """获取指定数据库的 runner，db_name 必传"""
+        if not db_name:
+            raise ValueError("db_name 不能为空——请从前端选择数据库")
+        if db_name not in self._runner_cache:
+            cfg = McpSqlConfig.from_env(db_name)
+            runner_cls = _load_runner_class(cfg.db_type)
+            self._runner_cache[db_name] = runner_cls(**cfg.config)
+        return self._runner_cache[db_name]
 
     def _register_tools(self) -> None:
         @self.mcp.tool()
-        async def run_sql(sql: str) -> Dict[str, Any]:
+        async def run_sql(sql: str, db_name: str = "") -> Dict[str, Any]:
             """执行一条或多条 SQL 语句（以分号 `;` 分隔）。
 
             支持场景：
@@ -96,7 +99,7 @@ class NL2SQLMcpSqlServer:
                 多语句时额外包含 statement_count 和 statements 执行摘要。
             """
             statements = split_sql_statements(sql)
-            runner = self._get_runner()
+            runner = self._get_runner(db_name)
 
             all_results: list = []
             for stmt in statements:
