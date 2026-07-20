@@ -1,0 +1,121 @@
+# jinko_mes_data table
+name: jinko_mes_data_t
+table_reference:
+  table: jinko_mes_data
+columns:
+- name: id
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+  properties:
+    description: 主键ID
+- name: device_code
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 设备编码，炉台号
+- name: puller_batch_no
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 炉次编号
+- name: work_order_no
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 工单号
+- name: puller_start_time
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 开炉时间
+- name: puller_start_info
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 开炉信息
+- name: puller_start_info_exec_times
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 开炉信息执行次数
+- name: puller_start_info_status
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 开炉信息状态, 成功：success, 失败：具体信息
+- name: material_info
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 物料信息
+- name: material_info_exec_times
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 物料信息执行次数
+- name: material_info_status
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 物料信息状态, 成功：success, 失败：具体信息
+- name: crystal_info
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 单晶信息
+- name: crystal_info_exec_times
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 单晶信息执行次数
+- name: crystal_info_status
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 单晶信息状态, 成功：success, 失败：具体信息
+- name: created_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 记录创建时间
+- name: updated_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 记录更新时间
+cached: false
+primary_key: id
+properties:
+  description: 晶科MES数据表

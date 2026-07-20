@@ -27,7 +27,8 @@ async def get_mcp_tools():
                 "llmwiki": {
                     "transport": "stdio",
                     "command": "npx",
-                    "args": ["llm-wiki-compiler", "serve", "--root", "D:\\code_work_space\\llm\\LLM-Wiki-Project\\chinook_autoIncrement"],
+                    # "args": ["llm-wiki-compiler", "serve", "--root", "D:\\code_work_space\\llm\\LLM-Wiki-Project\\chinook_autoIncrement"],
+                    "args": ["llm-wiki-compiler", "serve", "--root", "D:\\code_work_space\\llm\\LLM-Wiki-Project\\aix_report"],
                     # "args": ["llm-wiki-compiler", "serve", "--root", "\\LLM-Wiki-Project\\Chinook_AutoIncrement"],
                     "env": {
                         "LLMWIKI_PROVIDER": "openai",

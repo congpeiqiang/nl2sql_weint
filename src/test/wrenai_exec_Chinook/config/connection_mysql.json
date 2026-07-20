@@ -1,0 +1,8 @@
+{
+  "datasource": "mysql",
+  "host": "mysql-master",
+  "port": 3306,
+  "database": "aix_report",
+  "user": "aoi-dev",
+  "password": "aoi8dev.1234"
+}

@@ -1,0 +1,36 @@
+# algorithm_script table
+name: algorithm_script_t
+table_reference:
+  table: algorithm_script
+columns:
+- name: id
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+- name: stage_type
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: script
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: created_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 创建时间
+- name: updated_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 更新时间
+cached: false
+primary_key: id

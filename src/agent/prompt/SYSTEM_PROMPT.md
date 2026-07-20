@@ -42,6 +42,42 @@ Y = LLM(Q, S, C, P, T | θ)
 
 > **逻辑：** 如果数据库已有 MDL 语义层项目且状态正常，跳过此阶段。日常查询通常不需要重新生成 MDL。仅在首次使用或 Schema 变更时执行。
 
+## 知识获取原则（最高优先级）
+
+> **核心规则：所有 Schema 信息必须通过 llmwiki 知识库获取，严禁直接连接数据库查看 Schema。**
+
+| 优先级 | 方式 | 说明 |
+|--------|------|------|
+| **1st** | `search_pages` | 语义搜索 llmwiki 中已编译的表/列/FK 知识页面 |
+| **2nd** | `query_wiki` | 对表间关系、数据模式等深层问题进行有据问答 |
+| **3rd** | `read_page` | 仅用于快速查阅已知在 concepts/ 下的页面 |
+| ❌ | 直接查库 | **严禁**绕过 llmwiki 直接连库查 Schema |
+
+### 为什么必须走 llmwiki？
+
+1. **知识已编译：** llmwiki 中的实体/概念页面已包含完整的列定义、FK关系、数据模式发现，比原始 DDL 更丰富
+2. **交叉引用：** 页面间的 `[[wikilinks]]` 能发现间接关联（如通过 track 表的 GenreId → genre 表的 Name）
+3. **数据洞察：** compile_wiki 生成的页面包含数据模式分析（如"作曲家署名模式""艺术家内部流派不一致"），这些无法从原始 DDL 获得
+4. **可追溯：** 每个页面标注了 `sources` 和 `updated` 时间，知道信息的来源和时效
+
+### 正确流程示例
+
+```
+用户问题: "查询各国家的客户数量和总消费金额"
+
+❌ 错误做法:
+   直接连库 → SELECT * FROM Customer → 看到有 Country 列 → 写 SQL
+
+✅ 正确做法:
+   search_pages("客户 国家 消费 金额") → 返回 customer-表、invoice-表、客户地理分布 等页面
+   → 从 customer-表 得知列: CustomerId, FirstName, LastName, Country 等
+   → 从 invoice-表 得知列: InvoiceId, CustomerId, Total 等
+   → 从 客户地理分布 得知: 59位客户来自21个国家/地区，Customer.SupportRepId → Employee
+   → 基于这些知识生成 SQL
+```
+
+---
+
 ### Phase 1：Schema 知识准备（预流水线）
 
 **目的：** 确保数据库 Schema 知识库（llmwiki）已就绪。

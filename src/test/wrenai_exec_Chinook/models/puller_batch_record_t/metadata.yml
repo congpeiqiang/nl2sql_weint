@@ -1,0 +1,93 @@
+# puller_batch_record table
+name: puller_batch_record_t
+table_reference:
+  table: puller_batch_record
+columns:
+- name: id
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+  properties:
+    description: 主键ID
+- name: device_code
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 设备编码，炉台号
+- name: puller_batch_no
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 炉次编号
+- name: puller_start_time
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 合炉时间
+- name: puller_stop_time
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 停炉取晶时间
+- name: new_puller_batch
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 是否新炉次，0：否，1：是
+- name: status
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 炉次状态：开炉，运行中，停炉
+- name: puller_data_start_time
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 炉次数据开始时间
+- name: puller_data_end_time
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 炉次数据结束时间
+- name: created_stage
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 炉次创建工步
+- name: created_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 记录创建时间
+- name: updated_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 记录更新时间
+cached: false
+primary_key: id
+properties:
+  description: 炉次记录表

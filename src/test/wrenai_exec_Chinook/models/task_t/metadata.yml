@@ -1,0 +1,77 @@
+# task table
+name: task_t
+table_reference:
+  table: task
+columns:
+- name: id
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+  properties:
+    description: 主键
+- name: name
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 名称
+- name: type
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 任务类型
+- name: status
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 任务状态
+- name: exec_times
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 执行状态
+- name: properties
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: execute_schedule
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 任务执行计划
+- name: cost_seconds
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 任务执行耗时
+- name: created_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 创建时间
+- name: updated_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+  properties:
+    description: 更新时间
+cached: false
+primary_key: id
+properties:
+  description: 设备任务表

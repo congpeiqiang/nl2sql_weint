@@ -1,0 +1,57 @@
+# flyway_schema_history table
+name: flyway_schema_history_t
+table_reference:
+  table: flyway_schema_history
+columns:
+- name: installed_rank
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+- name: version
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: description
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: type
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: script
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: checksum
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: installed_by
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: installed_on
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: execution_time
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: success
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+cached: false
+primary_key: installed_rank
