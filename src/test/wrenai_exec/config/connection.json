@@ -1,0 +1,5 @@
+{
+  "datasource": "duckdb",
+  "url": "D:/code_work_space/llm/nl2sql/src/agent/data/Chinook_Sqlite.sqlite",
+  "format": "sqlite"
+}

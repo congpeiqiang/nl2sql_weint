@@ -1,0 +1,54 @@
+# Chinook Track table
+name: track_t
+table_reference:
+  catalog: ''
+  schema: ''
+  table: Track
+columns:
+- name: TrackId
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+- name: Name
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: AlbumId
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: MediaTypeId
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: GenreId
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: Composer
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: Milliseconds
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+- name: Bytes
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: UnitPrice
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: false
+cached: false
+primary_key: TrackId

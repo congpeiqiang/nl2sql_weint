@@ -1,0 +1,39 @@
+# Chinook random_sales table
+name: random_sales_t
+table_reference:
+  catalog: ''
+  schema: ''
+  table: random_sales
+columns:
+- name: id
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: true
+- name: region
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: product_category
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: sales_amount
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: quantity
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+- name: sale_date
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+cached: false
+primary_key: id

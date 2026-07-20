@@ -1,0 +1,17 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "_buildId": "id_MC81OmFIVnBZMlhrdUp2bG43bmx2TG82VDJacGJ3PT06NWI0OTVlNWQ=",
+  "graphs": {
+    "chat_agent": {
+      "path": "./src/agent/main_agent.py:agent"
+    }
+  },
+  "_deployId": "id_MS81OmFIVnBZMlhrdUp2bG43bmx2TG82VDJacGJ3PT06NWI0OTVlNWQ=",
+  "env": ".env",
+  "_releaseId": "id_Mi81OmFIVnBZMlhrdUp2bG43bmx2TG82VDJacGJ3PT06NWI0OTVlNWQ=",
+  "image_distro": "wolfi",
+  "_versionId": "id_My81OmFIVnBZMlhrdUp2bG43bmx2TG82VDJacGJ3PT06NWI0OTVlNWQ=",
+  "_buildHash": "NC81OmFIVnBZMlhrdUp2bG43bmx2TG82VDJacGJ3PT06NWI0OTVlNWQ="
+}

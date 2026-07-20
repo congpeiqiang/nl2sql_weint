@@ -27,21 +27,13 @@ from mcp_server.db_mcp_server.db.core.settings import settings
 from mcp_server.db_mcp_server.db.sql_runner import RunSqlToolArgs, ToolContext
 
 from mcp_server.db_mcp_server.db.config import McpSqlConfig
+from mcp_server.db_mcp_server.db.multi_sql import split_sql_statements, combine_multi_results, df_to_result as _h_df_to_result
 
 
 # Mapping of database type names to their runner classes.
 _RUNNER_REGISTRY: Dict[str, str] = {
-    "bigquery": "db.engine.bigquery.sql_runner.BigQueryRunner",
-    "clickhouse": "db.engine.clickhouse.sql_runner.ClickHouseRunner",
-    "duckdb": "db.engine.duckdb.sql_runner.DuckDBRunner",
-    "hive": "db.engine.hive.sql_runner.HiveRunner",
-    "mssql": "db.engine.mssql.sql_runner.MSSQLRunner",
-    "mysql": "db.engine.mysql.sql_runner.MySQLRunner",
-    "oracle": "db.engine.oracle.sql_runner.OracleRunner",
-    "postgres": "db.engine.postgres.sql_runner.PostgresRunner",
-    "presto": "db.engine.presto.sql_runner.PrestoRunner",
-    "snowflake": "db.engine.snowflake.sql_runner.SnowflakeRunner",
-    "sqlite": "db.engine.sqlite.sql_runner.SqliteRunner",
+    "mysql": "mcp_server.db_mcp_server.db.engine.mysql.sql_runner.MySQLRunner",
+    "sqlite": "mcp_server.db_mcp_server.db.engine.sqlite.sql_runner.SqliteRunner",
 }
 
 
@@ -69,15 +61,6 @@ def _build_tool_context() -> ToolContext:
     )
 
 
-def _df_to_result(df: pd.DataFrame) -> Dict[str, Any]:
-    """Convert a pandas DataFrame to a JSON-serializable dict."""
-    return {
-        "columns": list(df.columns),
-        "rows": df.to_dict(orient="records"),
-        "row_count": len(df),
-    }
-
-
 class NL2SQLMcpSqlServer:
     """FastMCP server that exposes a unified run_sql tool backed by NL2SQL runners."""
 
@@ -98,18 +81,30 @@ class NL2SQLMcpSqlServer:
     def _register_tools(self) -> None:
         @self.mcp.tool()
         async def run_sql(sql: str) -> Dict[str, Any]:
-            """Execute a SQL query against the configured database.
+            """执行一条或多条 SQL 语句（以分号 `;` 分隔）。
+
+            支持场景：
+            - 单条 SELECT / INSERT / UPDATE / DELETE
+            - 多条语句：`CREATE TABLE ...; INSERT INTO ...; SELECT ...;`
+            - DDL + DML 混合：先建表、再插入数据、最后查询
 
             Args:
-                sql: The SQL query to execute.
+                sql: SQL 语句，多条语句以分号 `;` 分隔
 
             Returns:
-                A dictionary with columns, rows, and row_count.
+                包含 columns、rows、row_count 的字典。
+                多语句时额外包含 statement_count 和 statements 执行摘要。
             """
+            statements = split_sql_statements(sql)
             runner = self._get_runner()
-            args = RunSqlToolArgs(sql=sql)
-            df = await runner.run_sql(args, self._context)
-            return _df_to_result(df)
+
+            all_results: list = []
+            for stmt in statements:
+                args = RunSqlToolArgs(sql=stmt)
+                df = await runner.run_sql(args, self._context)
+                all_results.append((stmt, df))
+
+            return combine_multi_results(all_results)
 
         @self.mcp.tool()
         def get_db_info() -> Dict[str, Any]:

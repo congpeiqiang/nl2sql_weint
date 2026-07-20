@@ -1,5 +1,10 @@
 """MySQL implementation of SqlRunner interface."""
 
+import logging
+
+# 在类的开头添加日志配置
+logger = logging.getLogger(__name__)
+
 import pandas as pd
 
 from mcp_server.db_mcp_server.db.sql_runner import SqlRunner, RunSqlToolArgs, ToolContext
@@ -72,6 +77,7 @@ class MySQLRunner(SqlRunner):
             conn.ping(reconnect=True)
 
             cursor = conn.cursor()
+            logger.info(f"执行sql: {args.sql}")
             cursor.execute(args.sql)
             results = cursor.fetchall()
 

@@ -1,0 +1,19 @@
+# Chinook MediaType table
+name: mediatype_t
+table_reference:
+  catalog: ''
+  schema: ''
+  table: MediaType
+columns:
+- name: MediaTypeId
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+- name: Name
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+cached: false
+primary_key: MediaTypeId

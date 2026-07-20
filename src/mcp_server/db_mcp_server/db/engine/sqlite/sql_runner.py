@@ -16,6 +16,7 @@ class SqliteRunner(SqlRunner):
             database_path: Path to the SQLite database file
         """
         self.database_path = database_path
+# type: ignore  MS8zOmFIVnBZMlhrdUp2bG43bmx2TG82ZFcxalRBPT06MTg0NmZhZDM=
 
     async def run_sql(self, args: RunSqlToolArgs, context: ToolContext) -> pd.DataFrame:
         """Execute SQL query against SQLite database and return results as DataFrame.
@@ -62,3 +63,4 @@ class SqliteRunner(SqlRunner):
         finally:
             cursor.close()
             conn.close()
+# type: ignore  Mi8zOmFIVnBZMlhrdUp2bG43bmx2TG82ZFcxalRBPT06MTg0NmZhZDM=
