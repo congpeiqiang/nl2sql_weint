@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     LANGSMITH_API_KEY: str = os.getenv("LANGSMITH_API_KEY", "")
     LANGSMITH_PROJECT: str = os.getenv("LANGSMITH_PROJECT", "default")
 
+    # Wren 项目地址
+    WREN_PROJECT_PATH: str = os.getenv("WREN_PROJECT_PATH", None)
 
     class Config:
         case_sensitive = True

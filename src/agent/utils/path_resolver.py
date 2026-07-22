@@ -136,42 +136,64 @@ def _is_chart_tool(tool: Any) -> bool:
     keywords = ("chart", "render", "suggestchart", "getschema", "diagnose", "repair")
     return bool(name and any(kw in name.lower() for kw in keywords))
 def _sanitize_chart_result(result: Any, is_chart: bool) -> Any:
-    """将图表 SVG 保存为独立 HTML 文件，返回可打开的 URL。"""
-    print(f"[DEBUG] _sanitize_chart_result called: is_chart={is_chart}, type={type(result).__name__}")
+    """将图表 SVG 转为内嵌 iframe。"""
+    import logging
+    _log = logging.getLogger(__name__)
+    _log.info(f"[CHART] called: is_chart={is_chart}, type={type(result).__name__}")
     if isinstance(result, str):
-        print(f"[DEBUG] result[:80]={result[:80]}")
+        _log.info(f"[CHART] str result[:100]={result[:100]}")
     if not is_chart:
         return result
 
     import re, time
     from pathlib import Path
 
-    def _save_svg_to_file(svg: str) -> str:
+    def _svg_to_data_url(svg: str) -> str:
+        import base64
         svg = svg.strip()
         svg = re.sub(r"</svg>[\s\S]*$", "</svg>", svg)
-
-        charts_dir = Path("D:/code_work_space/llm/huice/008/2026-05-12-nl2sql/nl2sql/src/app/workspace/charts")
-        charts_dir.mkdir(parents=True, exist_ok=True)
-
-        ts = int(time.time() * 1000)
-        filepath = charts_dir / f"chart_{ts}.html"
-
-        html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head><meta charset="UTF-8"><title>Chart</title>
-<style>body{{margin:0;padding:20px;display:flex;justify-content:center;background:#fff}}svg{{max-width:100%;height:auto}}</style>
-</head><body>{svg}</body></html>"""
-        filepath.write_text(html, encoding="utf-8")
-        return filepath.as_uri() + " （点击打开查看图表）"
+        html = f'<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"></head><body style="margin:0;display:flex;justify-content:center;background:#fff">{svg}</body></html>'
+        b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
+        return f'<iframe src="data:text/html;base64,{b64}" width="100%" height="500" style="border:none;border-radius:8px"></iframe>'
 
     if isinstance(result, tuple) and len(result) == 2:
-        content, artifact = result
-        if isinstance(content, str) and "<svg" in content:
-            return (_save_svg_to_file(content), artifact)
+        cnt, artifact = result
+        _log.info(f"[CHART] tuple: content_type={type(cnt).__name__}, has_svg={'<svg' in str(cnt)[:200]}")
+        if isinstance(cnt, str) and "<svg" in cnt:
+            r = _svg_to_data_url(cnt)
+            _log.info(f"[CHART] transformed to iframe[:100]={r[:100]}")
+            return (r, artifact)
+        # Try extracting SVG from list/dict content
+        import re as _re
+        def _extract_svg(data):
+            if isinstance(data, str) and '<svg' in data:
+                m = _re.search(r'<svg[\s\S]*?</svg>', data)
+                return m.group(0) if m else None
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        for v in item.values():
+                            r = _extract_svg(v)
+                            if r:
+                                return r
+            if isinstance(data, dict):
+                for v in data.values():
+                    r = _extract_svg(v)
+                    if r:
+                        return r
+            return None
+        svg_str = _extract_svg(cnt)
+        if svg_str:
+            r = _svg_to_data_url(svg_str)
+            _log.info(f"[CHART] extracted SVG from nested {type(cnt).__name__} → iframe[:100]={r[:100]}")
+            return (r, artifact)
+        _log.warning(f"[CHART] no SVG found in {type(cnt).__name__}: {str(cnt)[:300]}")
         return result
 
     if isinstance(result, str) and "<svg" in result:
-        return _save_svg_to_file(result)
+        r = _svg_to_data_url(result)
+        _log.info(f"[CHART] str → iframe[:100]={r[:100]}")
+        return r
 
     return result
 
@@ -238,8 +260,12 @@ def wrap_tool(tool: Any) -> Any:
     if original_arun is not None:
         @wraps(original_arun)
         async def wrapped_arun(*args: Any, **kwargs: Any) -> Any:
+            import logging
+            _log = logging.getLogger(__name__)
+            _log.info(f"[_arun] {tool.name} called with args={args}")
             new_args, new_kwargs = _resolve_args(args, kwargs)
             new_args, new_kwargs = _inject_db_name(tool.name, new_args, new_kwargs)
+            _log.info(f"[_arun] {tool.name} after inject: args={new_args}, kwargs={new_kwargs}")
             try:
                 return _sanitize_chart_result(await original_arun(*new_args, **new_kwargs), is_chart)
             except Exception as e:

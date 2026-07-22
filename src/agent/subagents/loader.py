@@ -33,6 +33,15 @@ def load_subagent_configs(configs_dir: Path = None) -> List[Dict]:
             print(f"[ERROR] 解析 {yaml_file.name}: {e}")
             continue
 
+        # 支持 system_prompt_file：从文件读取
+        if data.get("system_prompt_file") and not data.get("system_prompt"):
+            prompt_path = Path(__file__).parents[1] / data["system_prompt_file"]
+            if prompt_path.exists():
+                data["system_prompt"] = prompt_path.read_text(encoding="utf-8")
+            else:
+                print(f"[ERROR] {yaml_file.name}: system_prompt_file 不存在: {prompt_path}")
+                continue
+
         required = ["name", "description", "system_prompt", "tools"]
         missing = [k for k in required if not data.get(k)]
         if missing:

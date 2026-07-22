@@ -628,3 +628,173 @@ wren profile add mydb --from-file config/connection.json --no-validate
 | DataFusion | `datafusion` |
 
 > SQLite 无直接连接器，通过 DuckDB `format: sqlite` 读取。
+
+## 十一 为什么中间要加一层 Wren？
+
+| 能力         | 说明                                                         |
+| :----------- | :----------------------------------------------------------- |
+| **语义抽象** | 表名、列名可以起业务友好的名字，底层映射到实际数据库         |
+| **指标计算** | 可以在模型层定义计算指标（如 `total_revenue = price * quantity`），查询时直接用 |
+| **关系管理** | 定义好表之间的外键关系，Wren 自动处理 JOIN                   |
+| **权限控制** | 可以在语义层做列级权限，不同用户看到不同数据                 |
+| **多数据源** | 可以对接 MySQL、PostgreSQL、BigQuery 等，对上层透明          |
+
+### 1.语义抽象 —  在 MDL表名列名映射
+
+`假设 MySQL 里的原始表是这样的：`
+
+```yaml
+-- MySQL 实际表名：t_bl_001
+CREATE TABLE t_bl_001 (
+  f_001 INT,           -- 实际是棒次编号
+  f_002 VARCHAR(20),   -- 实际是设备编码
+  f_003 VARCHAR(10),   -- 实际是当前工步
+  f_004 INT            -- 实际是否完成
+);
+```
+
+`这种表名和列名对业务人员很不友好。通过 MDL 可以这样映射：`
+
+```yaml
+models:
+  - name: crystal_growth_record    # ← 业务友好的模型名
+    tableReference: public.t_bl_001  # ← 映射到实际表
+    columns:
+      - name: ingot_no              # ← 业务友好的列名
+        type: INTEGER
+        sql: f_001                  # ← 映射到实际列
+      - name: device_code
+        type: VARCHAR
+        sql: f_002
+      - name: current_stage
+        type: VARCHAR
+        sql: f_003
+      - name: completed
+        type: INTEGER
+        sql: f_004
+```
+
+`我写的 SQL（业务友好）：`
+
+```yaml
+SELECT ingot_no, device_code, current_stage 
+FROM crystal_growth_record 
+WHERE completed = 1
+```
+
+`Wren 翻译后发给 MySQL 的 SQL：`
+
+```yaml
+SELECT f_001 AS ingot_no, f_002 AS device_code, f_003 AS current_stage
+FROM t_bl_001
+WHERE f_004 = 1
+```
+
+### 2. 指标计算 — 在 MDL 的 `measures` 中定义
+
+`在 MDL 模型文件里，可以定义计算字段：`
+
+```yaml
+# MDL 模型定义
+models:
+  - name: orders
+    columns:
+      - name: price
+        type: DOUBLE
+      - name: quantity
+        type: INTEGER
+    measures:                    # ← 这里自定义计算指标
+      - name: total_revenue
+        type: DOUBLE
+        sql: "price * quantity"  # ← 计算公式
+```
+
+`查询时直接用指标名：`
+
+```yaml
+-- 我写的 SQL
+SELECT total_revenue FROM orders
+
+-- Wren 翻译后发给 MySQL
+SELECT price * quantity AS total_revenue FROM orders
+```
+
+### 3. 关系管理 — 在 MDL 的 `relationships` 中定义
+
+```yaml
+models:
+  - name: crystal_growth_record_t
+    columns:
+      - name: device_code
+        type: VARCHAR
+    relationships:               # ← 定义表间关系
+      - name: device_info
+        type: belongs_to
+        model: device_info_t
+        key: device_code
+```
+
+`查询时自动 JOIN：`
+
+```yaml
+-- 我写的 SQL（不需要写 JOIN）
+SELECT g.device_code, d.area 
+FROM crystal_growth_record_t g 
+LEFT JOIN device_info_t d ON g.device_code = d.stove_no
+
+-- 如果关系定义好了，甚至可以更简洁
+-- Wren 自动处理 JOIN 逻辑
+```
+
+### 4.权限控制 — 在 Wren 服务层配置
+
+`Wren 服务启动时可以配置 **列级权限策略**，比如：`
+
+```yaml
+# Wren 服务配置
+policies:
+  - role: operator
+    allow:
+      models: [crystal_growth_record_t]
+      columns: [ingot_no, device_code, current_stage]  # 只能看这些列
+    deny:
+      columns: [manual_crown_growth_details]            # 敏感列不可见
+```
+
+`不同用户通过 Wren 查同一张表，返回的列不一样。`
+
+```yaml
+# Wren 项目配置
+dataSources:
+  - name: production_db
+    type: mysql
+    host: 10.0.1.100
+    database: aix_report
+  
+  - name: analytics_db
+    type: postgresql
+    host: 10.0.2.200
+    database: dw
+```
+
+### 5.多数据源 — 在 Wren 数据源配置中切换
+
+```yaml
+# Wren 项目配置
+dataSources:
+  - name: production_db
+    type: mysql
+    host: 10.0.1.100
+    database: aix_report
+  
+  - name: analytics_db
+    type: postgresql
+    host: 10.0.2.200
+    database: dw
+```
+
+切换数据源时，MDL 模型不变，只需要改底层数据源指向，查询代码不用改。
+
+## 十二
+
+![image-20260721111301102](C:\Users\congpeiqiang\AppData\Roaming\Typora\typora-user-images\image-20260721111301102.png)
