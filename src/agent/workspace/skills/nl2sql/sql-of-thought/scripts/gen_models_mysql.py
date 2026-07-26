@@ -17,7 +17,6 @@ DB_CONFIG = {
 }
 
 MODELS_DIR = "models"
-RELATIONSHIPS_FILE = "relationships.yml"
 
 TYPE_MAP = {
     "INTEGER": "INTEGER", "INT": "INTEGER", "BIGINT": "INTEGER",
@@ -109,53 +108,5 @@ for table in inspector.get_table_names():
     print(f"  {table.lower()}_t/ ({len(cols)} cols, PK={pk_name}{fk_info})")
 
 engine.dispose()
-
-# ── 生成 relationships.yml ──────────────────────────────────────
-# 重新连接，收集所有外键关系
-engine2 = create_engine(url)
-inspector2 = inspect(engine2)
-
-relationships = []
-for table in inspector2.get_table_names():
-    fks = inspector2.get_foreign_keys(table)
-    for fk in fks:
-        source_model = table.lower() + "_t"
-        target_table = fk["referred_table"]
-        target_model = target_table.lower() + "_t"
-
-        # 跳过自引用外键
-        if source_model == target_model:
-            continue
-
-        # 取第一个约束列（Wren 的 condition 只支持单列等值）
-        col = fk["constrained_columns"][0]
-        referred_col = fk["referred_columns"][0]
-
-        rel = {
-            "name": f"{source_model}_{target_model}",
-            "models": [source_model, target_model],
-            "join_type": "MANY_TO_ONE",
-            "condition": f"{source_model}.{col} = {target_model}.{referred_col}",
-        }
-        relationships.append(rel)
-
-engine2.dispose()
-
-# 去重（同一对表可能有多条 FK，取第一条即可）
-seen = set()
-unique_rels = []
-for r in relationships:
-    key = tuple(sorted(r["models"]))
-    if key not in seen:
-        seen.add(key)
-        unique_rels.append(r)
-
-with open(RELATIONSHIPS_FILE, "w", encoding="utf-8") as f:
-    f.write("# Auto-generated from database foreign keys\n")
-    yaml.dump({"relationships": unique_rels}, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-
-print(f"\nGenerated {len(unique_rels)} relationships in {RELATIONSHIPS_FILE}/")
-for r in unique_rels:
-    print(f"  {r['name']}: {r['condition']}")
-
-print("\nNext: wren context build")
+print(f"\nGenerated models in {MODELS_DIR}/")
+print("Next: wren context build")

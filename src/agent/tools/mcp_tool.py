@@ -38,15 +38,16 @@ def _get_mcp_tools_sync() -> List:
 
     all_tools = []
     servers = {
-        # "mcp-db": {
-        #     "transport": "http",
-        #     "url": "http://localhost:8000/mcp",
-        # },
         "mcp-server-chart": {
             "transport": "stdio",
             "command": "npx",
             "args": ["-p", "semiotic", "semiotic-mcp"]
         },
+        # "antv-chart": {
+        #     "transport": "stdio",
+        #     "command": "npx",
+        #     "args": ["-y", "@antv/mcp-server-chart"]
+        # },
         "wrenai": {
             "transport": "stdio",
             "command": r"D:\code_work_space\llm\nl2sql\.venv\Scripts\wren.EXE",
@@ -111,5 +112,65 @@ __all__ = ['tools']
 
 if __name__ == "__main__":
     print(f"\nTotal tools: {len(tools)}")
-    for tool in tools[:5]:
+    for tool in tools:
         print(f"  - {tool.name}")
+        if tool.name == "generate_line_chart":
+            print(f"Description: {tool.description}")
+            print(f"Args: {tool.args}")
+            # ✅ 正确调用方式：只传 arguments 内容
+            try:
+                result = asyncio.run(asyncio.wait_for(
+                    tool.ainvoke({
+                        "data": [{"time": "2015", "value": 23}, {"time": "2016", "value": 32}],
+                        "title": "测试", "axisXTitle": "X", "axisYTitle": "Y"
+                    }),
+                    timeout=30.0
+                ))
+                print("✅ 成功生成图表:")
+                print(result)
+                # result = asyncio.wait_for(
+                #     tool.ainvoke({
+                #         "data": [
+                #             {"time": "2015", "value": 23},
+                #             {"time": "2016", "value": 32},
+                #             {"time": "2017", "value": 40},
+                #             {"time": "2018", "value": 55}
+                #         ],
+                #         "title": "随时间变化的趋势",
+                #         "axisXTitle": "时间",
+                #         "axisYTitle": "数值",
+                #         "width": 600,
+                #         "height": 400
+                #     }),
+                #     timeout=30.0
+                # )
+                # print("✅ 成功生成图表:")
+                # print(result)
+            except asyncio.TimeoutError:
+                print("❌ 请求超时，请检查本地服务是否响应缓慢")
+            except Exception as e:
+                print(f"❌ 调用异常: {type(e).__name__}: {e}")
+            break
+
+# if __name__ == "__main__":
+#     print(f"\nTotal tools: {len(tools)}")
+#     for tool in tools:
+#         print(f"  - {tool.name}")
+#         if tool.name == "generate_line_chart":
+#             print(f"description:    {tool.description}")
+#             print(f"args:    {tool.args}")
+#             result = asyncio.run(tool.ainvoke({
+#   "data": [
+#     { "time": "2015", "value": 23 },
+#     { "time": "2016", "value": 32 },
+#     { "time": "2017", "value": 40 },
+#     { "time": "2018", "value": 55 }
+#   ],
+#   "title": "随时间变化的趋势",
+#   "axisXTitle": "时间",
+#   "axisYTitle": "数值",
+#   "width": 600,
+#   "height": 400
+# }))
+#             print(result)
+#             break

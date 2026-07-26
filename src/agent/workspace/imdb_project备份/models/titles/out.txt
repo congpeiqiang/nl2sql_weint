@@ -1,0 +1,78 @@
+name: titles_t
+table_reference:
+  table: titles
+columns:
+- name: id
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+  properties:
+    description: IMDb 唯一作品标识 (tt开头7-8位字符串)
+- name: title_type
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: '作品类型: movie/short/tvEpisode/tvSeries/tvMovie/tvMiniSeries/tvSpecial/video/videoGame'
+- name: primary_title
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 主要标题 (通常为原始语言标题)
+- name: original_title
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 原始标题 (可能与primary_title相同)
+- name: is_adult
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 是否成人内容 (0=否, 1=是)
+- name: start_year
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 首映/发布年份
+- name: end_year
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 终映年份 (电视剧/系列使用, 电影通常为NULL)
+- name: runtime_minutes
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 片长(分钟), 电视剧集通常为NULL
+- name: average_rating
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: IMDb加权平均评分(1.0-10.0), 投票数越高越可信
+- name: num_votes
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 用户投票总数
+cached: false
+primary_key: id
+properties:
+  description: IMDb 核心作品表。包含所有电影、短片、电视剧集、电视系列等信息，约1000万+条记录。评分和投票数已从 ratings 表合并到此表。

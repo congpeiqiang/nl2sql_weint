@@ -1,4 +1,5 @@
 {
+  "_comment": "由 start_server.py 启动，python start_server.py",
   "dependencies": [
     "."
   ],
@@ -6,6 +7,9 @@
   "graphs": {
     "chat_agent": {
       "path": "./src/agent/main_agent.py:agent"
+    },
+    "nl2sql_agent": {
+      "path": "./src/agent/nl2sql_agent.py:agent"
     }
   },
   "_deployId": "id_MS81OmFIVnBZMlhrdUp2bG43bmx2TG82VDJacGJ3PT06NWI0OTVlNWQ=",

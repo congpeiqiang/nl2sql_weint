@@ -12,22 +12,22 @@ description: >
 # 工具列表 — 运行时根据名称匹配
 tools:
   # 通用工具
-  - run_sql             # 执行 SQL 查询（直连数据库）
   - renderChart         # 图表生成
   - suggestCharts       # 图表推荐
-  - getSchema           # 获取图表 Schema
-  - get_db_info         # 获取数据库信息
+  # - getSchema           # 获取图表 Schema
+#  - run_sql             # 执行 SQL 查询（直连数据库）
+#  - get_db_info         # 获取数据库信息
   # WrenAI MCP 工具（通过 wren serve mcp 加载）
   - run_sql             # 通过 Wren 语义层执行 SQL 查询（默认 limit=1000，最大 10000）
   - dry_run             # 验证 SQL 语法但不返回数据
-  - dry_plan            # 展开 MDL 语义 SQL 为目标方言 SQL（不连接数据库）
+  - dry_plan            # 基于mdl的sql转为基于真实数据库的sql
   - query_cube          # 运行结构化 Cube（指标）查询，返回聚合数据
-  - get_mdl             # 返回完整 MDL（模型、关系、Cube）JSON
-  - list_models         # 列出可用语义模型及列数
+  - get_mdl             # 返回完整 MDL（模型、关系、Cube）JSON，只是从target/mdl.json中获取数据
+  - list_models         # 列出可用语义模型及列数，一般从target/mdl.json中获取数据
   - describe_model      # 描述模型的列、主键、引用 SQL 和关系
   - list_cubes          # 列出项目中的 Cube 及其度量/维度
   - describe_cube       # 返回 Cube 的完整定义
-  - get_data_source     # 返回项目配置的数据源（SQL 方言）
+  - get_data_source     # 返回项目配置的数据源（SQL 方言），从~/.wren/profiles.yml获取数据
   - list_functions      # 列出数据源可用的 SQL 函数
   - get_instructions    # 返回 knowledge/rules/*.md 中的业务规则
   - recall_queries      # 检索与问题相似的 NL→SQL 示例

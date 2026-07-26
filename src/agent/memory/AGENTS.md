@@ -54,26 +54,26 @@
 
 ---
 
-## 3. MCP 工具手册（`wren context show-compiler`）
+## 3. MCP 工具手册（`WrenAI MCP 工具 show-compiler`）
 
 ### 3.1 MCP 工具速查
 
 | MCP 工具 | 使用阶段 | 用途 | 是否需要 LLM |
 |----------|---------|------|-------------|
-| `wren context show` | Phase 1 | 加载 Schema 文档（DDL、数据字典） | 否 |
-| `wren context build` | Phase 1 | 构建 MDL（models/* → target/mdl.json） | 是 |
-| `wren context show` | Step 1 | 语义搜索相关表/列，**返回完整页面内容** | 是 |
-| `wren context show` | Step 1 | 自然语言问答（如 FK 关系查询） | 是 |
-| `wren context show` | — | 按 slug 读取页面（**仅搜 concepts/ 和 queries/**） | 否 |
-| `wren context show` | Phase 1 | 检查编译状态、陈旧/孤立页面 | 否 |
-| `wren context validate` | Phase 1 | 验证 MDL 完整性 | 否 |
+| `describe_schema` / `get_context` | Phase 1 | 加载 Schema 文档（DDL、数据字典） | 否 |
+| `WrenAI MCP 工具 build`（一次性，MDL已就绪可跳过） | Phase 1 | 构建 MDL（models/* → target/mdl.json） | 是 |
+| `describe_schema` / `get_context` | Step 1 | 语义搜索相关表/列，**返回完整页面内容** | 是 |
+| `describe_schema` / `get_context` | Step 1 | 自然语言问答（如 FK 关系查询） | 是 |
+| `describe_schema` / `get_context` | — | 按 slug 读取页面（**仅搜 concepts/ 和 queries/**） | 否 |
+| `describe_schema` / `get_context` | Phase 1 | 检查编译状态、陈旧/孤立页面 | 否 |
+| `get_data_source` + `list_models`（验证MDL可用性） | Phase 1 | 验证 MDL 完整性 | 否 |
 
-### 3.2 wren context show 使用要点（关键）
+### 3.2 WrenAI MCP 工具 show 使用要点（关键）
 
-**`wren context show` 返回的 `pages[].body` 已包含页面的完整 markdown 内容**（所有列定义、字段类型、外键关系等），无需额外调用 `wren context show`。
+**`describe_schema` / `get_context` 返回的 `pages[].body` 已包含页面的完整 markdown 内容**（所有列定义、字段类型、外键关系等），无需额外调用 `describe_schema` / `get_context`。
 
 ```json
-// wren context show 返回结构
+// WrenAI MCP 工具 show 返回结构
 {
   "pages": [
     {
@@ -88,17 +88,17 @@
 }
 ```
 
-**常见错误：** 在 `wren context show` 之后再调用 `wren context show({ slug: pages[0].slug })`。
-- `wren context show` 硬编码搜索目录为 `[concepts/, queries/]`，**不搜索 `entities/`**
-- 当 `wren context show` 返回 entity 页面时（如 `entities/customer-表`），`wren context show` 会报 `Page not found`
-- **正确做法：** 直接使用 `wren context show` 返回的 `pages[].body`，不需要二次读取
+**常见错误：** 在 `describe_schema` / `get_context` 之后再调用 `WrenAI MCP 工具 show({ slug: pages[0].slug })`。
+- `describe_schema` / `get_context` 硬编码搜索目录为 `[concepts/, queries/]`，**不搜索 `entities/`**
+- 当 `describe_schema` / `get_context` 返回 entity 页面时（如 `entities/customer-表`），`describe_schema` / `get_context` 会报 `Page not found`
+- **正确做法：** 直接使用 `describe_schema` / `get_context` 返回的 `pages[].body`，不需要二次读取
 
 ### 3.3 核心使用原则
 
 - **MDL 复用：** 一次构建，多次查询。同一数据库的所有 NL2SQL 请求共享同一个 MDL。
-- **MDL 更新判断：** 如果 Schema 有变化，先调用 `wren context validate` 确认是否需要重新 `python skills/sql-of-thought/scripts/gen_models_mysql.py` + `wren context build`。
-- **所有 Schema 引用都要有来源：** Schema Linking Agent 输出中应标注 wren context show 页面 slug 作为来源引用。
-- **不要用 wren context show 二次读取：** `wren context show` 已返回完整内容。`wren context show` 仅在已知页面在 `concepts/` 或 `queries/` 下且只需读单页时使用。
+- **MDL 更新判断：** 如果 Schema 有变化，先调用 `get_data_source` + `list_models`（验证MDL可用性） 确认是否需要重新 `python skills/sql-of-thought/scripts/gen_models_mysql.py` + `WrenAI MCP 工具 build`（一次性，MDL已就绪可跳过）。
+- **所有 Schema 引用都要有来源：** Schema Linking Agent 输出中应标注 WrenAI MCP 工具 show 页面 slug 作为来源引用。
+- **不要用 WrenAI MCP 工具 show 二次读取：** `describe_schema` / `get_context` 已返回完整内容。`describe_schema` / `get_context` 仅在已知页面在 `concepts/` 或 `queries/` 下且只需读单页时使用。
 
 ---
 
@@ -113,14 +113,14 @@
 |------|---------|------|
 | `wren generate-mdl` | Phase 0 | 从数据库 Schema 自动生成 MDL 语义模型 |
 | `wren enrich-context` | Phase 0 | 为 MDL 添加业务上下文（枚举值、单位、指标） |
-| `wren context build` | Phase 0 | 构建 MDL 项目 |
-| `wren context show` | Step 1 | 查看 MDL 语义模型（增强 Schema Linking） |
+| `WrenAI MCP 工具 build`（一次性，MDL已就绪可跳过） | Phase 0 | 构建 MDL 项目 |
+| `describe_schema` / `get_context` | Step 1 | 查看 MDL 语义模型（增强 Schema Linking） |
 | `wren dry-plan --sql '...'` | Step 5 | 干运行验证 SQL（仅解析，不访问 DB） |
-| `wren memory recall` | Step 7 | 检索相似历史正确查询（辅助纠错） |
+| ``recall_queries`` | Step 7 | 检索相似历史正确查询（辅助纠错） |
 
-### 4.2 MDL 与 wren context show 的关系
+### 4.2 MDL 与 WrenAI MCP 工具 show 的关系
 
-| 维度 | wren context show | WrenAI MDL |
+| 维度 | WrenAI MCP 工具 show | WrenAI MDL |
 |------|---------|-----------|
 | 关注点 | Schema 结构文档 | 业务语义层 |
 | 内容 | 表名、列名、FK 关系、数据模式 | 枚举值含义、列单位、指标定义 |
@@ -128,13 +128,13 @@
 | 生成方式 | LLM 编译源代码 | CLI 自动生成 + 人工丰富 |
 | 在流水线中 | Schema Linking 的主力 | Schema Linking 的增强上下文 |
 
-两者**互补不冲突**：wren context show 回答"有什么表和列"，MDL 回答"这些表和列在业务上代表什么"。
+两者**互补不冲突**：WrenAI MCP 工具 show 回答"有什么表和列"，MDL 回答"这些表和列在业务上代表什么"。
 
 ### 4.3 核心使用原则
 
 - **首次使用必做 Phase 0：** 新数据库需要 `generate-mdl` → `enrich-context` 建立语义层
-- **日常查询推荐 dry-plan：** 在 SQL 执行前用 `wren dry-plan` 验证，避免无效执行
-- **MDL 不替代 wren context show：** Schema Linking 仍以 wren context show 为主，MDL 提供业务语义补充
+- **日常查询推荐 dry-plan：** 在 SQL 执行前用 `dry_plan` 验证，避免无效执行
+- **MDL 不替代 WrenAI MCP 工具 show：** Schema Linking 仍以 WrenAI MCP 工具 show 为主，MDL 提供业务语义补充
 
 ## 5. 混合模型策略
 
@@ -218,6 +218,75 @@
 
 ---
 
+## 8. 安全规则（只读约束）
+
+### 8.1 核心规则
+本 Agent **只能执行 SELECT 查询**。严禁生成或执行任何 DML（INSERT/UPDATE/DELETE/REPLACE）或 DDL（DROP/ALTER/CREATE/TRUNCATE/RENAME）语句。
+
+### 8.2 调用 run_sql 前必须校验（方案二：SQL 解析校验）
+
+在调用 `run_sql` 工具之前，**必须**对 SQL 进行校验，确保只包含 SELECT 语句。使用以下方法之一：
+
+**方法 A（推荐）：sqlparse 解析校验**
+```python
+import sqlparse
+
+def validate_readonly(sql: str):
+    parsed = sqlparse.parse(sql)
+    for stmt in parsed:
+        stmt_type = stmt.get_type()  # 返回 'SELECT', 'INSERT', 'UPDATE' 等
+        if stmt_type != 'SELECT':
+            raise PermissionError(f"只允许 SELECT 查询，检测到 {stmt_type} 语句")
+    return sql
+```
+
+**方法 B（备选）：正则校验**
+```python
+import re
+
+BLOCKED_KEYWORDS = [
+    r'\bINSERT\b', r'\bUPDATE\b', r'\bDELETE\b',
+    r'\bDROP\b', r'\bALTER\b', r'\bCREATE\b',
+    r'\bTRUNCATE\b', r'\bREPLACE\b', r'\bRENAME\b',
+]
+
+def validate_readonly(sql: str):
+    clean = re.sub(r"'[^']*'", '', sql)
+    clean = re.sub(r'"[^"]*"', '', clean)
+    for pattern in BLOCKED_KEYWORDS:
+        if re.search(pattern, clean, re.IGNORECASE):
+            raise PermissionError(f"只允许 SELECT 查询，检测到禁止关键字: {pattern}")
+    return sql
+```
+
+**调用流程：**
+```
+生成 SQL → validate_readonly(sql) → dry_run(sql) → run_sql(sql)
+```
+
+### 8.3 违规后果
+违反只读规则将导致：
+1. 数据库可能被破坏
+2. 系统安全审计失败
+3. 该次查询立即终止，并向上报错
+
+### 8.4 取消任务规则（强制）
+
+nl2sql 子智能体**不得主动请求主智能体取消当前任务**。
+
+即使遇到以下情况，也不得请求取消：
+- SQL 执行时间过长
+- 查询结果为空或不符合预期
+- 遇到错误需要重试
+
+**正确做法：** 继续执行当前流程，或向主智能体报告状态等待指令。取消决策权完全在用户手中。
+
+### 8.5 用户要求修改数据时的应对
+如果用户要求插入、修改或删除数据，礼貌拒绝并说明：
+> "本系统为只读查询系统，仅支持 SELECT 查询操作，无法执行数据修改。"
+
+---
+
 ## 8. 典型交互示例
 
 ### 7.1 示例 1：简单查询
@@ -264,7 +333,7 @@ Correction Loop (尝试 1):
 | 错误类型 | 处理策略 |
 |---------|---------|
 | 语法错误（`syntax`） | 直接根据 DB 引擎错误信息修正，通常 1 次即可修复 |
-| Schema 链接错误（`schema_link`） | 重新检查 wren context show 中 FK 定义，验证列名拼写 |
+| Schema 链接错误（`schema_link`） | 重新检查 WrenAI MCP 工具 show 中 FK 定义，验证列名拼写 |
 | Join/聚合逻辑错误 | 需 CoT 诊断，检查 JOIN 条件和 GROUP BY 是否正确 |
 | 意图不匹配（逻辑正确但结果不对） | 重新分析 NL 问题，对比 Query Plan 与实际 SQL |
 
@@ -275,7 +344,7 @@ Correction Loop (尝试 1):
 
 ### 8.3 降级策略
 
-当 wren context show 不可用时：
+当 WrenAI MCP 工具 show 不可用时：
 
 1. 提示用户手动提供相关表的 DDL 或 Schema 描述
 2. 询问用户涉及的表名和列名

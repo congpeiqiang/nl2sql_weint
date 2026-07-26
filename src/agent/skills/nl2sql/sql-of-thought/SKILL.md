@@ -1,188 +1,190 @@
 ---
 name: sql-of-thought
-description: "触发条件：用户提出需要从数据库中查询数据的问题；用户希望将自然语言转换为SQL；用户提到NL2SQL、Text-to-SQL或自然语言数据库查询；用户需要使用自然语言问题来分析、查询或提取数据库中的数据。跳过条件：用户直接编写SQL而不需要自然语言输入；用户要求执行数据库管理任务（备份、迁移等）；用户询问NoSQL或非SQL数据库操作。"
+description: "触发：用户提出数据库查询问题。三种策略：(A)标准流水线-复杂多表JOIN/聚合/窗口；(B)快速通道-单表/简单筛选/计数；(C)Cube通道-预定义指标。内部集成WrenAI语义层工具实现Schema自动发现。跳过：NoSQL/非SQL操作。"
 ---
 
-# SQL-of-Thought：智能体NL2SQL编排器
+# SQL-of-Thought：智能体 NL2SQL 编排器（策略增强版）
 
 ## 概述
 
-本技能编排 **SQL-of-Thought** 智能体流水线，用于将自然语言问题转换为可执行的SQL查询。该框架将NL2SQL任务分解为专门化的智能体阶段，按照顺序流水线执行，并包含一个条件性的分类引导纠错循环。
+本技能编排 NL2SQL 流水线，支持**三种执行策略**，根据问题复杂度自动选择最优路径。
+集成 **WrenAI MCP 语义层**实现 Schema 自动发现，大幅减少 token 消耗。
+流水线中的工具全部通过 MCP 提供，子智能体直接调用。
 
-基于研究论文 *"SQL-of-Thought: Multi-agentic Text-to-SQL with Guided Error Correction"*（Chaturvedi, Chadha, Bindschaedler, 2025），在Spider基准测试上达到 **91.59%的执行准确率**。
+基于 *"SQL-of-Thought: Multi-agentic Text-to-SQL with Guided Error Correction"* (Chaturvedi et al., 2025)。
 
-## 使用场景
+---
 
-- 用户提出需要数据库查询的自然语言问题
-- 用户希望将业务问题转换为SQL
-- 用户需要用通俗语言从数据库中提取/分析数据
-- 任何需要NL → SQL转换的场景
+## 策略决策（入口）
 
-## 架构：Y = LLM(Q, S, C, P, T | θ)
-
-其中：
-- **Q** = 自然语言问题
-- **S** = 关联的Schema（相关表/列）
-- **C** = 子句级子问题（JSON键值对）
-- **P** = 查询计划（程序化的、逐步的）
-- **T** = 错误分类体系（用于CoT引导的错误纠正）
-- **θ** = LLM参数
-
-## 流水线工作流程
-
-### 阶段零（可选）：WrenAI 语义层准备
-
-**决策逻辑：** 执行以下检查，满足任一条件则加载 `load_skill("wrenai")`：
-
-| 条件 | 检查方式 | 动作 |
-|------|---------|------|
-| 首次使用该数据库 | `wren profile list` 无匹配 profile | 执行完整 Phase 0：`generate-mdl` → `enrich-context` |
-| Schema 已变更但 MDL 未更新 | `wren context validate` 报错 | 重新 `generate-mdl` |
-| 用户明确要求 | 用户提到"语义层""MDL""业务上下文" | 按需加载对应 workflow |
-
-> 如果 MDL 已存在且有效，跳过此阶段。Phase 0 和 Phase 1 独立并行——MDL 建立业务语义，wren context show 建立 Schema 结构文档。
-
-### 阶段一：Schema知识准备（流水线前置）
-
-在主流水线执行之前，通过 **wren context show-compiler** MCP服务器确保数据库Schema知识可用：
-
-1. **导入Schema文档** — 使用 `wren context show` 加载数据库Schema文档、ER图、数据字典
-2. **构建 MDL** — 使用 `wren context build` 生成 `target/mdl.json`
-3. **验证状态** — 使用 `wren context show` 确认所有Schema实体已编译且没有遗漏
-
-> 如果 target/mdl.json 已存在且 Schema 无变更，跳过此阶段。
-
-### 阶段二：顺序流水线（主流程）
-
-严格按照以下顺序执行，根据需要加载每个智能体技能：
+收到用户问题后，按以下优先级选择策略：
 
 ```
-步骤1 → load_skill("nl2sql-schema-linking")
-         Schema关联智能体：自然语言问题 → 裁剪后的Schema
-         使用 wren context show MCP：wren context show、wren context show 进行表/列发现
-
-步骤2 → load_skill("nl2sql-subproblem")
-         子问题智能体：问题 + Schema → JSON子问题
-         （WHERE、GROUP BY、JOIN、DISTINCT、ORDER BY、HAVING、EXCEPT、LIMIT、UNION）
-
-步骤3 → load_skill("nl2sql-query-plan")
-         查询计划智能体：问题 + Schema + 子问题 → 程序化计划（不含SQL）
-         需要思维链（Chain-of-Thought）推理
-
-步骤4 → load_skill("nl2sql-sql-generation")
-         SQL生成智能体：问题 + 查询计划 → 可执行SQL
-         后处理：去除尾部多余分号、自然语言片段
-
-步骤5（可选）→ WrenAI 干运行验证
-
-         决策逻辑：
-         - 如果 MDL 项目存在（Phase 0 已完成）→ load_skill("wrenai")，执行 `wren dry-plan --sql '...'` 验证
-         - 如果 MDL 不存在 → 跳过，直接进入步骤6
-
-         验证通过 → 进入步骤6
-         验证失败 → 根据 `dry-plan` 返回的语义错误修正 SQL，重新验证（最多2次），仍失败则标记后进入步骤6
-
-步骤6 → 对数据库执行SQL
-         如果成功 → 返回结果，流水线结束
-         如果出错 → 进入阶段三
+用户问题
+    │
+    ├─ 匹配 Cube 指标? 
+    │   → 策略C: Cube通道
+    │     调用: list_cubes → describe_cube → query_cube
+    │     跳过: 全部 NL2SQL 流水线步骤
+    │
+    ├─ 单表/简单筛选/COUNT(*)/ORDER BY LIMIT?
+    │   → 策略B: 快速通道
+    │     步骤: get_context + recall_queries → SQL生成 → dry_run → run_sql
+    │     跳过: subproblem/query-plan/correction
+    │
+    └─ 多表JOIN/聚合/子查询/窗口函数?
+        → 策略A: 标准流水线
+          完整 sql-of-thought 流水线 + WrenAI 语义层
 ```
 
-### 阶段三：引导式纠错循环（条件执行）
+### 策略A vs B vs C 对比
 
-仅在SQL执行失败时调用。循环执行直到成功或达到最大尝试次数：
+| 维度 | 策略A (标准) | 策略B (快速) | 策略C (Cube) |
+|------|:-----------:|:-----------:|:-----------:|
+| 调用WrenAI工具 | 3-5次 | 2次 | 2-3次 |
+| 执行Ns2sql子步骤 | 4-6步 | 1-2步 | 0步 |
+| token消耗 | 2000-6000 | 800-1500 | 500-1000 |
+| 耗时 | 15-30s | 5-10s | 3-8s |
 
-```
-步骤7 → 如果 WrenAI MDL 可用，先执行 `wren memory recall --question "<原始NL问题>"`
-         检索相似历史正确 SQL 作为参考（不替代纠错推理，仅辅助）
+---
 
-步骤8 → load_skill("nl2sql-correction")
-         纠错计划智能体：失败的SQL + 错误信息 + 分类体系 + memory recall 结果 → CoT纠错计划
-         纠错SQL智能体：纠错计划 → 重新生成的SQL
+## 策略A：标准流水线（复杂查询）
 
-步骤9 → 重新执行纠正后的SQL
-         如果成功 → 返回结果
-         如果出错 → 重复步骤8（最多3次尝试）
-```
+### Phase 0: 语义层 Schema 发现（WrenAI MCP）
 
-## 核心设计原则
-
-1. **分阶段推理是强制要求**：始终在生成SQL之前生成查询计划——不可跳过
-2. **查询计划智能体不得生成SQL**：它只生成程序化计划
-3. **温度 = 0**：所有LLM调用使用温度0以获得确定性、可靠的输出
-4. **纠错尝试之间不共享历史**：每次纠错从零开始——不使用草稿本
-5. **单一纠错流水线**：切勿为每种错误类型使用多个智能体（会导致冲突编辑）
-6. **简洁的错误代码优于冗长描述**：使用分类代码（如 `join_missing`）而非长文本
-7. **引导式纠错优于无引导纠错**：分类体系 + CoT > 仅凭原始执行反馈
-
-## 失败的消融实验（避免以下模式）
-
-- ❌ 自由格式分类体系 → 直接到SQL智能体（LLM不擅长无引导调试）
-- ❌ 温度 > 0（降低计划忠实度，更多无效连接）
-- ❌ JOIN/LIMIT的子句特定提示规则（膨胀上下文，分散模型注意力）
-- ❌ 每种错误类型使用多个修复智能体 → 聚合（编辑冲突、SQL不连贯）
-- ❌ 携带历史的共享草稿本（Schema偏移、重复、成本增加）
-
-## 混合模型策略（成本优化）
-
-| 智能体类型 | 推荐模型级别 | 原因 |
-|------------|-------------|------|
-| Schema关联 | 推理模型（如 Claude Opus、GPT-5） | 需要深度Schema理解 |
-| 查询计划 | 推理模型 | 需要CoT推理生成计划 |
-| 纠错计划 | 推理模型 | 需要分类引导的诊断推理 |
-| 子问题分解 | 非推理模型（如 GPT-4o） | 结构化JSON分解，推理需求较低 |
-| SQL生成 | 非推理模型 | 计划到SQL的合成，遵循明确指令 |
-| 纠错SQL | 非推理模型 | 纠错计划已经是结构化指导 |
-
-> 此混合方案可降低约30%成本，同时保持约85%的执行准确率。
-
-## MCP集成：wren context show-compiler
-
-wren context show MCP服务器提供Schema知识检索：
-
-| MCP工具 | 流水线阶段 | 用途 |
-|---------|-----------|------|
-| `wren context show` | 阶段一 | 加载Schema文档、ER图、数据字典 |
-| `wren context build` | 阶段一 | 从 models/* 构建 target/mdl.json |
-| `wren context show` | 阶段二（步骤1） | 为自然语言问题找到相关表/列 |
-| `wren context show` | 阶段二（步骤1-2） | 对Schema关系提出有依据的问题 |
-| `wren context show` | 阶段一 | 检查编译状态和完整性 |
-| `wren context show` | 阶段一 | 验证Schema文档质量 |
-
-### WrenAI 工具（可选增强）
-
-| 工具 | 流水线阶段 | 用途 | 触发条件 |
-|------|-----------|------|---------|
-| `wren generate-mdl` | 阶段零 | 从数据库生成MDL语义模型 | 首次使用或Schema变更 |
-| `wren enrich-context` | 阶段零 | 添加业务上下文 | MDL生成后 |
-| `wren dry-plan` | 步骤5 | 干运行验证SQL语义 | MDL已存在 |
-| `wren memory recall` | 步骤7 | 检索相似历史正确查询 | 进入纠错循环且MDL可用 |
-
-## 输出格式
-
-最终输出应包含：
-- **生成的SQL查询**（已后处理，无尾部多余分号）
-- **执行结果**（如果数据库可用）
-- **流水线追踪**（执行了哪些步骤，是否应用了纠错）
-- **错误诊断**（如果需要纠错，识别了哪些分类类别）
-
-## 快速入门示例
+> **替代**传统 skill 中的描述搜索步骤。高效且精准。
 
 ```
-用户："Find the average salary of employees in departments with more than 10 people"
-（查询人数超过10人的部门中员工的平均薪资）
-
-→ 阶段零：检查MDL是否存在 → 不存在则 `wren generate-mdl`（约30秒）
-→ 阶段一：确保 WrenAI MDL 已构建
-→ 步骤1：Schema关联 → 识别 `employees` 和 `departments` 表、`salary` 列、`dept_id` 外键
-→ 步骤2：子问题分解 → {"GROUP BY": "department", "HAVING": "COUNT(*) > 10", "SELECT": "AVG(salary)"}
-→ 步骤3：查询计划 → "1. 通过dept_id连接employees和departments表。2. 按部门分组。3. 筛选人数>10的组。4. 计算每个符合条件的组的平均薪资。"
-→ 步骤4：SQL生成 → SELECT d.dept_name, AVG(e.salary) FROM employees e JOIN departments d ON e.dept_id = d.dept_id GROUP BY d.dept_name HAVING COUNT(*) > 10
-→ 步骤5：执行 → 成功 ✓
+Step 0.1: get_data_source()          → 了解SQL方言
+Step 0.2: list_models()              → 可选，了解数据全景
+Step 0.3: get_context(question)      → 语义检索相关模型/列（并行）
+          get_instructions()          → 业务规则约束（并行）
+          recall_queries(question, 3) → 相似查询示例（并行）
+Step 0.4: describe_model(name)       → 对相关模型按需详查（并行）
 ```
 
-## 参考资料
+**关键**：Step 0.3 的三个调用必须**并行**。Step 0.4 的多个 describe_model 必须**并行**。
 
-- [错误分类体系](references/error-taxonomy.md) — 完整的9大类、31子类分类体系
-- [流水线流程](references/pipeline-flow.md) — 详细的流程图及决策逻辑
-- [设计原则](references/design-principles.md) — 核心原则与失败的消融实验教训
-- [混合模型策略](references/hybrid-model-strategy.md) — 成本-性能优化指南
+### Phase 1-N: 传统 SQL-of-Thought 流水线
+
+经过 Phase 0 获得精准 Schema 后，执行标准流水线：
+
+```
+Step 1: nl2sql-schema-linking  → 结合 WrenAI 返回的 Schema 片段，裁剪相关表/列
+Step 2: nl2sql-subproblem      → 分解为子句级子问题
+Step 3: nl2sql-query-plan      → 生成程序化查询计划（CoT推理）
+Step 4: nl2sql-sql-generation  → 合成可执行SQL
+Step 5: dry_run(sql)           → WrenAI 验证SQL
+Step 6: run_sql(sql)           → WrenAI 执行
+Step 7: [可选] nl2sql-correction → 失败时纠错循环
+```
+
+### 完整流程图
+
+```
+用户问题
+  │
+  ├─ Phase 0: WrenAI 语义层
+  │   ├─ get_data_source()
+  │   ├─ list_models() (可选)
+  │   ├─ get_context + get_instructions + recall_queries (并行)
+  │   └─ describe_model * N (并行，按需)
+  │
+  ├─ Phase 1: Schema Linking (传统)
+  │   └─ nl2sql-schema-linking
+  │
+  ├─ Phase 2-3: 规划
+  │   ├─ nl2sql-subproblem
+  │   └─ nl2sql-query-plan
+  │
+  ├─ Phase 4-5: 生成+验证
+  │   ├─ nl2sql-sql-generation
+  │   └─ dry_run(sql)
+  │
+  ├─ Phase 6: 执行
+  │   └─ run_sql(sql)
+  │
+  └─ Phase 7: 纠错（按需）
+      └─ nl2sql-correction
+```
+
+---
+
+## 策略B：快速通道（简单查询）
+
+跳过传统流水线的大部分步骤，直接利用 WrenAI + skill 生成 SQL。
+
+```
+Step 1: recall_queries(question, 2)  → 找相似模板
+Step 2: get_context(question)        → 确认表/列
+Step 3: nl2sql-sql-generation        → 直接生成SQL（跳过linking/subproblem/plan）
+Step 4: dry_run(sql)                 → 验证
+Step 5: run_sql(sql)                 → 执行
+```
+
+**跳过**: nl2sql-schema-linking / nl2sql-subproblem / nl2sql-query-plan / nl2sql-correction
+
+---
+
+## 策略C：Cube通道（预定义指标）
+
+完全不经过 NL2SQL 流水线，直接调用 WrenAI Cube API。
+
+```
+Step 1: list_cubes()                 → 列出可用 Cube
+Step 2: describe_cube(name)          → 获取度量 + 维度
+Step 3: query_cube(                  → 直接查询
+          cube="sales_cube",
+          measures=["total_sales"],
+          dimensions=["region"],
+          time_dimension="order_date:month",
+          filters=["region:in:CN"]
+        )
+```
+
+**优势**: 不需要生成SQL，不需要 dry_run，最省 token。
+
+---
+
+## WrenAI 工具速查
+
+| 工具 | 用途 | 策略 |
+|------|------|:---:|
+| get_context(question) | 语义检索 Schema 片段 | A, B |
+| get_instructions | 业务规则 | A |
+| recall_queries(question) | 相似 NL→SQL 示例 | A, B |
+| describe_model(name) | 模型列/主键/关系 | A |
+| describe_schema | 全 Schema 文本 | A(备选) |
+| list_models | 列出所有模型 | A(可选) |
+| get_data_source | SQL 方言 | A(可选) |
+| dry_run(sql) | 验证 SQL | A, B |
+| run_sql(sql) | 执行 SQL | A, B |
+| dry_plan(sql) | 预览目标方言 SQL | A, B(可选) |
+| list_cubes | 列出 Cube | C |
+| describe_cube(name) | Cube 定义 | C |
+| query_cube | Cube 查询 | C |
+
+---
+
+## 并行调用规则
+
+必须并行的场景：
+1. get_context + get_instructions + recall_queries
+2. 多个 describe_model 
+3. 独立子查询的 run_sql
+
+必须顺序的场景：
+1. describe_model 必须在 get_context 之后
+2. dry_run 必须在 run_sql 之前
+3. schema-linking → subproblem → query-plan → sql-generation 顺序执行
+
+---
+
+## 数据库特定规则
+
+### IMDb (imdb_project)
+- 评分查询: 加 `num_votes > 1000`（可信度阈值）
+- 电影查询: 加 `title_type = 'movie'`
+- 性能: 始终加 LIMIT，先筛选再 JOIN
+- 大数据量: titles 1266万行，names 1550万行，principals 16万行（采样集）
+- 规则: 调用 get_instructions() 获取最新业务规则

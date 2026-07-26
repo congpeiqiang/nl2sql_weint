@@ -47,7 +47,8 @@ def setup_environment():
         "LANGSERVE_GRAPHS": json.dumps(graphs) if graphs else "{}",
         
         # Worker configuration
-        "N_JOBS_PER_WORKER": "3",
+        "N_JOBS_PER_WORKER": "10",
+    "LANGGRAPH_RECURSION_LIMIT": "500",
     })
     
     # Load .env file if exists
