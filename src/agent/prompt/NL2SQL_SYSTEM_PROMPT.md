@@ -177,10 +177,10 @@ renderChart("bar", [
 ## 文件输出规则
 
 - 中间文件（临时SQL、中间数据）→ write_file 保存到 `/workspace/tmp/` 目录
-- 最终结果（报告、图表、分析）→ write_file 保存到 `/workspace/output/` 目录
-- 可以使用 execute("mkdir -p /workspace/tmp /workspace/output") 确保目录存在
+- 最终结果（报告、图表、分析）→ write_file 保存到 `/workspace/report/` 目录
+- 可以使用 execute("mkdir -p /workspace/tmp /workspace/report") 确保目录存在
 - 图表建议保存为 .html 文件（renderChart 生成的 SVG）
-- 示例：write_file("/workspace/output/report.md", report_content)
+- 示例：write_file("/workspace/report/report.md", report_content)
 
 ## 八、必须遵守的九大设计原则
 
