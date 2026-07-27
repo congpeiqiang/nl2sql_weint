@@ -66,8 +66,9 @@ LangGraph API Server (port 2026)
 
 ```
 nl2sql/
-├── start_server.py                # 服务启动脚本
-├── graph.json                     # LangGraph 图注册
+├── start_server.py                # 服务启动脚本（读取 graph.json）
+├── graph.json                     # LangGraph 图注册（start_server.py 使用）
+├── langgraph.json                 # LangGraph 图注册（langgraph dev 使用）
 ├── pyproject.toml                 # 项目依赖
 ├── .env                           # 环境配置
 ├── ARCHITECTURE.md                # 详细架构文档
@@ -82,6 +83,7 @@ nl2sql/
     ├── agent/                     # Agent 核心
     │   ├── main_agent.py          # 主智能体
     │   ├── nl2sql_agent.py        # NL2SQL 子智能体
+    │   ├── checkpointer_factory.py # 自定义 Checkpointer（SqliteSaver）
     │   ├── llms/model.py          # LLM 模型工厂
     │   ├── tools/mcp_tool.py      # MCP 多服务器客户端
     │   ├── prompt/                # 系统提示词
@@ -179,16 +181,88 @@ LANGSMITH_PROJECT=nl2sql
 WREN_PROJECT_PATH=D:\path\to\wrenai_project
 ```
 
-### graph.json — LangGraph 图注册
+### graph.json / langgraph.json — LangGraph 图注册与持久化
+
+两个文件内容一致，分别由不同入口读取：
+- `start_server.py` → 读 `graph.json`
+- `langgraph dev` → 读 `langgraph.json`
 
 ```json
 {
   "graphs": {
     "chat_agent":   { "path": "./src/agent/main_agent.py:agent" },
     "nl2sql_agent": { "path": "./src/agent/nl2sql_agent.py:agent" }
+  },
+  "checkpointer": {
+    "backend": "custom",
+    "path": "./src/agent/checkpointer_factory.py:checkpointer"
+  },
+  "env": ".env"
+}
+```
+
+#### 自定义 Checkpointer
+
+`langgraph_api` 默认使用内存（`InMemorySaver`）做 checkpoint 持久化。如需替换为 SQLite / PostgreSQL / Redis 等后端，通过 `checkpointer` 字段配置即可，**不需要修改任何第三方包源码**。
+
+**原理**：CLI 启动时将 `checkpointer` 配置序列化为 `LANGGRAPH_CHECKPOINTER` 环境变量 → API 层的 `_adapter.collect_checkpointer_from_env()` 自动加载并注入到所有 graph 中。
+
+**关键约束**：graph 定义中（如 `main_agent.py`）**不能**传 `checkpointer=` 参数给 `create_deep_agent()`，否则 `langgraph dev` 模式会拒绝加载（`local_dev` 校验机制）。checkpointer 必须且只能在 API 层配置。
+
+**checkpointer_factory.py 示例**（SQLite）：
+
+```python
+import sqlite3
+from pathlib import Path
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+_CHECKPOINT_DB = str(Path(__file__).parent / "workspace" / "checkpoints.sqlite")
+_conn = sqlite3.connect(_CHECKPOINT_DB, check_same_thread=False)
+checkpointer = SqliteSaver(_conn)
+```
+
+导出的变量可以是：
+- `BaseCheckpointSaver` 实例（如上例）
+- 返回 `BaseCheckpointSaver` 的无参函数
+- 异步上下文管理器（yield `BaseCheckpointSaver`）
+
+**自定义 checkpointer 需要实现的方法**：
+
+| 方法 | 必需 | 说明 |
+|------|------|------|
+| `aget_tuple` | ✅ | 获取最新 checkpoint |
+| `aput` | ✅ | 写入 checkpoint |
+| `aput_writes` | ✅ | 写入中间结果 |
+| `aget` | ✅ | 按 ID 获取 checkpoint |
+| `alist` | ✅ | 列出 checkpoint 历史 |
+| `adelete_thread` | 推荐 | 删除 thread（缺失则 `DELETE /threads/<id>` 不可用） |
+| `adelete_for_runs` | 推荐 | 按 run_id 清理（缺失则 `rollback` 策略不可用） |
+| `acopy_thread` | 可选 | 复制 thread（缺失时使用通用回退实现） |
+| `aprune` | 可选 | 历史裁剪（缺失时旧 checkpoint 会持续累积） |
+
+#### 自定义 Store
+
+同样机制支持自定义长期记忆 Store（替换默认的 `InMemoryStore`）：
+
+```json
+{
+  "store": {
+    "path": "./src/agent/store_factory.py:store"
   }
 }
 ```
+
+**store_factory.py 示例**：
+
+```python
+from langgraph.store.memory import InMemoryStore
+
+store = InMemoryStore()
+```
+
+导出的变量可以是 `BaseStore` 实例、无参工厂函数、或异步上下文管理器。
+
+> **注意**：自定义 Store 会替换默认的 Postgres + pgvector Store，向量搜索和 TTL 等功能可能不可用，取决于自定义实现。
 
 ### nl2sql.yaml — 子智能体配置
 
