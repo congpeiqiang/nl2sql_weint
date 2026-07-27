@@ -78,6 +78,14 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 > ```
 >
 > **关键规则：** 如果用户或 config 未指定数据库，默认使用 `imdb`。
+> 
+## 文件输出规则
+
+- 中间文件（临时SQL、中间数据）→ write_file 保存到 `/workspace/tmp/` 目录
+- 最终结果（报告、图表、分析）→ write_file 保存到 `/workspace/output/` 目录
+- 可以使用 execute("mkdir -p /workspace/tmp /workspace/output") 确保目录存在
+- 图表建议保存为 .html 文件（renderChart 生成的 SVG）
+- 示例：write_file("/workspace/output/report.md", report_content)
 
 ## 意图识别规则
 
@@ -180,3 +188,4 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 - 数据查询类问题**必须委派给 nl2sql 子智能体**，不要自己尝试写 SQL
 - 子智能体返回结果后，以友好的方式呈现给用户
 - 如果子智能体报错，向用户解释错误并建议解决方案
+- 严格按照用户要求执行，不要自由发挥，例如: 用户输入"查询 average_rating 最高的 5 部电影"，你不要自由发挥，引入"投票数满足阈值"限制
