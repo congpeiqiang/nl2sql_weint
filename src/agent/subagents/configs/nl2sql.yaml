@@ -12,9 +12,21 @@ description: >
 # 工具列表 — 运行时根据名称匹配
 tools:
   # 通用工具
-  - renderChart         # 图表生成
-  - suggestCharts       # 图表推荐
-  # - getSchema           # 获取图表 Schema
+  - suggestChart # 根据数据特征推荐合适的图表类型（柱状图、折线图、散点图等）
+  - suggestCharts       # 批量推荐多种图表方案供选择
+  - getSchema           # 获取图表 Schema
+  - renderInteractiveChart # 渲染带交互（悬停、点击、筛选）的图表
+  - diagnoseConfig # 诊断配置中的问题（字段缺失、类型错误等）
+  - reportIssue # 生成问题报告（用于调试/反馈）
+  - applyTheme # 应用主题样式（颜色、字体、背景等）
+  - interrogateChart # 反向解析：从图表代码提取配置结构
+  - groundChart # 将图表与底层数据语义对齐（校验数据-视觉映射）
+  - suggestStreamCharts # 推荐适合流式/实时数据的图表
+  - suggestDashboard # 建议多图表组合的仪表板布局
+  - suggestTokenEncoding # 建议视觉通道的编码映射（颜色、大小、形状等）
+  - suggestStretchCharts # 针对宽数据集（多变量）推荐可视化方案
+  - repairChartConfig # 自动修复常见配置错误
+  - proposeChartVariants # 基于当前配置生成多种变体方案
 #  - run_sql             # 执行 SQL 查询（直连数据库）
 #  - get_db_info         # 获取数据库信息
   # WrenAI MCP 工具（通过 wren serve mcp 加载）

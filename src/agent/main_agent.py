@@ -20,7 +20,10 @@ shell_backend = LocalShellBackend(root_dir=Path(base_dir) / "workspace", inherit
 composite_backend = CompositeBackend(default=shell_backend, routes={"/": file_backend})
 skills_middleware = SkillsMiddleware(
     backend=file_backend,
-    sources=["/workspace/skills/main/main-agent/", "/workspace/skills/main/alibabacloud-find-skills/", "/workspace/skills/main/report-export/"]
+    sources=["/workspace/skills/main/main-agent/",
+             "/workspace/skills/main/alibabacloud-find-skills/",
+             "/workspace/skills/main/report-export/"
+             ]
 )
 
 nl2sql_async = AsyncSubAgent(
@@ -28,6 +31,7 @@ nl2sql_async = AsyncSubAgent(
     description="NL2SQL查询专家",
     graph_id="nl2sql_agent",
 )
+
 
 agent = create_deep_agent(
     model=deepseek_model,

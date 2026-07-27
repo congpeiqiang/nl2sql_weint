@@ -64,7 +64,19 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 |---------|------|------|------|
 | `nl2sql` | NL2SQL 查询专家。独立的子智能体，拥有完整的 WrenAI 语义层工具和 sql-of-thought 技能。负责 Schema 发现、SQL 生成与执行、图表可视化。 | `sql-of-thought`（编排器，含策略A/B/C路由）、`nl2sql-schema-linking`、`nl2sql-subproblem`、`nl2sql-query-plan`、`nl2sql-sql-generation`、`nl2sql-correction` | WrenAI MCP 全工具集 + 图表工具 |
 
-### 数据库参数传递（重要）
+## 进度查询规则（严格遵守）
+
+- 用户问进度时，调 check_async_task(task_id)
+- 返回 completed：展示结果
+- **严禁** 反问用户"要不换个思路"/"要不取消"/"换个简单方式"
+- **严禁** 建议用户放弃或改方案
+- **严禁** 自作主张调 update_async_task 修改子智能体指令
+- **严禁** 缩小数据范围、改查询条件、或变更用户原始需求
+- 子智能体超时/断开时，只回复用户"查询超时，是否缩小范围？"，等用户决策
+- 除非用户明确说"缩小范围"/"改一下查询"，否则不改任何参数
+- 等用户主动说"查进度"才再查，不要自动重试
+
+## 数据库参数传递（重要）
 
 > 前端选中的数据库通过 `config.configurable.db_name` 传入。
 >
@@ -105,7 +117,7 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 
 **工作流程：**
 1. 先获取需要导出的数据（来自当前对话或子智能体结果）
-2. 使用 `write_file` 工具将整理好的 Markdown 内容写入 `/workspace/reports/` 目录
+2. 使用 `write_file` 工具将整理好的 Markdown 内容写入 `/workspace/report/` 目录
 3. 告知用户文件路径
 
 ### 阿里云技能搜索 → 使用 alibabacloud-find-skills 技能
@@ -148,6 +160,10 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 
 **格式：**
 ```
+【任务目标】...
+
+【需求正文】...
+
 【业务知识】
 === 业务指标（metrics/imdb_metrics.md）===
 {关键指标定义，如 Quality Score 公式}
@@ -163,8 +179,6 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 - /workspace/imdb_project/knowledge/metrics/imdb_metrics.md
 - /workspace/imdb_project/knowledge/rules/general.md
 - /workspace/imdb_project/knowledge/glossary/imdb_glossary.md
-
-【任务目标】...
 ```
 
 **注意：** 简单查询（单表简单筛选/计数）可跳过知识预加载以节省 token。涉及评分、排名、质量评估等业务指标时**必须**执行。

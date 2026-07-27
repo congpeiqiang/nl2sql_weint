@@ -43,11 +43,6 @@ def _get_mcp_tools_sync() -> List:
             "command": "npx",
             "args": ["-p", "semiotic", "semiotic-mcp"]
         },
-        # "antv-chart": {
-        #     "transport": "stdio",
-        #     "command": "npx",
-        #     "args": ["-y", "@antv/mcp-server-chart"]
-        # },
         "wrenai": {
             "transport": "stdio",
             "command": r"D:\code_work_space\llm\nl2sql\.venv\Scripts\wren.EXE",

@@ -41,7 +41,8 @@ def create_text_model():
             api_key=settings.LLM_API_KEY,
             base_url=settings.LLM_BASE_URL,
             model=settings.LLM_MODEL,
-            temperature=0.3,
+            temperature=0,
+            max_retries=6,
             extra_body={"thinking": {"type": "disabled"}},
 
         )

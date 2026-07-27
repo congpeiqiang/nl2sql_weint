@@ -45,8 +45,8 @@ description: "触发条件：用户发起任意对话；主智能体需要进行
 **触发关键词：** 查询、统计、有多少、列出、排名、对比、计算、汇总、分析、数据、SQL、图表、可视化、报表
 
 **示例：**
-- "有多少电影" → nl2sql
-- "统计演员数量" → nl2sql
+- "查询销售额最高的10个产品" → nl2sql
+- "统计各部门员工数量" → nl2sql
 - "分析客户购买行为" → nl2sql
 - "画一张销售趋势图" → nl2sql
 
@@ -86,28 +86,6 @@ description: "触发条件：用户发起任意对话；主智能体需要进行
   → 再委派 report 生成
 ```
 
-## run_sql LIMIT 规范（委派时必须附带）
-
-每次委派 nl2sql 子智能体时，**必须在 prompt 中明确要求**：
-
-```
-【run_sql LIMIT 规范】
-1. SQL 中不要写 LIMIT 子句
-2. 改为通过 run_sql 的 limit 参数控制行数，例如 run_sql(sql="SELECT ...", limit=10)
-3. 原因：run_sql 工具会在服务端自动追加默认 cap（1000 行），如果 SQL 中已有 LIMIT 会导致语法冲突
-```
-
-## 安全约束（委派时必须附带）
-
-每次委派 nl2sql 子智能体时，**必须在 prompt 末尾固定追加**以下安全约束：
-
-```
-【安全规则（只读约束）】
-你只能执行 SELECT 查询。严禁生成或执行任何 INSERT、UPDATE、DELETE、DROP、ALTER、CREATE、TRUNCATE、REPLACE、RENAME 语句。
-在调用 run_sql 前，必须用 sqlparse 或正则校验 SQL 语句类型，确保只包含 SELECT。
-如果用户要求修改数据，请拒绝并说明本系统为只读查询系统。
-```
-
 ## 状态传递
 
 委派时传递以下信息给子智能体：
@@ -129,38 +107,3 @@ description: "触发条件：用户发起任意对话；主智能体需要进行
 - 主智能体 **不持有** 数据库连接或 SQL 工具
 - 主智能体 **仅负责** 路由和协调
 - 子智能体 **独立拥有** 完成其任务所需的全部工具和技能
-
-## 报告导出职责划分
-
-报告导出采用**分层职责**模式，不将 report-export 技能绑定到子智能体：
-
-### 职责边界
-
-| 角色 | 职责 | 说明 |
-|------|------|------|
-| **nl2sql 子智能体** | 只负责查询数据并返回结果 | 不生成报告文件，不写 Markdown |
-| **主智能体** | 拿到结果后，调用 report-export 技能生成报告 | 使用 `write_file` 写入 `/workspace/report/` |
-
-### 工作流程
-
-```
-用户请求数据查询
-  → 主智能体委派 nl2sql 子智能体
-  → nl2sql 返回查询结果（数据表格）
-  → 主智能体读取 report-export 技能（/workspace/skills/main/report-export/SKILL.md）
-  → 主智能体按模板整理 Markdown 报告
-  → 主智能体调用 write_file 写入 /workspace/report/
-  → 主智能体告知用户文件路径
-```
-
-### 触发条件
-
-当用户表达以下意图时，主智能体在拿到 nl2sql 结果后激活 report-export 技能：
-- "下载报告" / "导出为 Markdown" / "生成分析报告"
-- "保存结果" / "把结果写成文件" / "生成 md 文件"
-- "export report" / "save as markdown"
-- 或主智能体自主判断需要持久化保存结果时
-
-### 模板使用
-
-报告模板定义在 `/workspace/skills/main/report-export/SKILL.md` 中，主智能体直接读取使用。
