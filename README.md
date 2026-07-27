@@ -207,26 +207,30 @@ WREN_PROJECT_PATH=D:\path\to\wrenai_project
 
 **原理**：CLI 启动时将 `checkpointer` 配置序列化为 `LANGGRAPH_CHECKPOINTER` 环境变量 → API 层的 `_adapter.collect_checkpointer_from_env()` 自动加载并注入到所有 graph 中。
 
-**关键约束**：graph 定义中（如 `main_agent.py`）**不能**传 `checkpointer=` 参数给 `create_deep_agent()`，否则 `langgraph dev` 模式会拒绝加载（`local_dev` 校验机制）。checkpointer 必须且只能在 API 层配置。
+**关键约束**：
+- graph 定义中（如 `main_agent.py`）**不能**传 `checkpointer=` 参数给 `create_deep_agent()`，否则 `langgraph dev` 模式会拒绝加载（`local_dev` 校验机制）。checkpointer 必须且只能在 API 层配置。
+- `langgraph_api` 是纯异步运行时，checkpointer **必须实现异步方法**（`aput`、`aget_tuple` 等）。同步 `SqliteSaver` 会抛出 `NotImplementedError`，必须使用 `AsyncSqliteSaver`。
+- 如果使用自定义启动脚本（如 `start_server.py`），需要从 `graph.json` 读取 `checkpointer` 字段并设置 `LANGGRAPH_CHECKPOINTER` 环境变量，否则 API 层不会加载自定义 checkpointer。
 
-**checkpointer_factory.py 示例**（SQLite）：
+**checkpointer_factory.py 示例**（AsyncSqlite）：
 
 ```python
-import sqlite3
 from pathlib import Path
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 _CHECKPOINT_DB = str(Path(__file__).parent / "workspace" / "checkpoints.sqlite")
-_conn = sqlite3.connect(_CHECKPOINT_DB, check_same_thread=False)
-checkpointer = SqliteSaver(_conn)
+
+# 导出异步上下文管理器，langgraph_api 的 _yield_checkpointer() 会自动处理
+# AsyncSqliteSaver 会自动调用 setup() 创建数据库表
+checkpointer = AsyncSqliteSaver.from_conn_string(_CHECKPOINT_DB)
 ```
 
 导出的变量可以是：
-- `BaseCheckpointSaver` 实例（如上例）
-- 返回 `BaseCheckpointSaver` 的无参函数
-- 异步上下文管理器（yield `BaseCheckpointSaver`）
+- `BaseCheckpointSaver` 实例
+- 异步上下文管理器（yield `BaseCheckpointSaver`，如上例）
+- 返回 `BaseCheckpointSaver` 的无参函数或协程
 
-**自定义 checkpointer 需要实现的方法**：
+**自定义 checkpointer 需要实现的异步方法**：
 
 | 方法 | 必需 | 说明 |
 |------|------|------|
@@ -239,6 +243,8 @@ checkpointer = SqliteSaver(_conn)
 | `adelete_for_runs` | 推荐 | 按 run_id 清理（缺失则 `rollback` 策略不可用） |
 | `acopy_thread` | 可选 | 复制 thread（缺失时使用通用回退实现） |
 | `aprune` | 可选 | 历史裁剪（缺失时旧 checkpoint 会持续累积） |
+
+> **提示**：`langgraph.checkpoint.sqlite.aio.AsyncSqliteSaver` 已实现上述所有必需和推荐方法。`langgraph.checkpoint.postgres.aio.AsyncPostgresSaver` 同样可用。
 
 #### 自定义 Store
 

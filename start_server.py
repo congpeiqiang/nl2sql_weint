@@ -17,21 +17,25 @@ def setup_environment():
     src_path = Path(__file__).parent / "src"
     sys.path.insert(0, str(src_path))
     
-    # Load graphs from graph.json
+    # Load graphs and checkpointer from graph.json
     config_path = Path(__file__).parent / "graph.json"
     graphs = {}
-    
+    checkpointer_config = None
+    store_config = None
+
     if config_path.exists():
         with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
             graphs = config.get("graphs", {})
+            checkpointer_config = config.get("checkpointer")
+            store_config = config.get("store")
     
     # Force UTF-8 encoding for all file I/O (fixes GBK decode errors on Windows)
     os.environ["PYTHONUTF8"] = "1"
     os.environ["PYTHONIOENCODING"] = "utf-8"
 
-    # Set environment variables
-    os.environ.update({
+    # Build environment dict
+    env_updates = {
         "DATABASE_URI": ":memory:",
         "REDIS_URI": "fake",
         "MIGRATIONS_PATH": "__inmem",
@@ -45,11 +49,20 @@ def setup_environment():
         "LANGGRAPH_API_URL": "http://localhost:2026",
         # Graphs configuration
         "LANGSERVE_GRAPHS": json.dumps(graphs) if graphs else "{}",
-        
         # Worker configuration
         "N_JOBS_PER_WORKER": "10",
-    "LANGGRAPH_RECURSION_LIMIT": "500",
-    })
+        "LANGGRAPH_RECURSION_LIMIT": "500",
+    }
+
+    # Custom checkpointer configuration (from graph.json)
+    if checkpointer_config:
+        env_updates["LANGGRAPH_CHECKPOINTER"] = json.dumps(checkpointer_config)
+
+    # Custom store configuration (from graph.json)
+    if store_config:
+        env_updates["LANGGRAPH_STORE"] = json.dumps(store_config)
+
+    os.environ.update(env_updates)
     
     # Load .env file if exists
     env_file = Path(__file__).parent / ".env"
