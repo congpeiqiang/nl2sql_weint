@@ -32,6 +32,14 @@ nl2sql_async = AsyncSubAgent(
     graph_id="nl2sql_agent",
 )
 
+# ── Checkpointer ────────────────────────────────────────────────────
+# 注意：checkpointer 不再在 graph 层设置，而是通过 LANGGRAPH_CHECKPOINTER 环境变量
+# 在 langgraph_api 层配置。参见 checkpointer_factory.py 和 .env 文件。
+# 如需在纯 Python（非 langgraph dev）模式下运行，取消下面的注释：
+# import sqlite3
+# _CHECKPOINT_DB = str(base_dir / "workspace" / "checkpoints.sqlite")
+# _checkpoint_conn = sqlite3.connect(_CHECKPOINT_DB, check_same_thread=False)
+# _checkpointer = SqliteSaver(_checkpoint_conn)
 
 agent = create_deep_agent(
     model=deepseek_model,
@@ -43,4 +51,4 @@ agent = create_deep_agent(
     system_prompt=SYSTEM_PROMPT,
 ).with_config({"recursion_limit": 500})
 
-print("[MainAgent] ready", flush=True)
+print(f"[MainAgent] ready", flush=True)
