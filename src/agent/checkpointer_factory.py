@@ -12,12 +12,14 @@
 使用 AsyncSqliteSaver 以兼容 langgraph_api 的异步运行时。
 通过 from_conn_string() 异步上下文管理器创建，确保事件循环可用。
 """
+import os.path
 from pathlib import Path
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from agent.settings.setting import settings
 
-base_dir = Path(r"D:\code_work_space\llm\nl2sql\src\agent").resolve()
-_CHECKPOINT_DB = str(base_dir / "workspace" / "checkpoints.sqlite")
+base_dir = settings.CHECKPOINT_DB_PATH
+_CHECKPOINT_DB = os.path.join(base_dir, "checkpoints.sqlite")
 
 # 导出异步上下文管理器，langgraph_api 的 _yield_checkpointer() 会自动处理
 checkpointer = AsyncSqliteSaver.from_conn_string(_CHECKPOINT_DB)

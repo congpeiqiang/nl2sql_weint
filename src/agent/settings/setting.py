@@ -45,11 +45,11 @@ class Settings(BaseSettings):
         return dbs
 
     # 默认数据库（取 DB_1_* 作为默认值）
-    DB_HOST: str = os.getenv("DB_1_HOST", "localhost")
-    DB_PORT: int = int(os.getenv("DB_1_PORT", "3306"))
-    DB_NAME: str = os.getenv("DB_1_NAME", "")
-    DB_USER: str = os.getenv("DB_1_USER", "root")
-    DB_PASSWORD: str = os.getenv("DB_1_PASSWORD", "")
+    DB_HOST: str = os.getenv("DB_3_HOST", "localhost")
+    DB_PORT: int = int(os.getenv("DB_3_PORT", "3306"))
+    DB_NAME: str = os.getenv("DB_3_NAME", "")
+    DB_USER: str = os.getenv("DB_3_USER", "root")
+    DB_PASSWORD: str = os.getenv("DB_3_PASSWORD", "")
 
     # LangSmith配置
     LANGSMITH_TRACING: bool = os.getenv("LANGSMITH_TRACING", "false").lower() == "true"
@@ -59,6 +59,9 @@ class Settings(BaseSettings):
 
     # Wren 项目地址
     WREN_PROJECT_PATH: str = os.getenv("WREN_PROJECT_PATH", None)
+    WREN_BIN_PATH: str = os.getenv("WREN_BIN_PATH", None)
+
+    CHECKPOINT_DB_PATH: str = os.getenv("CHECKPOINT_DB_PATH", "")
 
     class Config:
         case_sensitive = True

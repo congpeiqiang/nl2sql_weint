@@ -9,6 +9,7 @@
 
 import os
 import logging
+from pathlib import Path
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
@@ -54,7 +55,7 @@ class Settings(BaseSettings):
 
     class Config:
         case_sensitive = True
-        env_file = r"D:\code_work_space\llm\nl2sql\.env"
+        env_file = Path(__file__).parents[4] / ".env"
         extra = "ignore"  # 允许未定义字段（合并 .env 后多了 LLM 等变量）
 
 

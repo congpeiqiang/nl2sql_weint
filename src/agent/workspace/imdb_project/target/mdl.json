@@ -916,7 +916,357 @@
     }
   ],
   "views": [],
-  "cubes": [],
+  "cubes": [
+    {
+      "name": "movie_analytics",
+      "description": "电影多维分析立方体 — 支持按年代、类型、评分区间等维度下钻聚合",
+      "baseObject": "titles",
+      "measures": [
+        {
+          "name": "movie_count",
+          "sql": "COUNT(DISTINCT id)",
+          "expression": "COUNT(DISTINCT id)",
+          "type": "count",
+          "description": "电影数量"
+        },
+        {
+          "name": "avg_rating",
+          "sql": "AVG(average_rating)",
+          "expression": "AVG(average_rating)",
+          "type": "avg",
+          "description": "平均评分"
+        },
+        {
+          "name": "total_votes",
+          "sql": "SUM(num_votes)",
+          "expression": "SUM(num_votes)",
+          "type": "sum",
+          "description": "总投票数"
+        },
+        {
+          "name": "avg_runtime",
+          "sql": "AVG(runtime_minutes)",
+          "expression": "AVG(runtime_minutes)",
+          "type": "avg",
+          "description": "平均片长（分钟）"
+        },
+        {
+          "name": "high_rated_ratio",
+          "sql": "SUM(CASE WHEN average_rating >= 8.0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)",
+          "expression": "SUM(CASE WHEN average_rating >= 8.0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)",
+          "type": "number",
+          "description": "高分片占比（评分>=8.0）"
+        },
+        {
+          "name": "popularity_index",
+          "sql": "AVG(num_votes) / NULLIF(AVG(AVG(num_votes)) OVER (), 0)",
+          "expression": "AVG(num_votes) / NULLIF(AVG(AVG(num_votes)) OVER (), 0)",
+          "type": "number",
+          "description": "热度指数（相对于整体平均）"
+        },
+        {
+          "name": "rating_votes_weighted",
+          "sql": "SUM(average_rating * num_votes) / NULLIF(SUM(num_votes), 0)",
+          "expression": "SUM(average_rating * num_votes) / NULLIF(SUM(num_votes), 0)",
+          "type": "number",
+          "description": "投票加权平均评分（更准确的整体评价）"
+        },
+        {
+          "name": "total_runtime_hours",
+          "sql": "SUM(runtime_minutes) / 60.0",
+          "expression": "SUM(runtime_minutes) / 60.0",
+          "type": "number",
+          "description": "总片长（小时）"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "decade",
+          "sql": "FLOOR(start_year / 10) * 10",
+          "expression": "FLOOR(start_year / 10) * 10",
+          "type": "int",
+          "description": "年代（如 1990, 2000, 2010）"
+        },
+        {
+          "name": "rating_tier",
+          "sql": "CASE WHEN average_rating >= 8.0 THEN '高分(8-10)' WHEN average_rating >= 6.0 THEN '中分(6-8)' WHEN average_rating >= 4.0 THEN '低分(4-6)' ELSE '极低(0-4)' END",
+          "expression": "CASE WHEN average_rating >= 8.0 THEN '高分(8-10)' WHEN average_rating >= 6.0 THEN '中分(6-8)' WHEN average_rating >= 4.0 THEN '低分(4-6)' ELSE '极低(0-4)' END",
+          "type": "string",
+          "description": "评分等级"
+        },
+        {
+          "name": "runtime_tier",
+          "sql": "CASE WHEN runtime_minutes < 40 THEN '短片' WHEN runtime_minutes < 90 THEN '标准' WHEN runtime_minutes < 150 THEN '长片' ELSE '超长片' END",
+          "expression": "CASE WHEN runtime_minutes < 40 THEN '短片' WHEN runtime_minutes < 90 THEN '标准' WHEN runtime_minutes < 150 THEN '长片' ELSE '超长片' END",
+          "type": "string",
+          "description": "片长分类"
+        },
+        {
+          "name": "vote_tier",
+          "sql": "CASE WHEN num_votes >= 200000 THEN '极高热度' WHEN num_votes >= 50000 THEN '高热度' WHEN num_votes >= 10000 THEN '中等热度' WHEN num_votes >= 1000 THEN '低热度' ELSE '冷门' END",
+          "expression": "CASE WHEN num_votes >= 200000 THEN '极高热度' WHEN num_votes >= 50000 THEN '高热度' WHEN num_votes >= 10000 THEN '中等热度' WHEN num_votes >= 1000 THEN '低热度' ELSE '冷门' END",
+          "type": "string",
+          "description": "热度等级"
+        },
+        {
+          "name": "is_adult_content",
+          "sql": "CASE WHEN is_adult = 1 THEN '成人内容' ELSE '普通内容' END",
+          "expression": "CASE WHEN is_adult = 1 THEN '成人内容' ELSE '普通内容' END",
+          "type": "string",
+          "description": "成人内容标识"
+        },
+        {
+          "name": "title_type_category",
+          "sql": "title_type",
+          "expression": "title_type",
+          "type": "string",
+          "description": "作品类型"
+        },
+        {
+          "name": "start_year",
+          "sql": "start_year",
+          "expression": "start_year",
+          "type": "int",
+          "description": "上映年份"
+        },
+        {
+          "name": "vote_bucket_100k",
+          "sql": "FLOOR(num_votes / 100000) * 100000",
+          "expression": "FLOOR(num_votes / 100000) * 100000",
+          "type": "int",
+          "description": "投票数十万分档"
+        }
+      ]
+    },
+    {
+      "name": "person_productivity",
+      "description": "影视从业者生产力分析立方体",
+      "baseObject": "names",
+      "joins": [
+        {
+          "name": "principals",
+          "sql": "names.id = principals.name_id"
+        },
+        {
+          "name": "titles",
+          "sql": "principals.title_id = titles.id"
+        },
+        {
+          "name": "names_primaryprofessions",
+          "sql": "names.id = names_primaryprofessions.name_id"
+        },
+        {
+          "name": "professions",
+          "sql": "names_primaryprofessions.profession_id = professions.id"
+        }
+      ],
+      "measures": [
+        {
+          "name": "total_titles",
+          "sql": "COUNT(DISTINCT principals.title_id)",
+          "expression": "COUNT(DISTINCT principals.title_id)",
+          "type": "count",
+          "description": "参与作品总数"
+        },
+        {
+          "name": "role_diversity",
+          "sql": "COUNT(DISTINCT principals.category_id)",
+          "expression": "COUNT(DISTINCT principals.category_id)",
+          "type": "count",
+          "description": "角色类型多样性（担任过多少种不同职位）"
+        },
+        {
+          "name": "career_span",
+          "sql": "MAX(titles.start_year) - MIN(titles.start_year)",
+          "expression": "MAX(titles.start_year) - MIN(titles.start_year)",
+          "type": "number",
+          "description": "职业生涯跨度（年）"
+        },
+        {
+          "name": "avg_work_rating",
+          "sql": "AVG(titles.average_rating)",
+          "expression": "AVG(titles.average_rating)",
+          "type": "avg",
+          "description": "参与作品的平均评分"
+        },
+        {
+          "name": "productivity_density",
+          "sql": "COUNT(DISTINCT principals.title_id) * 1.0 / NULLIF(MAX(titles.start_year) - MIN(titles.start_year) + 1, 0)",
+          "expression": "COUNT(DISTINCT principals.title_id) * 1.0 / NULLIF(MAX(titles.start_year) - MIN(titles.start_year) + 1, 0)",
+          "type": "number",
+          "description": "生产力密度（年均产出作品数）"
+        },
+        {
+          "name": "total_votes_received",
+          "sql": "SUM(titles.num_votes)",
+          "expression": "SUM(titles.num_votes)",
+          "type": "sum",
+          "description": "参与作品的总投票数"
+        },
+        {
+          "name": "director_title_count",
+          "sql": "COUNT(DISTINCT CASE WHEN principals.category_id = 'director' THEN principals.title_id END)",
+          "expression": "COUNT(DISTINCT CASE WHEN principals.category_id = 'director' THEN principals.title_id END)",
+          "type": "count",
+          "description": "导演作品数"
+        },
+        {
+          "name": "actor_title_count",
+          "sql": "COUNT(DISTINCT CASE WHEN principals.category_id IN ('actor', 'actress') THEN principals.title_id END)",
+          "expression": "COUNT(DISTINCT CASE WHEN principals.category_id IN ('actor', 'actress') THEN principals.title_id END)",
+          "type": "count",
+          "description": "演员作品数"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "profession",
+          "sql": "professions.display_name",
+          "expression": "professions.display_name",
+          "type": "string",
+          "description": "主要职业（从 names_primaryprofessions 关联）"
+        },
+        {
+          "name": "is_alive",
+          "sql": "CASE WHEN names.death_year IS NULL THEN '健在' ELSE '已故' END",
+          "expression": "CASE WHEN names.death_year IS NULL THEN '健在' ELSE '已故' END",
+          "type": "string",
+          "description": "是否健在"
+        },
+        {
+          "name": "birth_decade",
+          "sql": "FLOOR(names.birth_year / 10) * 10",
+          "expression": "FLOOR(names.birth_year / 10) * 10",
+          "type": "int",
+          "description": "出生年代"
+        },
+        {
+          "name": "alive_status",
+          "sql": "CASE WHEN names.death_year IS NULL THEN 'living' ELSE 'deceased' END",
+          "expression": "CASE WHEN names.death_year IS NULL THEN 'living' ELSE 'deceased' END",
+          "type": "string"
+        },
+        {
+          "name": "primary_role",
+          "sql": "principals.category_id",
+          "expression": "principals.category_id",
+          "type": "string",
+          "description": "在作品中的角色类别"
+        },
+        {
+          "name": "is_multi_role",
+          "sql": "CASE WHEN COUNT(DISTINCT principals.category_id) >= 2 THEN '多角色' ELSE '单一角色' END",
+          "expression": "CASE WHEN COUNT(DISTINCT principals.category_id) >= 2 THEN '多角色' ELSE '单一角色' END",
+          "type": "string",
+          "description": "是否多角色从业者"
+        }
+      ]
+    },
+    {
+      "name": "series_health",
+      "description": "电视剧系列健康度分析立方体",
+      "baseObject": "titles",
+      "joins": [
+        {
+          "name": "episodes",
+          "sql": "titles.id = episodes.parent_id"
+        },
+        {
+          "name": "episode_titles",
+          "sql": "episodes.id = episode_titles.id",
+          "model": "titles"
+        }
+      ],
+      "measures": [
+        {
+          "name": "total_seasons",
+          "sql": "COUNT(DISTINCT episodes.season_number)",
+          "expression": "COUNT(DISTINCT episodes.season_number)",
+          "type": "count",
+          "description": "总季数"
+        },
+        {
+          "name": "total_episodes",
+          "sql": "COUNT(DISTINCT episodes.id)",
+          "expression": "COUNT(DISTINCT episodes.id)",
+          "type": "count",
+          "description": "总集数"
+        },
+        {
+          "name": "avg_episode_rating",
+          "sql": "AVG(episode_titles.average_rating)",
+          "expression": "AVG(episode_titles.average_rating)",
+          "type": "avg",
+          "description": "剧集平均评分"
+        },
+        {
+          "name": "episode_per_season",
+          "sql": "COUNT(DISTINCT episodes.id) * 1.0 / NULLIF(COUNT(DISTINCT episodes.season_number), 0)",
+          "expression": "COUNT(DISTINCT episodes.id) * 1.0 / NULLIF(COUNT(DISTINCT episodes.season_number), 0)",
+          "type": "number",
+          "description": "每季平均集数"
+        },
+        {
+          "name": "series_longevity",
+          "sql": "MAX(episode_titles.start_year) - MIN(episode_titles.start_year)",
+          "expression": "MAX(episode_titles.start_year) - MIN(episode_titles.start_year)",
+          "type": "number",
+          "description": "播出跨度（年）"
+        },
+        {
+          "name": "rating_volatility",
+          "sql": "STDDEV(episode_titles.average_rating)",
+          "expression": "STDDEV(episode_titles.average_rating)",
+          "type": "number",
+          "description": "评分波动性（标准差）"
+        },
+        {
+          "name": "best_season_avg",
+          "sql": "MAX(AVG(episode_titles.average_rating))",
+          "expression": "MAX(AVG(episode_titles.average_rating))",
+          "type": "number",
+          "description": "最佳季平均评分"
+        },
+        {
+          "name": "worst_season_avg",
+          "sql": "MIN(AVG(episode_titles.average_rating))",
+          "expression": "MIN(AVG(episode_titles.average_rating))",
+          "type": "number",
+          "description": "最差季平均评分"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "series_status",
+          "sql": "CASE WHEN titles.end_year IS NULL THEN '在播' ELSE '已完结' END",
+          "expression": "CASE WHEN titles.end_year IS NULL THEN '在播' ELSE '已完结' END",
+          "type": "string",
+          "description": "系列状态"
+        },
+        {
+          "name": "season_number",
+          "sql": "episodes.season_number",
+          "expression": "episodes.season_number",
+          "type": "int",
+          "description": "季号"
+        },
+        {
+          "name": "series_decade",
+          "sql": "FLOOR(titles.start_year / 10) * 10",
+          "expression": "FLOOR(titles.start_year / 10) * 10",
+          "type": "int",
+          "description": "系列开播年代"
+        },
+        {
+          "name": "longevity_tier",
+          "sql": "CASE WHEN (MAX(episode_titles.start_year) - MIN(episode_titles.start_year)) >= 10 THEN '长寿(10年+)' WHEN (MAX(episode_titles.start_year) - MIN(episode_titles.start_year)) >= 5 THEN '中寿(5-10年)' ELSE '短寿(<5年)' END",
+          "expression": "CASE WHEN (MAX(episode_titles.start_year) - MIN(episode_titles.start_year)) >= 10 THEN '长寿(10年+)' WHEN (MAX(episode_titles.start_year) - MIN(episode_titles.start_year)) >= 5 THEN '中寿(5-10年)' ELSE '短寿(<5年)' END",
+          "type": "string",
+          "description": "寿命等级"
+        }
+      ]
+    }
+  ],
   "dataSource": "mysql",
   "layoutVersion": 3
 }

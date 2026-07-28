@@ -21,7 +21,9 @@ def create_deepseek_model():
             api_key=settings.LLM_API_KEY,
             base_url=settings.LLM_BASE_URL,
             model=settings.LLM_MODEL,
-            temperature=0.3,
+            temperature=0,
+            timeout=60,
+            max_retries=3,
             extra_body={"thinking": {"type": "disabled"}},
         )
         model.profile = ModelProfile(max_input_tokens=120000)

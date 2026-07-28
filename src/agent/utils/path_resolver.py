@@ -2,12 +2,13 @@ import logging, base64, os, re
 from functools import wraps
 from pathlib import Path
 from typing import Any
+from agent.settings.setting import settings
 
 _log = logging.getLogger(__name__)
 
 # Must match agent.py workspace_dir exactly
 WORKSPACE_DIR = Path(
-    r"D:\code_work_space\llm\nl2sql\src\agent\workspace"
+    Path(__file__).parent.parent / "workspace"
 ).resolve()
 
 _CHART_ERROR_MSG = "图表生成失败，请检查数据格式。"

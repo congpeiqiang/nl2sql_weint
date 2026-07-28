@@ -74,13 +74,47 @@ def setup_environment():
         except ImportError:
             print("⚠️  python-dotenv not installed, skipping .env file")
 
+def preflight_check():
+    """就绪门控：在启动服务前验证关键依赖是否就绪。"""
+    print("\n🔍 执行启动预检...", flush=True)
+
+    # ── 检查 MCP 工具 ──
+    try:
+        from agent.tools.mcp_tool import tools, _mcp_server_results, MCPToolsLoadError
+    except MCPToolsLoadError as e:
+        print(f"\n{'='*60}", flush=True)
+        print(f"🚫 就绪门控: 服务启动被阻止", flush=True)
+        print(f"{'='*60}", flush=True)
+        print(f"{e}", flush=True)
+        print(f"{'='*60}\n", flush=True)
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n🚫 预检失败: MCP 工具模块加载异常: {e}", flush=True)
+        sys.exit(1)
+
+    if not tools:
+        print(f"\n🚫 就绪门控: MCP 工具列表为空，服务不启动。", flush=True)
+        sys.exit(1)
+
+    # 报告各服务器状态
+    for name, status in _mcp_server_results.items():
+        icon = "✅" if status == "ok" else "❌"
+        label = "正常" if status == "ok" else status
+        print(f"  {icon} MCP [{name}]: {label}", flush=True)
+
+    print(f"✅ 预检通过: {len(tools)} 个 MCP 工具就绪\n", flush=True)
+
+
 def main():
     """Start the server"""
     print("🚀 Starting API Server...")
-    
+
     # Setup environment
     setup_environment()
-    
+
+    # 就绪门控：验证关键依赖
+    preflight_check()
+
     # Print server information
     print("\n" + "="*60)
     print("📍 Server URL: http://localhost:2026")

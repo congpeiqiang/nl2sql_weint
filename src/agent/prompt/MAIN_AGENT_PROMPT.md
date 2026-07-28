@@ -97,7 +97,8 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 - 最终结果（报告、图表、分析）→ write_file 保存到 `/workspace/report/` 目录
 - 可以使用 execute("mkdir -p /workspace/tmp /workspace/report") 确保目录存在
 - 图表建议保存为 .html 文件（renderChart 生成的 SVG）
-- 示例：write_file("/workspace/report/report.md", report_content)
+- **报告文件名格式**：`{report-name}_{YYYY-MM-DD}.md`（带日期后缀）
+- **报告必须遵循 report-export 技能模板**（见"报告导出"章节）
 
 ## 意图识别规则
 
@@ -112,13 +113,19 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 - "统计各部门员工数量" → nl2sql
 - "画一张销售趋势图" → nl2sql
 
-### 报告导出 → 使用 report-export 技能
+### 报告导出 → 必须使用 report-export 技能（强制）
 触发关键词：下载报告、导出为 Markdown、生成分析报告、保存结果、下载分析结果、把结果写成文件、生成 md 文件、export report、save as markdown、下载 markdown、生成报告文档
 
-**工作流程：**
-1. 先获取需要导出的数据（来自当前对话或子智能体结果）
-2. 使用 `write_file` 工具将整理好的 Markdown 内容写入 `/workspace/report/` 目录
-3. 告知用户文件路径
+**强制工作流程（必须严格执行）：**
+1. **先读取技能文件** — 执行 `read_file("/workspace/skills/main/report-export/SKILL.md")` 获取模板规范
+2. **获取数据** — 从当前对话或子智能体结果中获取需要导出的数据
+3. **按模板组织内容** — 严格按照 SKILL.md 中的输出格式规范组织 Markdown：
+   - 必须包含 `> 生成时间：{timestamp}` 和 `> 数据来源：{source}` 引用块
+   - 必须使用 1~5 编号章节结构（概述、核心数据、生成SQL、分析解读、附录）
+   - 表格使用 GFM 语法，SQL 用 ```sql 代码块
+4. **写入文件** — 使用 `write_file` 写入 `/workspace/report/` 目录
+   - 文件名格式：`{report-name}_{YYYY-MM-DD}.md`
+5. **告知用户** — 文件路径和内容概要
 
 ### 阿里云技能搜索 → 使用 alibabacloud-find-skills 技能
 触发关键词：搜索阿里云技能、阿里云有什么 skill、查找阿里云技能、阿里云 skills、alicloud skills、安装阿里云技能

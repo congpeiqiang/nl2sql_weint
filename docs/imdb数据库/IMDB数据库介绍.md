@@ -155,6 +155,8 @@ IMDb 标准电影类型标签。
 
 **包含类别：** `actor`, `actress`, `archive_footage`, `archive_sound`, `cinematographer`, `composer`, `director`, `editor`, `producer`, `production_designer`, `self`, `writer`
 
+**包含类别：**
+
 ---
 
 ### 6. jobs — 职位表
@@ -194,7 +196,7 @@ IMDb 标准电影类型标签。
 |------|------|------|------|
 | `id` | INTEGER | PK | 自增主键 |
 | `principal_id` | INTEGER | FK | 关联 `principals.id` |
-| `character` | TEXT | | 角色名称 |
+| `character_display_name` | TEXT | | 角色名称 |
 
 ---
 
@@ -304,7 +306,7 @@ IMDb 标准电影类型标签。
 |------|------|------|------|
 | `id` | INTEGER | PK | 自增主键 |
 | `title_id` | VARCHAR(12) | FK | 剧集作品ID，关联 `titles.id`（具体某一集） |
-| `parent_title_id` | VARCHAR(12) | FK | 所属系列ID，关联 `titles.id`（整个系列，如 Game of Thrones） |
+| `parent_id` | VARCHAR(12) | FK | 所属系列ID，关联 `titles.id`（整个系列，如 Game of Thrones） |
 | `season_number` | INTEGER | ✓ | 季号 |
 | `episode_number` | INTEGER | ✓ | 集号 |
 

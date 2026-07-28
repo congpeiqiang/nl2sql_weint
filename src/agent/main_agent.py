@@ -11,7 +11,8 @@ from deepagents.middleware import SkillsMiddleware
 from agent.llms.model import deepseek_model
 from agent.tools.mcp_tool import tools as mcp_tools
 
-base_dir = Path(r"D:\code_work_space\llm\nl2sql\src\agent").resolve()
+# base_dir = Path(r"D:\code_work_space\llm\nl2sql\src\agent").resolve()
+base_dir = Path(__file__).parent.resolve()
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompt" / "MAIN_AGENT_PROMPT.md"
 SYSTEM_PROMPT = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 

@@ -12,25 +12,31 @@
   - LangSmith API Key (`lsv2_pt_...`)
   - MySQL 密码 (`aoi8dev.1234`)
 - [ ] **`.env` 加入 `.gitignore`**
+  
   ```bash
   echo ".env" >> .gitignore
   git rm --cached .env
   ```
 - [ ] **从 Git 历史清除 `.env`**
+  
   ```bash
   # 使用 BFG Repo-Cleaner
   bfg --delete-files .env
   git reflog expire --expire=now --all && git gc --prune=now --aggressive
   ```
 - [ ] **源码中硬编码密码替换为 `os.getenv()`**
+  
   - `src/test/wrenai_exec_Chinook/gen_models_mysql.py:16`
   - `src/agent/skills/nl2sql/sql-of-thought/scripts/gen_models_mysql.py:16`
   - `src/agent/workspace/imdb_project/config/connection_mysql.json:8`
 - [ ] **MCP 服务器绑定 127.0.0.1**
+  
   - `.env`: `NL2SQL_MCP_HOST=127.0.0.1`
 - [ ] **MCP 添加认证**
+  
   - API Key 或 Bearer Token 中间件
 - [ ] **SQL Runner 安全加固**
+  
   - 数据库使用只读账户
   - 拦截 DROP / DELETE / ALTER / TRUNCATE / INSERT / UPDATE
   - 添加查询超时

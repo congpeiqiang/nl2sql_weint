@@ -19,16 +19,27 @@ for name in ["langchain_mcp_adapters", "mcp", "wren", "httpx", "urllib3"]:
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from agent.utils.path_resolver import wrap_tool
+from agent.settings.setting import settings
 
 _logger = logging.getLogger(__name__)
 
-# 全局缓存
+# ── 就绪门控状态 ────────────────────────────────────────────────────
 _tools = None
 _tools_loaded = False
+_mcp_server_results: dict[str, str] = {}  # server_name → "ok" | error message
+
+
+class MCPToolsLoadError(RuntimeError):
+    """所有 MCP 服务器均连接失败，服务不应启动。"""
 
 
 def _get_mcp_tools_sync() -> List:
-    """同步获取 MCP 工具（在模块加载时调用）"""
+    """同步获取 MCP 工具（在模块加载时调用）。
+
+    就绪门控策略:
+    - 任一 MCP 服务器连接成功 → 正常启动（部分降级可接受）
+    - 全部 MCP 服务器连接失败 → 抛出 MCPToolsLoadError，阻止服务启动
+    """
     global _tools, _tools_loaded
 
     if _tools_loaded:
@@ -36,26 +47,39 @@ def _get_mcp_tools_sync() -> List:
 
     print("⏳ 正在加载 MCP 工具...", flush=True)
 
+    # 子进程通用 UTF-8 环境变量（修复 Windows GBK 解码错误）
+    _utf8_env = {
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+    }
+
     all_tools = []
+    _mcp_server_results.clear()
     servers = {
         "mcp-server-chart": {
             "transport": "stdio",
             "command": "npx",
-            "args": ["-p", "semiotic", "semiotic-mcp"]
+            "args": ["-p", "semiotic", "semiotic-mcp"],
+            "env": {
+                **_utf8_env,
+            },
         },
         "wrenai": {
             "transport": "stdio",
-            "command": r"D:\code_work_space\llm\nl2sql\.venv\Scripts\wren.EXE",
+            "command": settings.WREN_BIN_PATH,
             "args": [
                 "serve", "mcp",
-                "--project", r"D:\code_work_space\llm\nl2sql\src\agent\workspace\imdb_project"
+                "--project", settings.WREN_PROJECT_PATH
             ],
             "env": {
-                "WREN_LOG_LEVEL": "ERROR",  # 如果 Wren 支持日志级别控制
-                "PYTHONUNBUFFERED": "1"
+                **_utf8_env,
+                "WREN_LOG_LEVEL": "ERROR",
+                "PYTHONUNBUFFERED": "1",
             }
         },
     }
+
+    total_servers = len(servers)
 
     # 创建新的事件循环
     loop = asyncio.new_event_loop()
@@ -79,93 +103,66 @@ def _get_mcp_tools_sync() -> List:
 
                 wrapped = [wrap_tool(t) for t in tools]
                 all_tools.extend(wrapped)
+                _mcp_server_results[name] = "ok"
                 print(f"  ✅ MCP [{name}]: {len(wrapped)} tools loaded", flush=True)
 
             except asyncio.TimeoutError:
-                print(f"  ❌ MCP [{name}]: 连接超时 (60秒)", flush=True)
+                msg = f"连接超时 (60秒)"
+                _mcp_server_results[name] = msg
+                print(f"  ❌ MCP [{name}]: {msg}", flush=True)
             except Exception as e:
-                print(f"  ❌ MCP [{name}]: FAILED — {type(e).__name__}: {e}", flush=True)
+                msg = f"{type(e).__name__}: {e}"
+                _mcp_server_results[name] = msg
+                print(f"  ❌ MCP [{name}]: FAILED — {msg}", flush=True)
 
     finally:
         loop.close()
 
     _tools = all_tools
     _tools_loaded = True
-    print(f"✅ MCP 工具加载完成: {len(all_tools)} 个工具", flush=True)
+
+    # ── 就绪门控：全部 MCP 服务器失败时拒绝启动 ──
+    failed_count = sum(1 for v in _mcp_server_results.values() if v != "ok")
+    if failed_count == total_servers:
+        details = "\n".join(
+            f"  - {name}: {status}"
+            for name, status in _mcp_server_results.items()
+        )
+        raise MCPToolsLoadError(
+            f"所有 {total_servers} 个 MCP 服务器均连接失败，服务无法启动:\n{details}\n"
+            f"请检查:\n"
+            f"  1. WrenAI 是否已安装且 WREN_BIN_PATH 指向正确的可执行文件\n"
+            f"  2. Node.js/npx 是否可用（用于 Semiotic MCP）\n"
+            f"  3. WREN_PROJECT_PATH 是否指向有效的 WrenAI 项目目录"
+        )
+
+    if failed_count > 0:
+        failed_names = [n for n, s in _mcp_server_results.items() if s != "ok"]
+        print(
+            f"⚠️  部分 MCP 服务器加载失败 ({failed_count}/{total_servers}): "
+            f"{', '.join(failed_names)}。服务将以降级模式运行。",
+            flush=True,
+        )
+
+    print(f"✅ MCP 工具加载完成: {len(all_tools)} 个工具 "
+          f"({total_servers - failed_count}/{total_servers} 服务器可用)", flush=True)
     return all_tools
 
 
-# 在模块加载时初始化工具
+# ── 模块加载时初始化 + 就绪门控 ─────────────────────────────────────
 try:
     tools = _get_mcp_tools_sync()
+except MCPToolsLoadError:
+    # 致命错误：向上传播，阻止 graph 注册和服务启动
+    raise
 except Exception as e:
-    print(f"❌ MCP 工具加载失败: {e}", flush=True)
-    tools = []
+    # 未预期的异常也视为致命
+    raise MCPToolsLoadError(f"MCP 工具加载过程中发生未预期错误: {e}") from e
 
 # 导出 tools
-__all__ = ['tools']
+__all__ = ['tools', 'MCPToolsLoadError', '_mcp_server_results']
 
 if __name__ == "__main__":
     print(f"\nTotal tools: {len(tools)}")
     for tool in tools:
         print(f"  - {tool.name}")
-        if tool.name == "generate_line_chart":
-            print(f"Description: {tool.description}")
-            print(f"Args: {tool.args}")
-            # ✅ 正确调用方式：只传 arguments 内容
-            try:
-                result = asyncio.run(asyncio.wait_for(
-                    tool.ainvoke({
-                        "data": [{"time": "2015", "value": 23}, {"time": "2016", "value": 32}],
-                        "title": "测试", "axisXTitle": "X", "axisYTitle": "Y"
-                    }),
-                    timeout=30.0
-                ))
-                print("✅ 成功生成图表:")
-                print(result)
-                # result = asyncio.wait_for(
-                #     tool.ainvoke({
-                #         "data": [
-                #             {"time": "2015", "value": 23},
-                #             {"time": "2016", "value": 32},
-                #             {"time": "2017", "value": 40},
-                #             {"time": "2018", "value": 55}
-                #         ],
-                #         "title": "随时间变化的趋势",
-                #         "axisXTitle": "时间",
-                #         "axisYTitle": "数值",
-                #         "width": 600,
-                #         "height": 400
-                #     }),
-                #     timeout=30.0
-                # )
-                # print("✅ 成功生成图表:")
-                # print(result)
-            except asyncio.TimeoutError:
-                print("❌ 请求超时，请检查本地服务是否响应缓慢")
-            except Exception as e:
-                print(f"❌ 调用异常: {type(e).__name__}: {e}")
-            break
-
-# if __name__ == "__main__":
-#     print(f"\nTotal tools: {len(tools)}")
-#     for tool in tools:
-#         print(f"  - {tool.name}")
-#         if tool.name == "generate_line_chart":
-#             print(f"description:    {tool.description}")
-#             print(f"args:    {tool.args}")
-#             result = asyncio.run(tool.ainvoke({
-#   "data": [
-#     { "time": "2015", "value": 23 },
-#     { "time": "2016", "value": 32 },
-#     { "time": "2017", "value": 40 },
-#     { "time": "2018", "value": 55 }
-#   ],
-#   "title": "随时间变化的趋势",
-#   "axisXTitle": "时间",
-#   "axisYTitle": "数值",
-#   "width": 600,
-#   "height": 400
-# }))
-#             print(result)
-#             break
