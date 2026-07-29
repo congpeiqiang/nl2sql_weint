@@ -163,6 +163,26 @@ except Exception as e:
 __all__ = ['tools', 'MCPToolsLoadError', '_mcp_server_results']
 
 if __name__ == "__main__":
-    print(f"\nTotal tools: {len(tools)}")
-    for tool in tools:
-        print(f"  - {tool.name}")
+        import asyncio
+        async def test_tool():
+            # 找到指定工具
+            tool_invoke = None
+            for tool in tools:
+                if tool.name == "recall_queries":
+                    tool_invoke = tool
+                    break
+
+            if tool_invoke:
+                try:
+                    # 使用异步调用
+                    result = await tool_invoke.ainvoke({"question": "对比导演+编剧双重身份 vs 纯导演身份的作品平均评分，按类型分组"})
+                    print("=" * 60)
+                    print(result)
+                    print("=" * 60)
+                except Exception as e:
+                    print(f"调用失败: {e}")
+            else:
+                print("未找到 指定 工具")
+
+        # 运行异步函数
+        asyncio.run(test_tool())

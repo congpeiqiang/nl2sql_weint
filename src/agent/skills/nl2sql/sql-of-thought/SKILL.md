@@ -1,6 +1,6 @@
 ---
 name: sql-of-thought
-description: "触发：用户提出数据库查询问题。三种策略：(A)标准流水线-复杂多表JOIN/聚合/窗口；(B)快速通道-单表/简单筛选/计数；(C)Cube通道-预定义指标。内部集成WrenAI语义层工具实现Schema自动发现。跳过：NoSQL/非SQL操作。"
+description: "触发：用户提出数据库查询问题；用户希望将自然语言转换为SQL；用户提到NL2SQL、Text-to-SQL或自然语言数据库查询；用户需要使用自然语言问题来分析、查询或提取数据库中的数据。三种策略：(A)标准流水线-复杂多表JOIN/聚合/窗口；(B)快速通道-单表/简单筛选/计数；(C)Cube通道-预定义指标。内部集成WrenAI语义层工具实现Schema自动发现。跳过条件：用户询问NoSQL或非SQL数据库操作；用户直接编写SQL而不需要自然语言输入。"
 ---
 
 # SQL-of-Thought：智能体 NL2SQL 编排器（策略增强版）
@@ -37,15 +37,6 @@ description: "触发：用户提出数据库查询问题。三种策略：(A)标
           完整 sql-of-thought 流水线 + WrenAI 语义层
 ```
 
-### 策略A vs B vs C 对比
-
-| 维度 | 策略A (标准) | 策略B (快速) | 策略C (Cube) |
-|------|:-----------:|:-----------:|:-----------:|
-| 调用WrenAI工具 | 3-5次 | 2次 | 2-3次 |
-| 执行Ns2sql子步骤 | 4-6步 | 1-2步 | 0步 |
-| token消耗 | 2000-6000 | 800-1500 | 500-1000 |
-| 耗时 | 15-30s | 5-10s | 3-8s |
-
 ---
 
 ## 策略A：标准流水线（复杂查询）
@@ -56,11 +47,14 @@ description: "触发：用户提出数据库查询问题。三种策略：(A)标
 
 ```
 Step 0.1: get_data_source()          → 了解SQL方言
-Step 0.2: list_models()              → 可选，了解数据全景
-Step 0.3: get_context(question)      → 语义检索相关模型/列（并行）
+Step 0.2: list_models()              → 了解数据全景
+step 0.3  读取 metrics/*.md           → 业务指标定义（并行）
+          读取 读取 rules/*.md         → 业务规则（并行）
+          读取 glossary/*.md          → 术语表（并行）
+Step 0.4: get_context(question)       → 语义检索相关模型/列（并行）
           get_instructions()          → 业务规则约束（并行）
           recall_queries(question, 3) → 相似查询示例（并行）
-Step 0.4: describe_model(name)       → 对相关模型按需详查（并行）
+Step 0.5: describe_model(name)       → 对相关模型按需详查（并行）
 ```
 
 **关键**：Step 0.3 的三个调用必须**并行**。Step 0.4 的多个 describe_model 必须**并行**。
@@ -70,13 +64,12 @@ Step 0.4: describe_model(name)       → 对相关模型按需详查（并行）
 经过 Phase 0 获得精准 Schema 后，执行标准流水线：
 
 ```
-Step 1: nl2sql-schema-linking  → 结合 WrenAI 返回的 Schema 片段，裁剪相关表/列
-Step 2: nl2sql-subproblem      → 分解为子句级子问题
-Step 3: nl2sql-query-plan      → 生成程序化查询计划（CoT推理）
-Step 4: nl2sql-sql-generation  → 合成可执行SQL
-Step 5: dry_run(sql)           → WrenAI 验证SQL
-Step 6: run_sql(sql)           → WrenAI 执行
-Step 7: [可选] nl2sql-correction → 失败时纠错循环
+Step 1: nl2sql-schema-linking  → 技能,结合 WrenAI 返回的 Schema 片段，裁剪相关表/列
+Step 2: nl2sql-subproblem      → 技能,分解为子句级子问题
+Step 3: nl2sql-query-plan      → 技能,生成程序化查询计划（CoT推理）
+Step 4: nl2sql-sql-generation  → 技能,合成可执行SQL
+Step 5: run_sql(sql)           → WrenAI 执行
+Step 6: [可选] nl2sql-correction → 失败时纠错循环
 ```
 
 ### 完整流程图
@@ -86,7 +79,8 @@ Step 7: [可选] nl2sql-correction → 失败时纠错循环
   │
   ├─ Phase 0: WrenAI 语义层
   │   ├─ get_data_source()
-  │   ├─ list_models() (可选)
+  │   ├─ list_models()
+  |   |─ 读取 metrics/*.md + 读取 读取 rules/*.md + 读取 glossary/*.md (并行)
   │   ├─ get_context + get_instructions + recall_queries (并行)
   │   └─ describe_model * N (并行，按需)
   │
@@ -97,14 +91,13 @@ Step 7: [可选] nl2sql-correction → 失败时纠错循环
   │   ├─ nl2sql-subproblem
   │   └─ nl2sql-query-plan
   │
-  ├─ Phase 4-5: 生成+验证
+  ├─ Phase 4: 生成+验证
   │   ├─ nl2sql-sql-generation
-  │   └─ dry_run(sql)
   │
-  ├─ Phase 6: 执行
+  ├─ Phase 5: 执行
   │   └─ run_sql(sql)
   │
-  └─ Phase 7: 纠错（按需）
+  └─ Phase 6: 纠错（按需）
       └─ nl2sql-correction
 ```
 
@@ -115,14 +108,12 @@ Step 7: [可选] nl2sql-correction → 失败时纠错循环
 跳过传统流水线的大部分步骤，直接利用 WrenAI + skill 生成 SQL。
 
 ```
-Step 1: recall_queries(question, 2)  → 找相似模板
-Step 2: get_context(question)        → 确认表/列
-Step 3: nl2sql-sql-generation        → 直接生成SQL（跳过linking/subproblem/plan）
-Step 4: dry_run(sql)                 → 验证
-Step 5: run_sql(sql)                 → 执行
+Step 1: nl2sql-schema-linking        → 确认表/列
+Step 2: nl2sql-sql-generation        → 直接生成SQL（跳过subproblem/plan）
+Step 3: run_sql(sql)                 → 执行
 ```
 
-**跳过**: nl2sql-schema-linking / nl2sql-subproblem / nl2sql-query-plan / nl2sql-correction
+**跳过**: nl2sql-subproblem / nl2sql-query-plan / nl2sql-correction
 
 ---
 

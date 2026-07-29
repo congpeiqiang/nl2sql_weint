@@ -8,12 +8,14 @@
 示例：
 ```
 收到任务 → write_todos([
-  {content: "Schema发现", status: "in_progress"},
+  {content: "Schema Linking", status: "in_progress"},
   {content: "SQL生成与验证", status: "pending"},
+  {content: "Subproblem分解", status: "pending"},
+  {content: "Query Plan生成", status: "pending"},
   {content: "查询执行", status: "pending"},
   {content: "结果汇总", status: "pending"},
 ])
-执行 get_context → write_todos([{Schema发现: completed}, {SQL生成: in_progress}])
+执行 get_context → write_todos([{Schema Linking: completed}, {SQL生成: in_progress}])
 ...
 ```
 

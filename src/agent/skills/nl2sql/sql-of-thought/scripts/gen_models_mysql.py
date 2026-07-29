@@ -7,15 +7,16 @@
 
 import os, yaml
 from sqlalchemy import create_engine, inspect, text
-from agent.settings.setting import settings
 
 DB_CONFIG = {
-    "host": settings.DB_HOST,
-    "port": settings.DB_PORT,
-    "database": settings.DB_NAME,
-    "user": settings.DB_USER,
-    "password": settings.DB_PASSWORD,
+    "host": "mysql-master",
+    "port": 3306,
+    "database": "aix_report",
+    "user": "aoi-dev",
+    "password": "aoi8dev.1234",
 }
+
+MODELS_DIR = "models"
 
 TYPE_MAP = {
     "INTEGER": "INTEGER", "INT": "INTEGER", "BIGINT": "INTEGER",

@@ -37,46 +37,19 @@ description: "触发：用户提出数据库查询问题；用户希望将自然
           完整 sql-of-thought 流水线 + WrenAI 语义层
 ```
 
-### 策略A vs B vs C 对比
-
-| 维度 | 策略A (标准) | 策略B (快速) | 策略C (Cube) |
-|------|:-----------:|:-----------:|:-----------:|
-| 调用WrenAI工具 | 3-5次 | 2次 | 2-3次 |
-| 执行Ns2sql子步骤 | 4-6步 | 1-2步 | 0步 |
-| token消耗 | 2000-6000 | 800-1500 | 500-1000 |
-| 耗时 | 15-30s | 5-10s | 3-8s |
-
 ---
 
 ## 策略A：标准流水线（复杂查询）
 
-### Phase 0: 语义层 Schema 发现（WrenAI MCP）
-
-> **替代**传统 skill 中的描述搜索步骤。高效且精准。
+Schema 发现工作由 nl2sql-schema-linking 技能自行完成（调用 WrenAI 工具获取 Schema 片段），无需前置 Phase。
 
 ```
-Step 0.1: get_data_source()          → 了解SQL方言
-Step 0.2: list_models()              → 可选，了解数据全景
-Step 0.3: get_context(question)      → 语义检索相关模型/列（并行）
-          get_instructions()          → 业务规则约束（并行）
-          recall_queries(question, 3) → 相似查询示例（并行）
-Step 0.4: describe_model(name)       → 对相关模型按需详查（并行）
-```
-
-**关键**：Step 0.3 的三个调用必须**并行**。Step 0.4 的多个 describe_model 必须**并行**。
-
-### Phase 1-N: 传统 SQL-of-Thought 流水线
-
-经过 Phase 0 获得精准 Schema 后，执行标准流水线：
-
-```
-Step 1: nl2sql-schema-linking  → 结合 WrenAI 返回的 Schema 片段，裁剪相关表/列
-Step 2: nl2sql-subproblem      → 分解为子句级子问题
-Step 3: nl2sql-query-plan      → 生成程序化查询计划（CoT推理）
-Step 4: nl2sql-sql-generation  → 合成可执行SQL
-Step 5: dry_run(sql)           → WrenAI 验证SQL
-Step 6: run_sql(sql)           → WrenAI 执行
-Step 7: [可选] nl2sql-correction → 失败时纠错循环
+Step 1: nl2sql-schema-linking  → 技能,调用 WrenAI 工具获取 Schema 片段，裁剪相关表/列
+Step 2: nl2sql-subproblem      → 技能,分解为子句级子问题
+Step 3: nl2sql-query-plan      → 技能,生成程序化查询计划（CoT推理）
+Step 4: nl2sql-sql-generation  → 技能,合成可执行SQL
+Step 5: run_sql(sql)           → WrenAI 执行
+Step 6: [可选] nl2sql-correction → 失败时纠错循环
 ```
 
 ### 完整流程图
@@ -84,27 +57,22 @@ Step 7: [可选] nl2sql-correction → 失败时纠错循环
 ```
 用户问题
   │
-  ├─ Phase 0: WrenAI 语义层
-  │   ├─ get_data_source()
-  │   ├─ list_models() (可选)
-  │   ├─ get_context + get_instructions + recall_queries (并行)
-  │   └─ describe_model * N (并行，按需)
+  ├─ Step 1: Schema Linking
+  │   └─ nl2sql-schema-linking (自行调用 WrenAI 工具)
   │
-  ├─ Phase 1: Schema Linking (传统)
-  │   └─ nl2sql-schema-linking
+  ├─ Step 2: 子问题分解
+  │   └─ nl2sql-subproblem
   │
-  ├─ Phase 2-3: 规划
-  │   ├─ nl2sql-subproblem
+  ├─ Step 3: 查询计划
   │   └─ nl2sql-query-plan
   │
-  ├─ Phase 4-5: 生成+验证
-  │   ├─ nl2sql-sql-generation
-  │   └─ dry_run(sql)
+  ├─ Step 4: SQL 生成
+  │   └─ nl2sql-sql-generation
   │
-  ├─ Phase 6: 执行
+  ├─ Step 5: 执行
   │   └─ run_sql(sql)
   │
-  └─ Phase 7: 纠错（按需）
+  └─ Step 6: 纠错（按需）
       └─ nl2sql-correction
 ```
 
@@ -112,17 +80,15 @@ Step 7: [可选] nl2sql-correction → 失败时纠错循环
 
 ## 策略B：快速通道（简单查询）
 
-跳过传统流水线的大部分步骤，直接利用 WrenAI + skill 生成 SQL。
+跳过传统流水线的大部分步骤，Schema Linking 自行调用 WrenAI 工具获取 Schema 后直接生成 SQL。
 
 ```
-Step 1: recall_queries(question, 2)  → 找相似模板
-Step 2: get_context(question)        → 确认表/列
-Step 3: nl2sql-sql-generation        → 直接生成SQL（跳过linking/subproblem/plan）
-Step 4: dry_run(sql)                 → 验证
-Step 5: run_sql(sql)                 → 执行
+Step 1: nl2sql-schema-linking        → 调用 WrenAI 工具获取 Schema，确认表/列
+Step 2: nl2sql-sql-generation        → 直接生成SQL（跳过subproblem/plan）
+Step 3: run_sql(sql)                 → 执行
 ```
 
-**跳过**: nl2sql-schema-linking / nl2sql-subproblem / nl2sql-query-plan / nl2sql-correction
+**跳过**: nl2sql-subproblem / nl2sql-query-plan / nl2sql-correction
 
 ---
 
@@ -168,14 +134,16 @@ Step 3: query_cube(                  → 直接查询
 
 ## 并行调用规则
 
+Schema Linking 阶段应充分利用并行调用加速 Schema 获取：
+
 必须并行的场景：
-1. get_context + get_instructions + recall_queries
-2. 多个 describe_model 
-3. 独立子查询的 run_sql
+1. `get_context` + `get_instructions` + `recall_queries`（语义检索三件套）
+2. 多个 `describe_model`（按需详查多个模型）
+3. 独立子查询的 `run_sql`
 
 必须顺序的场景：
-1. describe_model 必须在 get_context 之后
-2. dry_run 必须在 run_sql 之前
+1. `describe_model` 必须在 `get_context` 之后（先确定哪些模型相关，再详查）
+2. `dry_run` 必须在 `run_sql` 之前
 3. schema-linking → subproblem → query-plan → sql-generation 顺序执行
 
 ---

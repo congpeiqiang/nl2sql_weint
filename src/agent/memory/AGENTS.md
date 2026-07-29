@@ -141,36 +141,41 @@
 - **日常查询推荐 dry-plan：** 在 SQL 执行前用 `dry_plan` 验证，避免无效执行
 - **MDL 不替代 WrenAI MCP 工具 show：** Schema Linking 仍以 WrenAI MCP 工具 show 为主，MDL 提供业务语义补充
 
-## 5. 混合模型策略
-
-### 4.1 模型分配表
-
-| Agent | 推理需求 | 推荐模型 | 备选模型 |
-|-------|---------|---------|---------|
-| Schema Linking | 高 | Claude Opus / GPT-5 | Claude Sonnet |
-| Query Plan | 高 | Claude Opus / GPT-5 | Claude Sonnet |
-| Correction Plan | 高 | Claude Opus / GPT-5 | Claude Sonnet |
-| Subproblem | 低 | GPT-4o | Claude Haiku |
-| SQL Generation | 低 | GPT-4o | Claude Haiku |
-| Correction SQL | 低 | GPT-4o | Claude Haiku |
-
-### 4.2 策略配置速查
-
-| 配置 | 推理 Agent | 生成 Agent | 预估 EA | 适用场景 |
-|------|-----------|-----------|---------|---------|
-| 最高精度 | Claude Opus | Claude Opus | ~95% | 对准确率要求极高的场景 |
-| 建议混合 | Claude Opus | GPT-4o | ~85% | 成本与精度平衡（**推荐**） |
-| 预算优先 | GPT-4o-mini | GPT-4o-mini | ~87% | 预算有限但可接受略低精度 |
-| 不推荐 | GPT-3.5 | GPT-3.5 | ~67% | 精度过低 |
-| 不推荐 | Llama 3.1 8B | Llama 3.1 8B | ~45% | 严重幻觉 |
-
 ---
 
 ## 6. 输出规范模板
 
-### 5.1 成功时
+### 6.1 结构化数据要求（强制）
+
+返回结果时，**必须同时包含**以下两部分：
+
+1. **Markdown 描述** — 自然语言分析、表格、发现
+2. **JSON 数据块** — 原始查询数据，供主智能体直接使用
+
+JSON 数据块格式要求：
+- 放在 ` ```json ` 代码块中
+- 字段名与 Markdown 表格列名对应
+- 数值字段保持原始类型（不要加单位/前缀）
+- 包含所有查询结果行，不要截断
 
 ```markdown
+## 查询结果：xxx
+
+### 数据
+​```json
+[
+  {"genre": "comedy", "dual_avg": 6.27, "director_only_avg": 6.13, "diff": 0.14, "dual_count": 6403, "director_only_count": 5686},
+  {"genre": "drama", "dual_avg": 6.56, "director_only_avg": 6.50, "diff": 0.06, "dual_count": 11013, "director_only_count": 8788}
+]
+```
+
+### 关键发现
+1. ...
+```
+
+### 6.2 成功时
+
+​```markdown
 ## 生成的 SQL 查询
 [单行 SQL，无尾部分号，无注释]
 
@@ -190,7 +195,7 @@
 - 是否进入纠错循环: 否
 ```
 
-### 5.2 失败并经过纠错时
+### 6.3 失败并经过纠错时
 
 额外增加：
 

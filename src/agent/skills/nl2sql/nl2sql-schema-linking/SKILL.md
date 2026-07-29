@@ -1,6 +1,6 @@
 ---
 name: nl2sql-schema-linking
-description: "触发：识别查询所需的表/列/关系。前提：已完成WrenAI Phase 0（get_context + describe_model）。输入：WrenAI返回的Schema片段+问题。输出：裁剪后的精确Schema。跳过：策略B或策略C。"
+description: "触发：识别查询所需的表/列/关系。前提：已完成WrenAI Phase 0（get_context + describe_model）。输入：WrenAI返回的Schema片段+问题。输出：裁剪后的精确Schema。跳过：策略C。"
 ---
 
 # NL2SQL Schema 关联智能体（WrenAI 增强版）
@@ -15,6 +15,7 @@ SQL-of-Thought 流水线第1步。接收 WrenAI 语义层返回的 Schema 片段
 - WrenAI get_context(question) 返回的语义片段
 - WrenAI describe_model 返回的列详情
 - WrenAI get_instructions 返回的业务规则
+- WrenAI recall_queries 返回的历史查询记录
 
 ## 输出
 
@@ -25,10 +26,15 @@ SQL-of-Thought 流水线第1步。接收 WrenAI 语义层返回的 Schema 片段
 ```
 WrenAI Phase 0 输出
   │
+  ├─ list_knowledge()               → 发现有哪些知识文件
   ├─ get_context(question)          → 语义相关模型/列
+  ├─ 读取 metrics/*.md               → 业务指标定义
+  ├─ 读取 读取 rules/*.md             → 业务规则
+  ├─ 读取 glossary/*.md              → 术语表
+  ├─ wren recall_queries()          → 语义搜索匹配历史SQL
   ├─ describe_model(name1)          → 列详情 + 主键
-  ├─ describe_model(name2)          → 列详情 + 主键
   └─ get_instructions()             → 业务约束
+  └─ recall_queries()               → 历史查询记录
         │
         ▼
   nl2sql-schema-linking

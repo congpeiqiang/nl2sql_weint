@@ -34,7 +34,7 @@ SQL-of-Thought 流水线中唯一生成 SQL 的智能体。
     ▼
 dry_run(sql)               ← WrenAI 验证
     │
-    ├─ 成功 → run_sql(sql)
+    ├─ 成功 → Phase 6: 执行
     └─ 失败 → 分析错误 → 修复SQL → dry_run → 循环
                  │
                  └─ 3次失败 → nl2sql-correction
@@ -51,7 +51,7 @@ get_context 片段 + recall_queries 模板 + 问题 (Q)
     ▼
 dry_run(sql)               ← WrenAI 验证
     │
-    ├─ 成功 → run_sql(sql)
+    ├─ 成功 → Phase 6: 执行
     └─ 失败 → 简单修复 → dry_run → 成功/放弃
 ```
 
@@ -61,3 +61,4 @@ dry_run(sql)               ← WrenAI 验证
 - **IMDb**: 加 `title_type = 'movie'`，加 `num_votes > 1000`
 - **dry_run**: 生成后立即 dry_run，失败最多修复3次
 - **纠错**: 3次 dry_run 失败 → 调用 nl2sql-correction
+- 不要执行run_sql

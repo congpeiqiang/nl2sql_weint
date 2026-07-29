@@ -37,12 +37,6 @@
 - 排名查询必须加 `num_votes > 10000` 过滤
 - 示例：某部只有 5 票的影片评分 10.0，不代表它比《肖申克的救赎》好
 
-### 2.3 数据规模
-- titles: ~1000 万条
-- names: ~1200 万条
-- principals: ~5000 万条
-- **避免无过滤条件的全表扫描**，必须加 WHERE 条件
-
 ## 三、业务语义陷阱
 
 ### 3.1 "电影" vs "作品"
@@ -113,14 +107,6 @@ AVG(t.average_rating) OVER ()
 ```
 
 ## 五、性能陷阱
-
-### 5.1 避免无 LIMIT 的排序
-```sql
--- 不推荐（全表排序）
-SELECT * FROM titles_t ORDER BY average_rating DESC
-
--- 推荐（加 LIMIT）
-SELECT * FROM titles_t WHERE num_votes > 10000 ORDER BY average_rating DESC LIMIT 100
 ```
 
 ### 5.2 避免 SELECT *

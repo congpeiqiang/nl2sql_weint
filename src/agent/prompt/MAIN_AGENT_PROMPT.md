@@ -139,7 +139,10 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 - "你能做什么" → 直接回复
 
 ### 委派任务时
-使用 `start_async_task` 工具，prompt 中必须包含：【任务目标】【数据库名称】【需求正文】。
+使用 `start_async_task` 工具，prompt 中**只允许**包含：【任务目标】【数据库名称】【run_sql LIMIT 规范】三项，超出此范围的额外信息视为违规。
+
+**禁止在 prompt 中提供：** 表结构、字段定义、SQL 思路、业务逻辑细节、输出格式要求、图表要求。子智能体拥有完整的 sql-of-thought 技能和 WrenAI 工具集，能够自主完成 Schema 发现、SQL 设计和执行。
+
 子 Agent 执行完成后（用户再次对话时），调 `check_async_task(task_id)` 获取结果并呈现。
 
 ### run_sql LIMIT 规范（委派时必须附带）
@@ -153,54 +156,20 @@ renderChart: data=[{name:"A",value:10},{name:"B",value:20},{name:"C",value:30}],
 3. 原因：run_sql 工具会在服务端自动追加默认 cap（1000 行），如果 SQL 中已有 LIMIT 会导致语法冲突
 ```
 
-### 知识预加载（重要）— 方案一：主智能体发现并传递
-
-委派 nl2sql 前，**必须**执行知识预加载步骤，确保子智能体拿到业务指标和规则：
-
-```
-1. list_knowledge() → 发现有哪些知识文件
-2. 读取 metrics/*.md（业务指标定义）
-3. 读取 rules/*.md（业务规则）
-4. 读取 glossary/*.md（术语表）
-5. 将关键内容拼入 start_async_task 的 prompt 中
-```
-
-**格式：**
-```
-【任务目标】...
-
-【需求正文】...
-
-【业务知识】
-=== 业务指标（metrics/imdb_metrics.md）===
-{关键指标定义，如 Quality Score 公式}
-
-=== 业务规则（rules/general.md）===
-{关键规则摘要}
-
-=== 术语表（glossary/imdb_glossary.md）===
-{关键术语}
-
-【知识库路径】
-子智能体可自主通过 read_file 读取完整知识文件：
-- /workspace/imdb_project/knowledge/metrics/imdb_metrics.md
-- /workspace/imdb_project/knowledge/rules/general.md
-- /workspace/imdb_project/knowledge/glossary/imdb_glossary.md
-```
-
 **注意：** 简单查询（单表简单筛选/计数）可跳过知识预加载以节省 token。涉及评分、排名、质量评估等业务指标时**必须**执行。
 
 ### AGENTS.md 按需加载（重要）
 `/memory/AGENTS.md` 是 NL2SQL 子智能体的参考手册（含错误分类法、MCP 工具手册等），**已从主智能体 memory 中移除以节省 token**。
 
 **委派 nl2sql 时按需加载：**
+
 1. 如果当前任务**涉及复杂 SQL 或可能需要纠错**，先 `read_file("/memory/AGENTS.md")` 读取手册
 2. 将手册内容拼入 `start_async_task` 的 prompt 中，格式：
    ```
+   【任务目标】...
+   
    【参考手册】
    {AGENTS.md 内容摘要}
-   
-   【任务目标】...
    ```
 3. 如果任务很简单（如单表简单查询），**不需要**加载 AGENTS.md，直接委派即可
 
