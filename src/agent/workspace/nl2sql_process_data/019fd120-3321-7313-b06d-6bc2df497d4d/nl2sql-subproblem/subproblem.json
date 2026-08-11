@@ -1,0 +1,14 @@
+{
+  "SELECT": "年份 (titles.start_year) 和该年电视剧的平均评分 (AVG(titles.average_rating))",
+  "FROM": "titles 表（别名 t）",
+  "JOIN": "无（单表查询）",
+  "WHERE": [
+    "t.title_type = 'tvSeries'（电视剧系列）",
+    "t.start_year BETWEEN 2000 AND 2023（年份范围）",
+    "t.average_rating IS NOT NULL（排除无评分记录）"
+  ],
+  "GROUP_BY": "t.start_year（按年份分组）",
+  "HAVING": "无",
+  "ORDER_BY": "t.start_year ASC（按年份升序展示趋势）",
+  "LIMIT": "无（通过 run_sql limit 参数控制）"
+}

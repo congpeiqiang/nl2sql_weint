@@ -1,0 +1,103 @@
+{
+  "user_intent": {
+    "original_question": "找出同时是演员和导演的人，分别计算他们作为演员和作为导演的作品平均评分，要求两种角色参演作品数均 >= 3",
+    "domain": "imdb",
+    "keywords": ["演员", "导演", "平均评分", "作品数", ">= 3"],
+    "intent_type": "cross_over_artist_analysis"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "actor_work_count", "operator": ">=", "value": 3},
+      {"field": "director_work_count", "operator": ">=", "value": 3}
+    ],
+    "fields_to_display": ["人名", "演员作品数", "演员平均评分", "导演作品数", "导演平均评分"]
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["作品平均评分", "avg_rating"],
+      "formula": "AVG(t.average_rating)",
+      "related_tables": ["titles"],
+      "aggregation": "AVG"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_actor",
+      "name": "演员定义",
+      "condition": "category_id IN ('actor', 'actress')"
+    },
+    {
+      "id": "rule_director",
+      "name": "导演定义",
+      "condition": "category_id = 'director'"
+    },
+    {
+      "id": "rule_movie",
+      "name": "作品类型",
+      "condition": "title_type = 'movie'"
+    },
+    {
+      "id": "rule_rating_notnull",
+      "name": "评分非空",
+      "condition": "average_rating IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "演员": "principals.category_id IN ('actor', 'actress')",
+    "导演": "principals.category_id = 'director'",
+    "作品平均评分": "titles.average_rating",
+    "人名": "names.primary_name"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "演而优则导 — 跨界者表现分析，找出同时是演员和导演的人，对比其作为演员 vs 导演的作品评分差异",
+      "sql": "WITH actor_works AS (SELECT p.name_id, AVG(t.average_rating) AS actor_avg_rating, COUNT(*) AS actor_movie_count FROM principals p JOIN titles t ON p.title_id = t.id WHERE p.category_id IN ('actor', 'actress') AND t.title_type = 'movie' AND t.average_rating IS NOT NULL GROUP BY p.name_id HAVING COUNT(*) >= 3), director_works AS (SELECT p.name_id, AVG(t.average_rating) AS director_avg_rating, COUNT(*) AS director_movie_count FROM principals p JOIN titles t ON p.title_id = t.id WHERE p.category_id = 'director' AND t.title_type = 'movie' AND t.average_rating IS NOT NULL GROUP BY p.name_id HAVING COUNT(*) >= 2) SELECT n.primary_name, a.actor_movie_count, ROUND(a.actor_avg_rating, 2) AS actor_avg_rating, d.director_movie_count, ROUND(d.director_avg_rating, 2) AS director_avg_rating, ROUND(d.director_avg_rating - a.actor_avg_rating, 2) AS rating_difference FROM actor_works a JOIN director_works d ON a.name_id = d.name_id JOIN names n ON a.name_id = n.id ORDER BY rating_difference DESC LIMIT 20",
+      "intent_type": "cross_over_artist_analysis",
+      "similarity_score": 0.95
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "演员定义",
+      "content": "查询演员时必须同时包含 category_id IN ('actor', 'actress')"
+    },
+    {
+      "topic": "导演定义",
+      "content": "导演的 category_id = 'director'，不要用 job_id 查导演"
+    },
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影，titles 表包含9种作品类型"
+    },
+    {
+      "topic": "评分可信度",
+      "content": "低投票数影片评分不可靠，排名查询建议加 num_votes > 10000 过滤"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["principals", "titles", "names"],
+    "main_fields": ["principals.name_id", "principals.category_id", "principals.title_id", "titles.average_rating", "titles.title_type", "names.primary_name"],
+    "filter_conditions": ["category_id IN ('actor','actress')", "category_id = 'director'", "title_type = 'movie'", "average_rating IS NOT NULL", "HAVING COUNT(*) >= 3"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 4,
+      "field_mappings": 4,
+      "knowledge": 4
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 4,
+      "field_mappings": 4,
+      "knowledge": 4
+    }
+  }
+}

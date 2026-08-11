@@ -1,0 +1,85 @@
+{
+  "user_intent": {
+    "original_question": "统计电影类型（genres）的数量，并列出每种电影类型对应的电影数量分布",
+    "domain": "imdb",
+    "keywords": ["电影类型", "genres", "数量", "电影数量分布", "统计"],
+    "intent_type": "query_genre_movie_distribution"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [{"field": "title_type", "operator": "=", "value": "movie"}],
+    "fields_to_display": ["电影类型(genre)", "电影数量(movie_count)"]
+  },
+  "metrics": [
+    {
+      "name": "电影数量",
+      "aliases": ["电影数", "movie_count"],
+      "formula": "COUNT(DISTINCT t.id)",
+      "related_tables": ["titles", "titles_genres", "genres"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "t.title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "genre_id 是字符串",
+      "condition": "genres.id 存的是字符串如 'action', 'comedy'，不是数字ID"
+    }
+  ],
+  "field_mappings": {
+    "电影类型": {"table": "genres", "field": "display_name"},
+    "电影数量": {"table": "titles", "field": "id", "aggregation": "COUNT(DISTINCT)"}
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "各类型电影平均评分（含热度指数），统计 2000 年后各类型电影的平均评分和热度",
+      "normalized_question": "统计各类型电影的平均评分和热度",
+      "sql": "SELECT g.display_name AS genre, COUNT(DISTINCT t.id) AS movie_count, ROUND(AVG(t.average_rating), 2) AS avg_rating, ROUND(AVG(t.num_votes), 0) AS avg_votes, ROUND(SUM(t.num_votes), 0) AS total_votes, ROUND(AVG(t.runtime_minutes), 1) AS avg_runtime FROM titles t JOIN titles_genres tg ON tg.title_id = t.id JOIN genres g ON g.id = tg.genre_id WHERE t.title_type = 'movie' AND t.num_votes > 5000 AND t.start_year >= 2000 AND t.start_year IS NOT NULL GROUP BY g.id, g.display_name ORDER BY avg_rating DESC",
+      "intent_type": "query_genre_ratings",
+      "similarity_score": 0.8
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles ←→ titles_genres ←→ genres，通过 titles_genres.title_id = titles.id 和 titles_genres.genre_id = genres.id 关联"
+    },
+    {
+      "topic": "字段说明",
+      "content": "genres.id 是字符串类型（action, comedy, drama 等），genres.display_name 是类型显示名"
+    },
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影，titles 表包含 9 种作品类型"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "titles_genres", "genres"],
+    "main_fields": ["titles.id", "titles.title_type", "titles_genres.title_id", "titles_genres.genre_id", "genres.id", "genres.display_name"],
+    "filter_conditions": ["t.title_type = 'movie'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 3
+    }
+  }
+}

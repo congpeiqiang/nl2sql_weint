@@ -1,0 +1,18 @@
+{
+  "sql": "SELECT\n  ROUND(AVG(t.average_rating), 2) AS avg_rating\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 1990 AND 1999\n  AND t.average_rating IS NOT NULL",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。SQL为单表聚合查询，返回单行结果，无需LIMIT。无JOIN、无子查询、无SELECT *、无函数包裹列导致索引失效等问题。SQL已是最优状态。",
+  "checks": [
+    {"rule": "select_star", "result": "pass", "detail": "未使用SELECT *"},
+    {"rule": "no_limit", "result": "pass", "detail": "聚合查询返回单行，无需LIMIT"},
+    {"rule": "cartesian_join", "result": "pass", "detail": "无JOIN"},
+    {"rule": "subquery", "result": "pass", "detail": "无子查询"},
+    {"rule": "function_wrapping_column", "result": "pass", "detail": "ROUND包裹的是聚合函数结果，非直接包裹列"},
+    {"rule": "not_in", "result": "pass", "detail": "未使用NOT IN"},
+    {"rule": "distinct", "result": "pass", "detail": "未使用DISTINCT"},
+    {"rule": "like_prefix_wildcard", "result": "pass", "detail": "未使用LIKE"},
+    {"rule": "or_condition", "result": "pass", "detail": "未使用OR"},
+    {"rule": "limit_without_order_by", "result": "pass", "detail": "无LIMIT"}
+  ]
+}

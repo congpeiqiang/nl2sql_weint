@@ -1,0 +1,90 @@
+{
+  "user_intent": {
+    "original_question": "查询 1990 年代（1990-1999）电影的平均评分",
+    "domain": "movies, ratings",
+    "keywords": ["电影", "平均评分", "1990年代", "1990-1999"],
+    "intent_type": "query_aggregate_rating"
+  },
+  "entities": {
+    "time_range": {"start": 1990, "end": 1999},
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "start_year", "operator": ">=", "value": 1990},
+      {"field": "start_year", "operator": "<=", "value": 1999}
+    ],
+    "fields_to_display": ["平均评分"]
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["avg rating", "mean rating"],
+      "formula": "AVG(t.average_rating)",
+      "related_tables": ["titles"],
+      "aggregation": "AVG"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "title_type = 'movie'",
+      "note": "titles表包含9种作品类型，必须用title_type='movie'过滤才是电影"
+    },
+    {
+      "id": "rule_002",
+      "name": "NULL值处理",
+      "condition": "start_year IS NOT NULL",
+      "note": "start_year可能为NULL，查询时建议过滤"
+    },
+    {
+      "id": "rule_003",
+      "name": "评分可信度",
+      "condition": "num_votes > 10000",
+      "note": "排名类查询应加num_votes > 10000过滤，但本题是求整体平均评分，非排名，可选"
+    }
+  ],
+  "field_mappings": {
+    "电影": "titles (title_type = 'movie')",
+    "平均评分": "titles.average_rating",
+    "年份": "titles.start_year",
+    "评分": "titles.average_rating",
+    "投票数": "titles.num_votes"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "作品类型",
+      "content": "titles表包含movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame共9种类型，查电影必须title_type='movie'"
+    },
+    {
+      "topic": "评分字段",
+      "content": "average_rating为DOUBLE类型，范围1.0-10.0，是IMDb加权平均分"
+    },
+    {
+      "topic": "年代划分",
+      "content": "年代计算公式：FLOOR(start_year / 10) * 10，1990年代即start_year BETWEEN 1990 AND 1999"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.average_rating", "titles.start_year", "titles.title_type"],
+    "filter_conditions": ["title_type = 'movie'", "start_year >= 1990", "start_year <= 1999"],
+    "time_range": "1990-1999"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 5,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 5,
+      "knowledge": 3
+    }
+  }
+}

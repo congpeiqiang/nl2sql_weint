@@ -1,0 +1,13 @@
+{
+  "sql": "SELECT n.primary_name AS 演员姓名,\n  COUNT(DISTINCT p.title_id) AS 参演电影数,\n  ROUND(AVG(t.average_rating), 2) AS 平均评分\nFROM names n\nJOIN principals p ON p.name_id = n.id\nJOIN titles t ON t.id = p.title_id\nWHERE p.category_id IN ('actor', 'actress')\n  AND t.title_type = 'movie'\n  AND t.num_votes > 50000\nGROUP BY n.id, n.primary_name\nHAVING COUNT(DISTINCT p.title_id) >= 5\nORDER BY 平均评分 DESC",
+  "optimized_sql": "SELECT n.primary_name AS 演员姓名,\n  COUNT(DISTINCT p.title_id) AS 参演电影数,\n  ROUND(AVG(t.average_rating), 2) AS 平均评分\nFROM names n\nJOIN principals p ON p.name_id = n.id\nJOIN titles t ON t.id = p.title_id\nWHERE p.category_id IN ('actor', 'actress')\n  AND t.title_type = 'movie'\n  AND t.num_votes > 50000\nGROUP BY n.id, n.primary_name\nHAVING COUNT(DISTINCT p.title_id) >= 5\nORDER BY 平均评分 DESC",
+  "issues": [
+    {
+      "rule": "no_limit",
+      "severity": "medium",
+      "message": "SQL 中未写 LIMIT 子句",
+      "suggestion": "按任务规范，通过 run_sql 的 limit 参数控制返回行数（limit=10），不在 SQL 中写 LIMIT"
+    }
+  ],
+  "summary": "共发现 1 个性能问题，0 个高风险。SQL 已明确列出所需列、JOIN 均有 ON 条件、无 SELECT *、无笛卡尔积。LIMIT 通过 run_sql 参数控制，符合任务规范。"
+}

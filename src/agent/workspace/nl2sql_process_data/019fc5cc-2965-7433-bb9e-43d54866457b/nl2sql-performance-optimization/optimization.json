@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT t.primary_title AS series_title, COUNT(DISTINCT e.id) AS episode_count\nFROM titles t\nJOIN episodes e ON e.parent_id = t.id\nWHERE t.title_type = 'tvSeries'\nGROUP BY t.id, t.primary_title\nORDER BY episode_count DESC",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。SQL 已明确列出所需列，JOIN 有 ON 条件，无子查询，无函数包裹列，无 NOT IN，COUNT(DISTINCT) 为合法聚合用法，有 ORDER BY。LIMIT 通过 run_sql 参数控制（聚合查询 GROUP BY 通常无需 LIMIT 子句）。无需优化。"
+}

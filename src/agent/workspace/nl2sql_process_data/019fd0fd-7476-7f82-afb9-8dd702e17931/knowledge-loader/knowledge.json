@@ -1,0 +1,70 @@
+{
+  "user_intent": {
+    "original_question": "查询片长（runtime）超过 180 分钟的电影",
+    "domain": "imdb",
+    "keywords": ["片长", "runtime", "180分钟", "电影"],
+    "intent_type": "query_movies_by_runtime"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "runtime_minutes", "operator": ">", "value": 180},
+      {"field": "title_type", "operator": "=", "value": "movie"}
+    ],
+    "fields_to_display": ["电影标题", "片长"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_type_movie",
+      "name": "电影类型过滤",
+      "condition": "t.title_type = 'movie'",
+      "content": "title_type='movie' 才是电影，titles 表包含9种作品类型，需过滤"
+    },
+    {
+      "id": "rule_runtime_null",
+      "name": "片长NULL处理",
+      "condition": "runtime_minutes IS NOT NULL",
+      "content": "runtime_minutes 可能为 NULL，查询时需处理"
+    }
+  ],
+  "field_mappings": {
+    "片长": "titles.runtime_minutes",
+    "电影标题": "titles.primary_title",
+    "电影": "titles.title_type = 'movie'"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "片长分类",
+      "content": "针对 movie 类型：<40min短片, 40-90标准片, 90-150长片, >150超长片。180分钟属于超长片"
+    },
+    {
+      "topic": "NULL值处理",
+      "content": "runtime_minutes 电视剧集通常为 NULL，电影一般有值"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.runtime_minutes", "titles.title_type"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.runtime_minutes > 180"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T00:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 2
+    }
+  }
+}

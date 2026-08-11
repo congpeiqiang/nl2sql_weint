@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT\n  t.start_year AS year,\n  ROUND(AVG(t.average_rating), 2) AS avg_rating\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 1990 AND 1999\n  AND t.start_year IS NOT NULL\n  AND t.average_rating IS NOT NULL\nGROUP BY t.start_year\nORDER BY t.start_year ASC",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "未发现性能问题。SQL为单表聚合查询，结果最多10行（1990-1999年），无需LIMIT；无SELECT *、无JOIN、无子查询、无函数包裹索引列、无NOT IN、无LIKE前缀通配符。查询结构简洁高效。"
+}

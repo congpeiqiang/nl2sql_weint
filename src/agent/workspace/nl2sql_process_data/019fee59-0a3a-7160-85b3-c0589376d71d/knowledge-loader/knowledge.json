@@ -1,0 +1,61 @@
+{
+  "user_intent": {
+    "original_question": "查询 2020 年之后（含 2020）共有多少部电影",
+    "domain": "imdb",
+    "keywords": ["电影", "2020", "数量", "count"],
+    "intent_type": "count_movies_since_2020"
+  },
+  "entities": {
+    "time_range": {"start": 2020, "end": null},
+    "filters": [{"field": "title_type", "operator": "=", "value": "movie"}, {"field": "start_year", "operator": ">=", "value": 2020}],
+    "fields_to_display": ["电影数量"]
+  },
+  "metrics": [
+    {
+      "name": "电影数量",
+      "aliases": ["电影数", "多少部电影"],
+      "formula": "COUNT(*) WHERE title_type='movie'",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型定义",
+      "condition": "titles.title_type = 'movie' 才是电影，不能直接用 titles 表代表电影"
+    },
+    {
+      "id": "rule_002",
+      "name": "NULL 值处理",
+      "condition": "start_year 可能为 NULL，查询时建议 WHERE start_year IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "电影": "titles.title_type = 'movie'",
+    "年份": "titles.start_year"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影（长片电影），titles 表包含 9 种作品类型"
+    },
+    {
+      "topic": "NULL 处理",
+      "content": "start_year 可能为 NULL，需处理"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type", "titles.start_year"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.start_year >= 2020"],
+    "time_range": "2020 onwards"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "strategy": "B"
+  }
+}

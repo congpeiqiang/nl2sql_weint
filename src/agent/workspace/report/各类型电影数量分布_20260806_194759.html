@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "backgroundColor": "#fff",
+  "title": {
+    "text": "各类型电影数量分布",
+    "left": "center",
+    "top": "2%"
+  },
+  "tooltip": {
+    "trigger": "axis",
+    "axisPointer": {
+      "type": "shadow"
+    }
+  },
+  "legend": {
+    "show": false
+  },
+  "grid": {
+    "left": 120,
+    "right": 50,
+    "top": 60,
+    "bottom": 50
+  },
+  "xAxis": {
+    "type": "value",
+    "name": "电影数量"
+  },
+  "yAxis": {
+    "type": "category",
+    "data": [
+      "Drama",
+      "Documentary",
+      "Comedy",
+      "Thriller",
+      "Action",
+      "Horror",
+      "Romance",
+      "Crime",
+      "Adventure",
+      "Biography",
+      "Family",
+      "Mystery",
+      "Sci-Fi",
+      "Fantasy",
+      "History",
+      "Music",
+      "Animation",
+      "Sport",
+      "Musical",
+      "War",
+      "Adult",
+      "Western",
+      "News",
+      "Reality-TV",
+      "Talk-Show",
+      "Game-Show"
+    ]
+  },
+  "series": [
+    {
+      "name": "电影数量",
+      "type": "bar",
+      "data": [
+        154043,
+        113966,
+        66885,
+        38600,
+        36731,
+        35146,
+        26039,
+        20850,
+        17435,
+        14901,
+        12439,
+        12351,
+        11732,
+        11455,
+        11244,
+        10887,
+        8608,
+        6838,
+        4537,
+        4137,
+        2870,
+        1774,
+        1416,
+        552,
+        200,
+        13
+      ],
+      "itemStyle": {
+        "color": "#5470c6"
+      },
+      "label": {
+        "show": true,
+        "position": "right",
+        "formatter": "{c}"
+      }
+    }
+  ]
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

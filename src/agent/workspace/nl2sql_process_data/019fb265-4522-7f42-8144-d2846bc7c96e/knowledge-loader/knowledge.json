@@ -1,0 +1,10 @@
+{
+  "instructions": "IMDb 业务规则",
+  "rules": [
+    "电影类型: title_type = 'movie'",
+    "评分可信度: num_votes > 10000 为较可信",
+    "加拿大地区代码: 'CA' (ISO 3166-1 alpha-2)",
+    "titleakas.region 存储地区信息，可用于关联电影与地区"
+  ],
+  "status": "success"
+}

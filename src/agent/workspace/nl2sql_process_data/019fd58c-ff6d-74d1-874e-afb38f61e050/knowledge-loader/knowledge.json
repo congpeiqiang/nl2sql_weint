@@ -1,0 +1,96 @@
+{
+  "user_intent": {
+    "original_question": "查询导演-演员黄金搭档，即合作 3 次以上且平均评分 >= 7.5 的导演和演员组合。找出那些多次合作且作品质量都很高的导演-演员搭档。",
+    "domain": "imdb",
+    "keywords": ["导演", "演员", "合作", "黄金搭档", "平均评分", "7.5"],
+    "intent_type": "query_director_actor_collaboration"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "collaboration_count", "operator": ">=", "value": 3},
+      {"field": "avg_rating", "operator": ">=", "value": 7.5}
+    ],
+    "fields_to_display": ["导演名", "演员名", "合作次数", "平均评分"]
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["avg_rating", "合作作品平均评分"],
+      "formula": "AVG(t.average_rating)",
+      "related_tables": ["titles"],
+      "aggregation": "AVG"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_actor",
+      "name": "演员定义",
+      "condition": "category_id IN ('actor', 'actress')"
+    },
+    {
+      "id": "rule_director",
+      "name": "导演定义",
+      "condition": "category_id = 'director'"
+    },
+    {
+      "id": "rule_movie",
+      "name": "电影类型",
+      "condition": "t.title_type = 'movie'"
+    },
+    {
+      "id": "rule_rating_credibility",
+      "name": "评分可信度",
+      "condition": "t.num_votes > 5000 AND t.average_rating IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "导演名": "names.primary_name (category_id='director')",
+    "演员名": "names.primary_name (category_id IN ('actor','actress'))",
+    "合作次数": "COUNT(*)",
+    "平均评分": "AVG(titles.average_rating)"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_director_actor",
+      "original_question": "导演-演员黄金搭档分析，找出合作 3 次以上且合作作品平均评分 >= 7.5 的导演-演员组合",
+      "sql": "SELECT d.primary_name AS director_name, a.primary_name AS actor_name, COUNT(*) AS collaboration_count, ROUND(AVG(t.average_rating), 2) AS avg_rating, GROUP_CONCAT(DISTINCT t.primary_title ORDER BY t.start_year SEPARATOR '; ') AS movies FROM principals pd JOIN titles t ON pd.title_id = t.id AND t.title_type = 'movie' JOIN principals pa ON pa.title_id = t.id AND pa.category_id IN ('actor', 'actress') JOIN names d ON pd.name_id = d.id JOIN names a ON pa.name_id = a.id WHERE pd.category_id = 'director' AND t.num_votes > 5000 AND t.average_rating IS NOT NULL GROUP BY d.id, d.primary_name, a.id, a.primary_name HAVING COUNT(*) >= 3 AND AVG(t.average_rating) >= 7.5 ORDER BY collaboration_count DESC, avg_rating DESC LIMIT 20",
+      "intent_type": "query_director_actor_collaboration",
+      "similarity_score": 0.98
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles ←→ principals ←→ names。principals 自关联：一次查导演(category_id='director')，一次查演员(category_id IN ('actor','actress'))"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.average_rating 为评分，num_votes 为投票数。导演用 category_id='director'，演员用 category_id IN ('actor','actress')"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["principals", "titles", "names"],
+    "main_fields": ["principals.title_id", "principals.name_id", "principals.category_id", "titles.average_rating", "titles.title_type", "titles.num_votes", "names.primary_name"],
+    "filter_conditions": ["pd.category_id='director'", "pa.category_id IN ('actor','actress')", "t.title_type='movie'", "t.num_votes>5000", "t.average_rating IS NOT NULL", "HAVING COUNT(*)>=3 AND AVG(t.average_rating)>=7.5"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "datasource": "mysql",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 4,
+      "field_mappings": 4,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 4,
+      "field_mappings": 4,
+      "knowledge": 2
+    }
+  }
+}

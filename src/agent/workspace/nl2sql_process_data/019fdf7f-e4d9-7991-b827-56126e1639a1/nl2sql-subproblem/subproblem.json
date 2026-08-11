@@ -1,0 +1,13 @@
+{
+  "SELECT": "genres.display_name AS genre_name, COUNT(DISTINCT titles.id) AS movie_count",
+  "FROM": "titles t, titles_genres tg, genres g",
+  "JOIN": [
+    {"table": "titles_genres tg", "on": "tg.title_id = t.id"},
+    {"table": "genres g", "on": "tg.genre_id = g.id"}
+  ],
+  "WHERE": "t.title_type = 'movie'",
+  "GROUP_BY": "g.display_name",
+  "HAVING": "无",
+  "ORDER_BY": "movie_count DESC",
+  "LIMIT": "5 (通过run_sql的limit参数控制)"
+}

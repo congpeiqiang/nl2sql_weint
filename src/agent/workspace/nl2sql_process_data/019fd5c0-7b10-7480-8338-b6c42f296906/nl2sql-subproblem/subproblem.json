@@ -1,0 +1,16 @@
+{
+  "SELECT": "n.primary_name AS actor_name, MAX(t.start_year) - MIN(t.start_year) AS career_span",
+  "FROM": "names n JOIN principals p ON p.name_id = n.id JOIN titles t ON t.id = p.title_id",
+  "JOIN": [
+    {"table": "principals p", "on": "p.name_id = n.id"},
+    {"table": "titles t", "on": "t.id = p.title_id"}
+  ],
+  "WHERE": [
+    "p.category_id IN ('actor', 'actress')",
+    "t.start_year IS NOT NULL"
+  ],
+  "GROUP_BY": "n.id, n.primary_name",
+  "HAVING": "MAX(t.start_year) - MIN(t.start_year) IS NOT NULL",
+  "ORDER_BY": "career_span DESC",
+  "LIMIT": "10 (通过 run_sql limit 参数控制)"
+}

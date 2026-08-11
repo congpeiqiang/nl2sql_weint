@@ -1,0 +1,98 @@
+{
+  "user_intent": {
+    "original_question": "统计电视剧系列的数量分布情况，包括：1) 电视剧系列总数；2) 按类型（genre）统计电视剧系列数量分布；3) 按首播年份统计电视剧系列数量趋势。请查询 imdb 数据库中与电视剧系列（title_type 为 tvSeries 或类似）相关的数据。",
+    "domain": "imdb",
+    "keywords": ["电视剧系列", "tvSeries", "数量分布", "genre", "类型", "首播年份", "start_year", "总数"],
+    "intent_type": "query_series_distribution"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "tvSeries"}
+    ],
+    "fields_to_display": ["电视剧系列总数", "genre类型", "首播年份", "数量"]
+  },
+  "metrics": [
+    {
+      "name": "电视剧系列总数",
+      "aliases": ["系列数量", "总数"],
+      "formula": "COUNT(*) FROM titles WHERE title_type = 'tvSeries'",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    },
+    {
+      "name": "按类型数量分布",
+      "aliases": ["genre分布"],
+      "formula": "COUNT(*) GROUP BY genre",
+      "related_tables": ["titles", "titles_genres", "genres"],
+      "aggregation": "COUNT"
+    },
+    {
+      "name": "按首播年份数量趋势",
+      "aliases": ["年份趋势"],
+      "formula": "COUNT(*) GROUP BY start_year",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电视剧系列类型",
+      "condition": "title_type = 'tvSeries' 表示多季多集的电视剧系列"
+    },
+    {
+      "id": "rule_002",
+      "name": "start_year NULL处理",
+      "condition": "start_year 可能为 NULL，查询时建议 WHERE start_year IS NOT NULL"
+    },
+    {
+      "id": "rule_003",
+      "name": "genre_id是字符串",
+      "condition": "genres.id 存的是字符串如 'action', 'comedy'，不是数字ID"
+    }
+  ],
+  "field_mappings": {
+    "电视剧系列": "titles.title_type = 'tvSeries'",
+    "类型": "titles_genres.genre_id / genres.id",
+    "首播年份": "titles.start_year"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "作品类型语义",
+      "content": "tvSeries = 电视剧系列（多季多集），tvEpisode = 单个剧集，tvMiniSeries = 迷你剧"
+    },
+    {
+      "topic": "多表JOIN路径",
+      "content": "titles ←→ titles_genres ←→ genres（类型关联）"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.start_year 为首播年份，可能为 NULL"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "titles_genres", "genres"],
+    "main_fields": ["titles.title_type", "titles.start_year", "titles_genres.genre_id", "genres.id"],
+    "filter_conditions": ["titles.title_type = 'tvSeries'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 1,
+      "field_mappings": 1,
+      "knowledge": 1
+    },
+    "filtered_saved": {
+      "metrics": 3,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 3
+    }
+  }
+}

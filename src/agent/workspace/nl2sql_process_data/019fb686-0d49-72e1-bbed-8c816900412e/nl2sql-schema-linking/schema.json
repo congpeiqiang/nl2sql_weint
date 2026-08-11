@@ -1,0 +1,57 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true},
+        {"name": "title_type", "type": "VARCHAR"},
+        {"name": "primary_title", "type": "VARCHAR"},
+        {"name": "average_rating", "type": "DOUBLE"},
+        {"name": "num_votes", "type": "INTEGER"}
+      ]
+    },
+    {
+      "name": "principals",
+      "columns": [
+        {"name": "id", "type": "INTEGER", "pk": true},
+        {"name": "title_id", "type": "VARCHAR", "fk": true},
+        {"name": "name_id", "type": "VARCHAR", "fk": true},
+        {"name": "category_id", "type": "VARCHAR"}
+      ]
+    },
+    {
+      "name": "names",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true},
+        {"name": "primary_name", "type": "VARCHAR"}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "principals",
+      "from_field": "title_id",
+      "to": "titles",
+      "to_field": "id"
+    },
+    {
+      "from": "principals",
+      "from_field": "name_id",
+      "to": "names",
+      "to_field": "id"
+    }
+  ],
+  "field_mappings": {
+    "导演": {"table": "principals", "field": "category_id", "value": "director"},
+    "演员": {"table": "principals", "field": "category_id", "value": "IN ('actor','actress')"},
+    "导演名": {"table": "names", "field": "primary_name"},
+    "演员名": {"table": "names", "field": "primary_name"},
+    "合作次数": {"table": "principals", "field": "COUNT(*)"},
+    "平均评分": {"table": "titles", "field": "AVG(average_rating)"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "data_source": "mysql"
+  }
+}

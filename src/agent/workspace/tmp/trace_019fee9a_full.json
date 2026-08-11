@@ -1,0 +1,902 @@
+[
+  {
+    "name": "wrenai_run_sql",
+    "run_type": "tool",
+    "start": "2026-08-11 02:39:16.487785+00:00",
+    "end": null,
+    "duration_s": null,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-4207-7b11-a01f-e2d3d6699872"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:16.483942+00:00",
+    "end": null,
+    "duration_s": null,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-4203-7213-8388-ef0c62a772af"
+  },
+  {
+    "name": "tools",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:16.482407+00:00",
+    "end": null,
+    "duration_s": null,
+    "parent_id": "019fee9a",
+    "id": "019feeb0-4202-7242-b00b-fa909b9b3fa3"
+  },
+  {
+    "name": "TodoListMiddleware.after_model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:16.474366+00:00",
+    "end": "2026-08-11 02:39:16.477855+00:00",
+    "duration_s": 0.003,
+    "parent_id": "019fee9a",
+    "id": "019feeb0-41fa-7ae0-bacf-81c998a2961e"
+  },
+  {
+    "name": "ChatDeepSeek",
+    "run_type": "llm",
+    "start": "2026-08-11 02:39:12.215896+00:00",
+    "end": "2026-08-11 02:39:16.367787+00:00",
+    "duration_s": 4.152,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-3157-78f3-8e30-c25166e8ee80"
+  },
+  {
+    "name": "AnthropicPromptCachingMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:12.201882+00:00",
+    "end": "2026-08-11 02:39:16.379750+00:00",
+    "duration_s": 4.178,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-3149-79d0-9d22-018f15762088"
+  },
+  {
+    "name": "dynamic_prompt.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:12.179909+00:00",
+    "end": "2026-08-11 02:39:16.394139+00:00",
+    "duration_s": 4.214,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-3133-7fc3-9ac1-50575bc6da99"
+  },
+  {
+    "name": "ProgressTrackerMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:12.167995+00:00",
+    "end": "2026-08-11 02:39:16.409800+00:00",
+    "duration_s": 4.242,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-3127-7f70-b381-00c82f5bcaee"
+  },
+  {
+    "name": "SkillsMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:12.157738+00:00",
+    "end": "2026-08-11 02:39:16.420180+00:00",
+    "duration_s": 4.262,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-311d-72f1-8c60-5c4c3833d577"
+  },
+  {
+    "name": "SummarizationMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:12.133401+00:00",
+    "end": "2026-08-11 02:39:16.428040+00:00",
+    "duration_s": 4.295,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-3105-7891-b9ad-f80fc8d64ec8"
+  },
+  {
+    "name": "SubAgentMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:12.121133+00:00",
+    "end": "2026-08-11 02:39:16.439248+00:00",
+    "duration_s": 4.318,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-30f9-7860-9eaa-029ad6d44eea"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:12.111025+00:00",
+    "end": "2026-08-11 02:39:16.449313+00:00",
+    "duration_s": 4.338,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-30ef-74d0-8bc5-0c482c84a8b4"
+  },
+  {
+    "name": "TodoListMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:12.097476+00:00",
+    "end": "2026-08-11 02:39:16.457306+00:00",
+    "duration_s": 4.36,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-30e1-76a0-b2dc-5e39476755e3"
+  },
+  {
+    "name": "model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:12.094038+00:00",
+    "end": "2026-08-11 02:39:16.466660+00:00",
+    "duration_s": 4.373,
+    "parent_id": "019fee9a",
+    "id": "019feeb0-30dd-7a63-ba51-d13bd89de5de"
+  },
+  {
+    "name": "wrenai_run_sql",
+    "run_type": "tool",
+    "start": "2026-08-11 02:39:01.827351+00:00",
+    "end": "2026-08-11 02:39:12.057810+00:00",
+    "duration_s": 10.23,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-08c3-7df2-8a91-e3852bcbd01d"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:01.822079+00:00",
+    "end": "2026-08-11 02:39:12.064032+00:00",
+    "duration_s": 10.242,
+    "parent_id": "019feeb0",
+    "id": "019feeb0-08be-7233-a544-0c9bb0ba783c"
+  },
+  {
+    "name": "tools",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:01.816858+00:00",
+    "end": "2026-08-11 02:39:12.069960+00:00",
+    "duration_s": 10.253,
+    "parent_id": "019fee9a",
+    "id": "019feeb0-08b8-7a51-af96-f23a142005d4"
+  },
+  {
+    "name": "TodoListMiddleware.after_model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:39:01.796627+00:00",
+    "end": "2026-08-11 02:39:01.806826+00:00",
+    "duration_s": 0.01,
+    "parent_id": "019fee9a",
+    "id": "019feeb0-08a4-7d31-938d-a7f2f9333fb1"
+  },
+  {
+    "name": "ChatDeepSeek",
+    "run_type": "llm",
+    "start": "2026-08-11 02:38:57.096143+00:00",
+    "end": "2026-08-11 02:39:01.590415+00:00",
+    "duration_s": 4.494,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-f648-7fc2-b121-9ea6e29f004b"
+  },
+  {
+    "name": "AnthropicPromptCachingMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:57.052752+00:00",
+    "end": "2026-08-11 02:39:01.611214+00:00",
+    "duration_s": 4.558,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-f61c-7c21-8ce6-57e4f4d13440"
+  },
+  {
+    "name": "dynamic_prompt.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:57.002118+00:00",
+    "end": "2026-08-11 02:39:01.629144+00:00",
+    "duration_s": 4.627,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-f5ea-72c0-9be0-bfc03da1dfea"
+  },
+  {
+    "name": "ProgressTrackerMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:56.918826+00:00",
+    "end": "2026-08-11 02:39:01.652678+00:00",
+    "duration_s": 4.734,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-f596-7d90-9bfe-010de6ad9a3f"
+  },
+  {
+    "name": "SkillsMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:56.863530+00:00",
+    "end": "2026-08-11 02:39:01.667525+00:00",
+    "duration_s": 4.804,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-f55f-7333-9326-24ae5bc9848c"
+  },
+  {
+    "name": "SummarizationMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:56.820175+00:00",
+    "end": "2026-08-11 02:39:01.694854+00:00",
+    "duration_s": 4.875,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-f534-79c0-a580-49bf3481dbc5"
+  },
+  {
+    "name": "SubAgentMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:56.798806+00:00",
+    "end": "2026-08-11 02:39:01.718803+00:00",
+    "duration_s": 4.92,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-f51e-7dd0-822c-f151fe09f618"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:56.768543+00:00",
+    "end": "2026-08-11 02:39:01.744162+00:00",
+    "duration_s": 4.976,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-f500-7701-90eb-62f233f58a08"
+  },
+  {
+    "name": "TodoListMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:56.745961+00:00",
+    "end": "2026-08-11 02:39:01.755085+00:00",
+    "duration_s": 5.009,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-f4e9-7da3-a7d6-1d5e3bc27ba4"
+  },
+  {
+    "name": "model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:56.730401+00:00",
+    "end": "2026-08-11 02:39:01.773546+00:00",
+    "duration_s": 5.043,
+    "parent_id": "019fee9a",
+    "id": "019feeaf-f4da-7e82-a15f-8a4869136d9a"
+  },
+  {
+    "name": "wrenai_run_sql",
+    "run_type": "tool",
+    "start": "2026-08-11 02:38:34.931197+00:00",
+    "end": "2026-08-11 02:38:56.684313+00:00",
+    "duration_s": 21.753,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-9fb3-7081-8a56-4957d95feb87"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:34.911809+00:00",
+    "end": "2026-08-11 02:38:56.696108+00:00",
+    "duration_s": 21.784,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-9f9f-7851-b3b0-3dc27afc4142"
+  },
+  {
+    "name": "tools",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:34.903959+00:00",
+    "end": "2026-08-11 02:38:56.716769+00:00",
+    "duration_s": 21.813,
+    "parent_id": "019fee9a",
+    "id": "019feeaf-9f97-7091-bd82-a70d8ac12102"
+  },
+  {
+    "name": "TodoListMiddleware.after_model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:34.869891+00:00",
+    "end": "2026-08-11 02:38:34.878124+00:00",
+    "duration_s": 0.008,
+    "parent_id": "019fee9a",
+    "id": "019feeaf-9f75-75f0-8157-249aaf1a0ae5"
+  },
+  {
+    "name": "ChatDeepSeek",
+    "run_type": "llm",
+    "start": "2026-08-11 02:38:30.997585+00:00",
+    "end": "2026-08-11 02:38:34.477135+00:00",
+    "duration_s": 3.48,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-9055-7250-8547-7e68d3ca1047"
+  },
+  {
+    "name": "AnthropicPromptCachingMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:30.865531+00:00",
+    "end": "2026-08-11 02:38:34.515095+00:00",
+    "duration_s": 3.65,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-8fd1-77e1-8c07-aa46a5ab4c0a"
+  },
+  {
+    "name": "dynamic_prompt.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:30.754338+00:00",
+    "end": "2026-08-11 02:38:34.550048+00:00",
+    "duration_s": 3.796,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-8f62-75f0-85d4-997de42226aa"
+  },
+  {
+    "name": "ProgressTrackerMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:30.680459+00:00",
+    "end": "2026-08-11 02:38:34.598060+00:00",
+    "duration_s": 3.918,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-8f18-7342-999d-abdbec6a80c7"
+  },
+  {
+    "name": "SkillsMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:30.652017+00:00",
+    "end": "2026-08-11 02:38:34.704879+00:00",
+    "duration_s": 4.053,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-8efc-7a42-91b5-aab4b4a21bf4"
+  },
+  {
+    "name": "SummarizationMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:30.556773+00:00",
+    "end": "2026-08-11 02:38:34.732783+00:00",
+    "duration_s": 4.176,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-8e9c-7042-b6e3-fcf8cb2912aa"
+  },
+  {
+    "name": "SubAgentMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:30.538476+00:00",
+    "end": "2026-08-11 02:38:34.750150+00:00",
+    "duration_s": 4.212,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-8e8a-7aa3-87a0-67e54844eedd"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:30.505228+00:00",
+    "end": "2026-08-11 02:38:34.780862+00:00",
+    "duration_s": 4.276,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-8e69-70b0-bbb8-fe61aa13cde2"
+  },
+  {
+    "name": "TodoListMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:30.431946+00:00",
+    "end": "2026-08-11 02:38:34.802235+00:00",
+    "duration_s": 4.37,
+    "parent_id": "019feeaf",
+    "id": "019feeaf-8e1f-7e71-b6da-933579b232f7"
+  },
+  {
+    "name": "model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:38:30.422511+00:00",
+    "end": "2026-08-11 02:38:34.827024+00:00",
+    "duration_s": 4.405,
+    "parent_id": "019fee9a",
+    "id": "019feeaf-8e16-7d60-837b-5426c719decf"
+  },
+  {
+    "name": "wrenai_run_sql",
+    "run_type": "tool",
+    "start": "2026-08-11 02:36:09.317794+00:00",
+    "end": "2026-08-11 02:38:30.344495+00:00",
+    "duration_s": 141.027,
+    "parent_id": "019feead",
+    "id": "019feead-66e5-7172-9ad9-86353eaade6f"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:09.274941+00:00",
+    "end": "2026-08-11 02:38:30.360342+00:00",
+    "duration_s": 141.085,
+    "parent_id": "019feead",
+    "id": "019feead-66ba-7562-a0d2-0037827bc032"
+  },
+  {
+    "name": "tools",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:09.235268+00:00",
+    "end": "2026-08-11 02:38:30.380610+00:00",
+    "duration_s": 141.145,
+    "parent_id": "019fee9a",
+    "id": "019feead-6692-7822-8a24-5f231b953a5a"
+  },
+  {
+    "name": "TodoListMiddleware.after_model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:09.148927+00:00",
+    "end": "2026-08-11 02:36:09.168510+00:00",
+    "duration_s": 0.02,
+    "parent_id": "019fee9a",
+    "id": "019feead-663c-7d93-9532-eac91df565a5"
+  },
+  {
+    "name": "ChatDeepSeek",
+    "run_type": "llm",
+    "start": "2026-08-11 02:36:03.597833+00:00",
+    "end": "2026-08-11 02:36:06.693482+00:00",
+    "duration_s": 3.096,
+    "parent_id": "019feead",
+    "id": "019feead-508d-7191-9ea2-81ee856eefd9"
+  },
+  {
+    "name": "AnthropicPromptCachingMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:03.580778+00:00",
+    "end": "2026-08-11 02:36:06.957601+00:00",
+    "duration_s": 3.377,
+    "parent_id": "019feead",
+    "id": "019feead-507c-7ce0-b2dd-e8506c60f5b4"
+  },
+  {
+    "name": "dynamic_prompt.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:03.561727+00:00",
+    "end": "2026-08-11 02:36:07.462886+00:00",
+    "duration_s": 3.901,
+    "parent_id": "019feead",
+    "id": "019feead-5069-7943-8f51-205b0c42e50d"
+  },
+  {
+    "name": "ProgressTrackerMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:03.528580+00:00",
+    "end": "2026-08-11 02:36:08.158176+00:00",
+    "duration_s": 4.63,
+    "parent_id": "019feead",
+    "id": "019feead-5048-7fb2-b295-c6c735242fcc"
+  },
+  {
+    "name": "SkillsMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:03.510941+00:00",
+    "end": "2026-08-11 02:36:08.651317+00:00",
+    "duration_s": 5.14,
+    "parent_id": "019feead",
+    "id": "019feead-5036-7d43-84ed-da3c0280957b"
+  },
+  {
+    "name": "SummarizationMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:03.470797+00:00",
+    "end": "2026-08-11 02:36:08.709093+00:00",
+    "duration_s": 5.238,
+    "parent_id": "019feead",
+    "id": "019feead-500e-7622-989f-01b7997129b6"
+  },
+  {
+    "name": "SubAgentMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:03.449623+00:00",
+    "end": "2026-08-11 02:36:08.807674+00:00",
+    "duration_s": 5.358,
+    "parent_id": "019feead",
+    "id": "019feead-4ff9-7ed2-ab6a-50f9187cbe94"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:03.438449+00:00",
+    "end": "2026-08-11 02:36:08.861774+00:00",
+    "duration_s": 5.423,
+    "parent_id": "019feead",
+    "id": "019feead-4fee-7303-99a8-e7aaf8a9e23c"
+  },
+  {
+    "name": "TodoListMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:03.426746+00:00",
+    "end": "2026-08-11 02:36:08.916287+00:00",
+    "duration_s": 5.49,
+    "parent_id": "019feead",
+    "id": "019feead-4fe2-76e2-83db-0a97b4593c85"
+  },
+  {
+    "name": "model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:36:03.405152+00:00",
+    "end": "2026-08-11 02:36:09.031276+00:00",
+    "duration_s": 5.626,
+    "parent_id": "019fee9a",
+    "id": "019feead-4fcd-7582-a955-4aff3d0faddb"
+  },
+  {
+    "name": "wrenai_run_sql",
+    "run_type": "tool",
+    "start": "2026-08-11 02:33:44.826255+00:00",
+    "end": "2026-08-11 02:36:03.228192+00:00",
+    "duration_s": 138.402,
+    "parent_id": "019feeab",
+    "id": "019feeab-327a-7ba1-aeb8-30343d01dac4"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:44.821299+00:00",
+    "end": "2026-08-11 02:36:03.349782+00:00",
+    "duration_s": 138.528,
+    "parent_id": "019feeab",
+    "id": "019feeab-3275-7c12-bfa0-a6a89391c688"
+  },
+  {
+    "name": "tools",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:44.819732+00:00",
+    "end": "2026-08-11 02:36:03.366030+00:00",
+    "duration_s": 138.546,
+    "parent_id": "019fee9a",
+    "id": "019feeab-3273-7f82-ae13-20599b906718"
+  },
+  {
+    "name": "TodoListMiddleware.after_model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:44.810744+00:00",
+    "end": "2026-08-11 02:33:44.814685+00:00",
+    "duration_s": 0.004,
+    "parent_id": "019fee9a",
+    "id": "019feeab-326a-72d2-9171-e4bd4ab3ddd2"
+  },
+  {
+    "name": "ChatDeepSeek",
+    "run_type": "llm",
+    "start": "2026-08-11 02:33:40.418858+00:00",
+    "end": "2026-08-11 02:33:44.703572+00:00",
+    "duration_s": 4.285,
+    "parent_id": "019feeab",
+    "id": "019feeab-2142-7781-97d1-d79f5766821e"
+  },
+  {
+    "name": "AnthropicPromptCachingMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:40.387455+00:00",
+    "end": "2026-08-11 02:33:44.708519+00:00",
+    "duration_s": 4.321,
+    "parent_id": "019feeab",
+    "id": "019feeab-2123-7682-856e-2f78b95a94e6"
+  },
+  {
+    "name": "dynamic_prompt.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:40.365547+00:00",
+    "end": "2026-08-11 02:33:44.719402+00:00",
+    "duration_s": 4.354,
+    "parent_id": "019feeab",
+    "id": "019feeab-210d-7120-a3fb-72a7436f610a"
+  },
+  {
+    "name": "ProgressTrackerMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:40.346540+00:00",
+    "end": "2026-08-11 02:33:44.735711+00:00",
+    "duration_s": 4.389,
+    "parent_id": "019feeab",
+    "id": "019feeab-20fa-7271-b50a-b81e7ebbc1d5"
+  },
+  {
+    "name": "SkillsMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:40.317540+00:00",
+    "end": "2026-08-11 02:33:44.746027+00:00",
+    "duration_s": 4.428,
+    "parent_id": "019feeab",
+    "id": "019feeab-20dd-7f03-b65d-f8de9578eeef"
+  },
+  {
+    "name": "SummarizationMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:40.292044+00:00",
+    "end": "2026-08-11 02:33:44.758335+00:00",
+    "duration_s": 4.466,
+    "parent_id": "019feeab",
+    "id": "019feeab-20c4-7ab0-8e7c-d8630d7fe6c5"
+  },
+  {
+    "name": "SubAgentMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:40.275091+00:00",
+    "end": "2026-08-11 02:33:44.767617+00:00",
+    "duration_s": 4.493,
+    "parent_id": "019feeab",
+    "id": "019feeab-20b3-7f91-93f1-d50741760e1c"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:40.257458+00:00",
+    "end": "2026-08-11 02:33:44.780407+00:00",
+    "duration_s": 4.523,
+    "parent_id": "019feeab",
+    "id": "019feeab-20a1-7261-8c84-a182b007cb73"
+  },
+  {
+    "name": "TodoListMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:40.243346+00:00",
+    "end": "2026-08-11 02:33:44.791648+00:00",
+    "duration_s": 4.548,
+    "parent_id": "019feeab",
+    "id": "019feeab-2093-7ea2-9ecf-7e281004a55a"
+  },
+  {
+    "name": "model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:33:40.237717+00:00",
+    "end": "2026-08-11 02:33:44.802059+00:00",
+    "duration_s": 4.564,
+    "parent_id": "019fee9a",
+    "id": "019feeab-208d-7a51-be0b-046a9c8901de"
+  },
+  {
+    "name": "wrenai_run_sql",
+    "run_type": "tool",
+    "start": "2026-08-11 02:28:40.150198+00:00",
+    "end": "2026-08-11 02:33:40.180867+00:00",
+    "duration_s": 300.031,
+    "parent_id": "019feea6",
+    "id": "019feea6-8c56-7532-a7fd-3e4bbe37701f"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:40.112582+00:00",
+    "end": "2026-08-11 02:33:40.205833+00:00",
+    "duration_s": 300.093,
+    "parent_id": "019feea6",
+    "id": "019feea6-8c30-7700-b6b5-ff3aec7c6bd5"
+  },
+  {
+    "name": "tools",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:40.096747+00:00",
+    "end": "2026-08-11 02:33:40.221527+00:00",
+    "duration_s": 300.125,
+    "parent_id": "019fee9a",
+    "id": "019feea6-8c20-70f0-abfd-4c8a76dbf356"
+  },
+  {
+    "name": "TodoListMiddleware.after_model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:39.993744+00:00",
+    "end": "2026-08-11 02:28:40.028450+00:00",
+    "duration_s": 0.035,
+    "parent_id": "019fee9a",
+    "id": "019feea6-8bb9-7671-8f89-31eb2adfe59a"
+  },
+  {
+    "name": "ChatDeepSeek",
+    "run_type": "llm",
+    "start": "2026-08-11 02:28:36.450556+00:00",
+    "end": "2026-08-11 02:28:39.633766+00:00",
+    "duration_s": 3.183,
+    "parent_id": "019feea6",
+    "id": "019feea6-7de2-76c1-a96f-808aa0c9dfc2"
+  },
+  {
+    "name": "AnthropicPromptCachingMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:36.428506+00:00",
+    "end": "2026-08-11 02:28:39.652995+00:00",
+    "duration_s": 3.224,
+    "parent_id": "019feea6",
+    "id": "019feea6-7dcc-7a83-a615-4a203f7c6c2d"
+  },
+  {
+    "name": "dynamic_prompt.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:36.415074+00:00",
+    "end": "2026-08-11 02:28:39.669143+00:00",
+    "duration_s": 3.254,
+    "parent_id": "019feea6",
+    "id": "019feea6-7dbf-7ff0-b0a4-e5ffb1944d30"
+  },
+  {
+    "name": "ProgressTrackerMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:36.400997+00:00",
+    "end": "2026-08-11 02:28:39.714714+00:00",
+    "duration_s": 3.314,
+    "parent_id": "019feea6",
+    "id": "019feea6-7db0-7791-a02d-a8db55d6b2ec"
+  },
+  {
+    "name": "SkillsMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:36.310085+00:00",
+    "end": "2026-08-11 02:28:39.728009+00:00",
+    "duration_s": 3.418,
+    "parent_id": "019feea6",
+    "id": "019feea6-7d56-70e0-87ef-390c9201f0ae"
+  },
+  {
+    "name": "SummarizationMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:36.242564+00:00",
+    "end": "2026-08-11 02:28:39.744858+00:00",
+    "duration_s": 3.502,
+    "parent_id": "019feea6",
+    "id": "019feea6-7d12-7710-9f24-bcb860e922c8"
+  },
+  {
+    "name": "SubAgentMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:36.227041+00:00",
+    "end": "2026-08-11 02:28:39.811924+00:00",
+    "duration_s": 3.585,
+    "parent_id": "019feea6",
+    "id": "019feea6-7d03-7471-b4eb-44ac67a58afd"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:36.209910+00:00",
+    "end": "2026-08-11 02:28:39.832978+00:00",
+    "duration_s": 3.623,
+    "parent_id": "019feea6",
+    "id": "019feea6-7cf1-7093-80c4-eb93da516046"
+  },
+  {
+    "name": "TodoListMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:36.195125+00:00",
+    "end": "2026-08-11 02:28:39.849249+00:00",
+    "duration_s": 3.654,
+    "parent_id": "019feea6",
+    "id": "019feea6-7ce3-77f1-960f-369cb7236fe1"
+  },
+  {
+    "name": "model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:36.174248+00:00",
+    "end": "2026-08-11 02:28:39.883183+00:00",
+    "duration_s": 3.709,
+    "parent_id": "019fee9a",
+    "id": "019feea6-7cce-7b42-b8eb-b51418c8b49a"
+  },
+  {
+    "name": "wrenai_run_sql",
+    "run_type": "tool",
+    "start": "2026-08-11 02:27:22.746753+00:00",
+    "end": "2026-08-11 02:28:36.132023+00:00",
+    "duration_s": 73.385,
+    "parent_id": "019feea5",
+    "id": "019feea5-5dfa-7711-b29b-d2ed373ae346"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:22.740964+00:00",
+    "end": "2026-08-11 02:28:36.143770+00:00",
+    "duration_s": 73.403,
+    "parent_id": "019feea5",
+    "id": "019feea5-5df4-78d0-bf21-423b3951a2b0"
+  },
+  {
+    "name": "tools",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:22.736387+00:00",
+    "end": "2026-08-11 02:28:36.158845+00:00",
+    "duration_s": 73.422,
+    "parent_id": "019fee9a",
+    "id": "019feea5-5def-73a2-b304-0d78add9fab9"
+  },
+  {
+    "name": "TodoListMiddleware.after_model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:22.655336+00:00",
+    "end": "2026-08-11 02:27:22.679790+00:00",
+    "duration_s": 0.024,
+    "parent_id": "019fee9a",
+    "id": "019feea5-5d9f-7042-a7f1-01d1c28bb2f1"
+  },
+  {
+    "name": "ChatDeepSeek",
+    "run_type": "llm",
+    "start": "2026-08-11 02:27:19.078022+00:00",
+    "end": "2026-08-11 02:27:22.111068+00:00",
+    "duration_s": 3.033,
+    "parent_id": "019feea5",
+    "id": "019feea5-4fa5-7da2-930a-15201509e3ad"
+  },
+  {
+    "name": "AnthropicPromptCachingMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:19.021968+00:00",
+    "end": "2026-08-11 02:27:22.192006+00:00",
+    "duration_s": 3.17,
+    "parent_id": "019feea5",
+    "id": "019feea5-4f6d-7620-8801-55243c9614a3"
+  },
+  {
+    "name": "dynamic_prompt.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:18.896668+00:00",
+    "end": "2026-08-11 02:27:22.214571+00:00",
+    "duration_s": 3.318,
+    "parent_id": "019feea5",
+    "id": "019feea5-4ef0-7ad0-abce-dd91cacdea42"
+  },
+  {
+    "name": "ProgressTrackerMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:18.553943+00:00",
+    "end": "2026-08-11 02:27:22.299803+00:00",
+    "duration_s": 3.746,
+    "parent_id": "019feea5",
+    "id": "019feea5-4d99-7cf3-b51c-b44d9fa4aaed"
+  },
+  {
+    "name": "SkillsMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:18.230034+00:00",
+    "end": "2026-08-11 02:27:22.317543+00:00",
+    "duration_s": 4.088,
+    "parent_id": "019feea5",
+    "id": "019feea5-4c56-71d1-a675-00f98a26add7"
+  },
+  {
+    "name": "SummarizationMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:18.122271+00:00",
+    "end": "2026-08-11 02:27:22.347398+00:00",
+    "duration_s": 4.225,
+    "parent_id": "019feea5",
+    "id": "019feea5-4bea-7ab3-bfda-1e45a88ceed5"
+  },
+  {
+    "name": "SubAgentMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:18.070614+00:00",
+    "end": "2026-08-11 02:27:22.377355+00:00",
+    "duration_s": 4.307,
+    "parent_id": "019feea5",
+    "id": "019feea5-4bb6-7ed3-be91-e5c3c7b4d03e"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:18.011552+00:00",
+    "end": "2026-08-11 02:27:22.523294+00:00",
+    "duration_s": 4.512,
+    "parent_id": "019feea5",
+    "id": "019feea5-4b7b-7180-8e3a-db51123063ca"
+  },
+  {
+    "name": "TodoListMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:17.793955+00:00",
+    "end": "2026-08-11 02:27:22.551177+00:00",
+    "duration_s": 4.757,
+    "parent_id": "019feea5",
+    "id": "019feea5-4aa1-7fc1-808a-9e0e63756be8"
+  },
+  {
+    "name": "model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:17.774959+00:00",
+    "end": "2026-08-11 02:27:22.596280+00:00",
+    "duration_s": 4.821,
+    "parent_id": "019fee9a",
+    "id": "019feea5-4a8e-7a60-954f-1a469ef39556"
+  },
+  {
+    "name": "wrenai_run_sql",
+    "run_type": "tool",
+    "start": "2026-08-11 02:27:01.138924+00:00",
+    "end": "2026-08-11 02:27:17.690288+00:00",
+    "duration_s": 16.551,
+    "parent_id": "019feea5",
+    "id": "019feea5-0992-7b73-bfc2-420a731cc7f9"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:27:01.132905+00:00",
+    "end": "2026-08-11 02:27:17.749063+00:00",
+    "duration_s": 16.616,
+    "parent_id": "019feea5",
+    "id": "019feea5-098c-7642-8739-9ba2a89a7fc2"
+  }
+]

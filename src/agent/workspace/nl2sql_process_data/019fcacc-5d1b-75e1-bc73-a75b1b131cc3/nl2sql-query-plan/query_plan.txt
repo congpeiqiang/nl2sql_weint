@@ -1,0 +1,14 @@
+查询计划：查询1990年代（1990-1999）电影的平均评分
+
+1. 从 titles 表开始
+2. 筛选 title_type = 'movie'（只查电影）
+3. 筛选 start_year IS NOT NULL（排除无年份记录）
+4. 筛选 start_year BETWEEN 1990 AND 1999（限定1990年代）
+5. 计算 AVG(average_rating) 作为平均评分
+6. 返回单行结果
+
+说明：
+- 无需 JOIN，所有字段都在 titles 表中
+- 无需 GROUP BY，因为只计算整体平均值
+- 无需 ORDER BY，因为只有一行结果
+- 无需 LIMIT，因为聚合查询只返回一行

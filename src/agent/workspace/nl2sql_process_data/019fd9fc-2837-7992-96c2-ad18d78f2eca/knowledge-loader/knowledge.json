@@ -1,0 +1,102 @@
+{
+  "user_intent": {
+    "original_question": "找出评分 >= 8.5 但投票数 < 5000 的电影，按评分降序排列",
+    "domain": "imdb",
+    "keywords": ["电影", "评分", "投票数", "average_rating", "num_votes", "title_type"],
+    "intent_type": "query_movies_by_rating_and_votes"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "average_rating", "operator": ">=", "value": 8.5},
+      {"field": "num_votes", "operator": "<", "value": 5000},
+      {"field": "title_type", "operator": "=", "value": "movie"}
+    ],
+    "fields_to_display": ["primary_title", "average_rating", "num_votes"]
+  },
+  "metrics": [
+    {
+      "name": "评分",
+      "aliases": ["average_rating", "rating"],
+      "formula": "titles.average_rating",
+      "related_tables": ["titles"],
+      "aggregation": "none"
+    },
+    {
+      "name": "投票数",
+      "aliases": ["num_votes", "votes"],
+      "formula": "titles.num_votes",
+      "related_tables": ["titles"],
+      "aggregation": "none"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_movie",
+      "name": "电影类型",
+      "condition": "t.title_type = 'movie'"
+    },
+    {
+      "id": "rule_rating",
+      "name": "评分筛选",
+      "condition": "t.average_rating >= 8.5"
+    },
+    {
+      "id": "rule_votes",
+      "name": "投票数筛选",
+      "condition": "t.num_votes < 5000"
+    }
+  ],
+  "field_mappings": {
+    "电影": {"table": "titles", "field": "primary_title"},
+    "评分": {"table": "titles", "field": "average_rating"},
+    "投票数": {"table": "titles", "field": "num_votes"},
+    "作品类型": {"table": "titles", "field": "title_type"}
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "各类型电影平均评分（含热度指数），统计 2000 年后各类型电影的平均评分和热度",
+      "sql": "SELECT ... FROM titles t ... WHERE t.title_type = 'movie' AND t.num_votes > 5000 ...",
+      "intent_type": "query_genre_ratings",
+      "similarity_score": 0.5
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 表包含评分(average_rating)和投票数(num_votes)字段，无需JOIN其他表"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.title_type 可选值: movie/short/tvEpisode/tvSeries/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    },
+    {
+      "topic": "NULL处理",
+      "content": "average_rating 可能为 NULL，查询时建议过滤"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.average_rating", "titles.num_votes", "titles.title_type"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.average_rating >= 8.5", "titles.num_votes < 5000"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 2,
+      "business_rules": 3,
+      "field_mappings": 4,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 2,
+      "business_rules": 3,
+      "field_mappings": 4,
+      "knowledge": 3
+    }
+  }
+}

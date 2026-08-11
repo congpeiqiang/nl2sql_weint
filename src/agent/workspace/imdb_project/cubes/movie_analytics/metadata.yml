@@ -1,0 +1,104 @@
+# 电影多维分析立方体
+# 支持按年代、评分等级、片长分类等维度下钻
+name: movie_analytics
+description: "电影多维分析立方体 — 支持按年代、类型、评分区间等维度下钻聚合"
+
+base_object: titles
+
+measures:
+  - name: movie_count
+    sql: "COUNT(DISTINCT id)"
+    expression: "COUNT(DISTINCT id)"
+    type: count
+    description: "电影数量"
+
+  - name: avg_rating
+    sql: "AVG(average_rating)"
+    expression: "AVG(average_rating)"
+    type: avg
+    description: "平均评分"
+
+  - name: total_votes
+    sql: "SUM(num_votes)"
+    expression: "SUM(num_votes)"
+    type: sum
+    description: "总投票数"
+
+  - name: avg_runtime
+    sql: "AVG(runtime_minutes)"
+    expression: "AVG(runtime_minutes)"
+    type: avg
+    description: "平均片长（分钟）"
+
+  - name: high_rated_ratio
+    sql: "SUM(CASE WHEN average_rating >= 8.0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)"
+    expression: "SUM(CASE WHEN average_rating >= 8.0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)"
+    type: number
+    description: "高分片占比（评分>=8.0）"
+
+  - name: popularity_index
+    sql: "AVG(num_votes) / NULLIF(AVG(AVG(num_votes)) OVER (), 0)"
+    expression: "AVG(num_votes) / NULLIF(AVG(AVG(num_votes)) OVER (), 0)"
+    type: number
+    description: "热度指数（相对于整体平均）"
+
+  - name: rating_votes_weighted
+    sql: "SUM(average_rating * num_votes) / NULLIF(SUM(num_votes), 0)"
+    expression: "SUM(average_rating * num_votes) / NULLIF(SUM(num_votes), 0)"
+    type: number
+    description: "投票加权平均评分（更准确的整体评价）"
+
+  - name: total_runtime_hours
+    sql: "SUM(runtime_minutes) / 60.0"
+    expression: "SUM(runtime_minutes) / 60.0"
+    type: number
+    description: "总片长（小时）"
+
+dimensions:
+  - name: decade
+    sql: "FLOOR(start_year / 10) * 10"
+    expression: "FLOOR(start_year / 10) * 10"
+    type: int
+    description: "年代（如 1990, 2000, 2010）"
+
+  - name: rating_tier
+    sql: "CASE WHEN average_rating >= 8.0 THEN '高分(8-10)' WHEN average_rating >= 6.0 THEN '中分(6-8)' WHEN average_rating >= 4.0 THEN '低分(4-6)' ELSE '极低(0-4)' END"
+    expression: "CASE WHEN average_rating >= 8.0 THEN '高分(8-10)' WHEN average_rating >= 6.0 THEN '中分(6-8)' WHEN average_rating >= 4.0 THEN '低分(4-6)' ELSE '极低(0-4)' END"
+    type: string
+    description: "评分等级"
+
+  - name: runtime_tier
+    sql: "CASE WHEN runtime_minutes < 40 THEN '短片' WHEN runtime_minutes < 90 THEN '标准' WHEN runtime_minutes < 150 THEN '长片' ELSE '超长片' END"
+    expression: "CASE WHEN runtime_minutes < 40 THEN '短片' WHEN runtime_minutes < 90 THEN '标准' WHEN runtime_minutes < 150 THEN '长片' ELSE '超长片' END"
+    type: string
+    description: "片长分类"
+
+  - name: vote_tier
+    sql: "CASE WHEN num_votes >= 200000 THEN '极高热度' WHEN num_votes >= 50000 THEN '高热度' WHEN num_votes >= 10000 THEN '中等热度' WHEN num_votes >= 1000 THEN '低热度' ELSE '冷门' END"
+    expression: "CASE WHEN num_votes >= 200000 THEN '极高热度' WHEN num_votes >= 50000 THEN '高热度' WHEN num_votes >= 10000 THEN '中等热度' WHEN num_votes >= 1000 THEN '低热度' ELSE '冷门' END"
+    type: string
+    description: "热度等级"
+
+  - name: is_adult_content
+    sql: "CASE WHEN is_adult = 1 THEN '成人内容' ELSE '普通内容' END"
+    expression: "CASE WHEN is_adult = 1 THEN '成人内容' ELSE '普通内容' END"
+    type: string
+    description: "成人内容标识"
+
+  - name: title_type_category
+    sql: "title_type"
+    expression: "title_type"
+    type: string
+    description: "作品类型"
+
+  - name: start_year
+    sql: "start_year"
+    expression: "start_year"
+    type: int
+    description: "上映年份"
+
+  - name: vote_bucket_100k
+    sql: "FLOOR(num_votes / 100000) * 100000"
+    expression: "FLOOR(num_votes / 100000) * 100000"
+    type: int
+    description: "投票数十万分档"

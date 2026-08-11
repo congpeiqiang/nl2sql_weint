@@ -1,0 +1,10 @@
+查询计划：1990年代电影平均评分（按年份分组）
+
+1. 从 titles 表（别名 t）筛选 title_type='movie' 的电影
+2. 进一步筛选 start_year 在 1990 到 1999 之间（BETWEEN 1990 AND 1999）
+3. 排除 start_year 为 NULL 的记录（start_year IS NOT NULL）
+4. 排除 average_rating 为 NULL 的记录（average_rating IS NOT NULL）
+5. 按 start_year 分组（GROUP BY t.start_year）
+6. 对每组计算平均评分 AVG(t.average_rating) AS avg_rating
+7. 按 start_year 升序排序（ORDER BY t.start_year ASC）
+8. 返回 start_year 和 avg_rating 两列

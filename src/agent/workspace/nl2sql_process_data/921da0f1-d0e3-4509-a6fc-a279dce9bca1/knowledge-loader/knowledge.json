@@ -1,0 +1,44 @@
+{
+  "user_intent": {
+    "original_question": "查询 Tom Hanks 的出生年份是哪一年",
+    "domain": "imdb",
+    "keywords": ["Tom Hanks", "出生年份", "birth_year"],
+    "intent_type": "query_person_birth_year"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [{"field": "names.primary_name", "operator": "=", "value": "Tom Hanks"}],
+    "fields_to_display": ["names.birth_year"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_null",
+      "name": "NULL值处理",
+      "condition": "birth_year 可能为 NULL，查询时建议 WHERE birth_year IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "出生年份": "names.birth_year",
+    "姓名": "names.primary_name"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "names表",
+      "content": "names 表包含人物信息，primary_name 为全名，birth_year 为出生年份"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["names"],
+    "main_fields": ["names.primary_name", "names.birth_year"],
+    "filter_conditions": ["names.primary_name = 'Tom Hanks'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "strategy": "B",
+    "timestamp": "2026-07-28T10:00:00"
+  }
+}

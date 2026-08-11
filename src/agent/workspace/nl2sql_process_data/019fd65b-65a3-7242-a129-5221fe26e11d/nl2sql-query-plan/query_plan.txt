@@ -1,0 +1,14 @@
+查询计划：找出职业生涯跨度最长的前10位演员
+
+1. 从 names 表（别名 n）获取演员姓名 primary_name
+2. 通过 principals 表（别名 p）连接 names 和 titles：
+   - JOIN 条件1: p.name_id = n.id (principals → names)
+   - JOIN 条件2: p.title_id = t.id (principals → titles)
+3. 筛选条件（WHERE）：
+   - p.category_id IN ('actor', 'actress') — 只统计演员（包含男女演员）
+   - t.start_year IS NOT NULL — 排除没有年份记录的作品
+4. 按演员分组（GROUP BY n.id, n.primary_name）
+5. 计算每个演员的职业生涯跨度：
+   - career_span = MAX(t.start_year) - MIN(t.start_year)
+6. 按 career_span 降序排序（ORDER BY career_span DESC）
+7. 取前10行（LIMIT 10）

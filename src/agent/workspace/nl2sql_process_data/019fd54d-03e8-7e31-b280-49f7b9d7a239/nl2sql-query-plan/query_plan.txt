@@ -1,0 +1,22 @@
+查询计划：电视剧系列评分衰退最严重的 Top 10
+
+目标：找出 tvSeries 中从早期季到后期季评分下降最严重的系列，计算各季平均评分变化，输出衰退最严重的 Top 10。
+
+步骤：
+1. 从 titles 表筛选 title_type='tvSeries' 的系列（别名 s），作为父系列。
+2. 通过 episodes 表（别名 e）关联：s.id = e.parent_id，获取每个系列的所有剧集。
+3. 通过 titles 表（别名 ep）关联剧集评分：e.id = ep.id，获取每集的 average_rating。
+4. 过滤条件：
+   - s.title_type = 'tvSeries'（只查电视剧系列）
+   - ep.average_rating IS NOT NULL（剧集评分非空）
+   - e.season_number IS NOT NULL（季号非空）
+5. 按系列(s.id, s.primary_title) + 季号(e.season_number) 分组，计算每季的平均评分 season_avg_rating = AVG(ep.average_rating)。
+6. 对每个系列，确定首季（最小 season_number）的平均评分 first_season_rating 和末季（最大 season_number）的平均评分 last_season_rating。
+7. 计算评分衰退率 decline_rate_pct = (first_season_rating - last_season_rating) / first_season_rating * 100。
+8. 只保留至少 3 季的系列（HAVING COUNT(DISTINCT season_number) >= 3），保证衰退分析有意义。
+9. 按 decline_rate_pct 降序排序，取前 10 行（Top 10）。
+
+实现方式：
+- 使用 CTE season_ratings 先计算每个系列每季的平均评分。
+- 使用 CTE series_stats 计算每个系列的首季/末季评分和总季数。
+- 最终 SELECT 计算衰退率并排序。

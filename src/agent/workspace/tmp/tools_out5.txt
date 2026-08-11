@@ -1,0 +1,4 @@
+_run module: langchain_core.tools.structured
+_run qualname: StructuredTool._run
+_run closure: True
+_run code: wrapped_run

@@ -1,0 +1,50 @@
+name: principals
+table_reference:
+  table: principals
+columns:
+- name: id
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+  properties:
+    description: 自增主键
+- name: title_id
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 作品ID, 关联 titles.id
+- name: name_id
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 人物ID, 关联 names.id
+- name: ordering
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 排序号(1=最主要的角色/参与者, 值越小越重要)
+- name: category_id
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 职位类别, 关联 categories.id (如actor/director)
+- name: job_id
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 具体职位, 关联 jobs.id (更细化的职位描述)
+cached: false
+primary_key: id
+properties:
+  description: 核心参与者表。最核心的人物-作品关联表, 记录每部作品的关键参与者, 约5000万+条。ordering=1为最主要角色。

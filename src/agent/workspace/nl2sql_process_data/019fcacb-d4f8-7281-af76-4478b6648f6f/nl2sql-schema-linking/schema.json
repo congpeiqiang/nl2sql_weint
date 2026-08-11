@@ -1,0 +1,27 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true},
+        {"name": "title_type", "type": "VARCHAR"},
+        {"name": "primary_title", "type": "VARCHAR"},
+        {"name": "start_year", "type": "INTEGER"},
+        {"name": "average_rating", "type": "DOUBLE"},
+        {"name": "num_votes", "type": "INTEGER"}
+      ]
+    }
+  ],
+  "relations": [],
+  "field_mappings": {
+    "电影": {"table": "titles", "field": "title_type", "value": "movie"},
+    "评分": {"table": "titles", "field": "average_rating"},
+    "年份": {"table": "titles", "field": "start_year"},
+    "投票数": {"table": "titles", "field": "num_votes"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "note": "单表查询，仅需 titles 表。数据源为 MySQL。"
+  }
+}

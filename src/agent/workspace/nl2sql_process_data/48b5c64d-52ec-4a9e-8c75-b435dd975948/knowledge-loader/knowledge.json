@@ -1,0 +1,87 @@
+{
+  "user_intent": {
+    "original_question": "查询评分最高的 10 部电视剧系列，显示标题和评分",
+    "domain": "imdb",
+    "keywords": ["评分最高", "10部", "电视剧系列", "标题", "评分"],
+    "intent_type": "query_top_rated_tv_series"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "tvSeries"},
+      {"field": "num_votes", "operator": ">", "value": 10000}
+    ],
+    "fields_to_display": ["primary_title", "average_rating"],
+    "limit": 10,
+    "order_by": {"field": "average_rating", "direction": "DESC"}
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["评分", "average_rating"],
+      "formula": "titles.average_rating",
+      "related_tables": ["titles"],
+      "aggregation": "直接字段"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电视剧系列类型",
+      "condition": "titles.title_type = 'tvSeries'"
+    },
+    {
+      "id": "rule_002",
+      "name": "评分可信度",
+      "condition": "排名类查询应加 num_votes > 10000 过滤"
+    },
+    {
+      "id": "rule_003",
+      "name": "评分非空",
+      "condition": "average_rating IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "标题": "titles.primary_title",
+    "评分": "titles.average_rating",
+    "电视剧系列": "titles.title_type = 'tvSeries'"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "作品类型语义",
+      "content": "tvSeries = 电视剧系列，多季多集的电视剧"
+    },
+    {
+      "topic": "评分可信度",
+      "content": "排名类查询应加 num_votes > 10000 过滤，投票数越高越可信"
+    },
+    {
+      "topic": "NULL值处理",
+      "content": "average_rating 可能为 NULL，查询时建议 WHERE average_rating IS NOT NULL"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.average_rating", "titles.title_type", "titles.num_votes"],
+    "filter_conditions": ["titles.title_type = 'tvSeries'", "titles.num_votes > 10000", "titles.average_rating IS NOT NULL"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 3
+    }
+  }
+}

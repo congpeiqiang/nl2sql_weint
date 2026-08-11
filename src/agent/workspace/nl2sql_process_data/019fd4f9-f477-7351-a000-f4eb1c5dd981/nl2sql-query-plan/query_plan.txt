@@ -1,0 +1,13 @@
+查询计划：每个年代电影的平均评分和电影数量
+
+1. 从 titles 表（别名 t）中筛选 title_type='movie' 的电影行
+2. 同时过滤 start_year IS NOT NULL（排除年份为 NULL 的记录）
+3. 计算年代字段：FLOOR(t.start_year / 10) * 10 AS decade
+4. 按 decade 分组（GROUP BY FLOOR(t.start_year / 10) * 10）
+5. 对每组计算：
+   - 平均评分：ROUND(AVG(t.average_rating), 2) AS avg_rating
+   - 电影数量：COUNT(*) AS movie_count
+6. 按 decade 升序排序（ORDER BY decade ASC）
+7. 返回结果：decade, avg_rating, movie_count
+
+无需 JOIN，仅涉及 titles 单表。

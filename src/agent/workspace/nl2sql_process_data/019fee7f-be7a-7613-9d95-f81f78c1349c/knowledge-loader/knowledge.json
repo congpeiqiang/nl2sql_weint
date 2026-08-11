@@ -1,0 +1,68 @@
+{
+  "user_intent": {
+    "original_question": "查询 Comedy 类型的电影有多少部",
+    "domain": "imdb",
+    "keywords": ["Comedy", "电影", "数量", "类型"],
+    "intent_type": "count_movies_by_genre"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "genres.id", "operator": "=", "value": "comedy"},
+      {"field": "titles.title_type", "operator": "=", "value": "movie"}
+    ],
+    "fields_to_display": ["电影数量"]
+  },
+  "metrics": [
+    {
+      "name": "电影数量",
+      "aliases": ["多少部", "数量", "count"],
+      "formula": "COUNT(DISTINCT titles.id)",
+      "related_tables": ["titles", "titles_genres", "genres"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型语义",
+      "condition": "title_type = 'movie' 才是电影，titles 表包含9种作品类型需过滤"
+    },
+    {
+      "id": "rule_002",
+      "name": "genre_id 是字符串",
+      "condition": "genres.id 存的是字符串如 'comedy'，不是数字ID"
+    }
+  ],
+  "field_mappings": {
+    "电影": {"table": "titles", "field": "title_type", "value": "movie"},
+    "Comedy类型": {"table": "genres", "field": "id", "value": "comedy"}
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles ←→ titles_genres ←→ genres，作品-类型多对多关联，联合主键(title_id, genre_id)"
+    },
+    {
+      "topic": "字段说明",
+      "content": "genres.id 存的是类型名称字符串如 action/comedy/drama，非数字ID"
+    },
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影，不要用 titles 表代表电影（包含电视剧、短片、游戏等）"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "titles_genres", "genres"],
+    "main_fields": ["titles.id", "titles.title_type", "titles_genres.title_id", "titles_genres.genre_id", "genres.id"],
+    "filter_conditions": ["titles.title_type = 'movie'", "genres.id = 'comedy'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "strategy": "B"
+  }
+}

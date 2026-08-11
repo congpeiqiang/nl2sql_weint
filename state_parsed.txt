@@ -1,0 +1,146 @@
+values keys: ['messages', 'todos', 'files', 'async_tasks', 'skills_metadata', 'memory_contents', 'query_headers', 'subagent_steps_map', 'active_queries']
+=== query_headers ===
+{
+ "019fdbec-15fe-7ac2-87c3-b75bef3f869f": {
+  "id": "__query_header__019fdbec",
+  "content": "📋 找出同时是演员和导演的人，分别计算他们作为演员和作为导演的作品平均评分，要求两种角色参演作品的平均评...",
+  "status": "query",
+  "task_id": "019fdbec-15fe-7ac2-87c3-b75bef3f869f"
+ },
+ "019fdbec-f1a3-7ec0-9bea-9a07787ae437": {
+  "id": "__query_header__019fdbec",
+  "content": "📋 找出评分衰退最严重的电视剧系列，计算首季平均评分和末季平均评分的下降幅度。",
+  "status": "query",
+  "task_id": "019fdbec-f1a3-7ec0-9bea-9a07787ae437"
+ }
+}
+=== subagent_steps_map ===
+{
+ "019fdbec-15fe-7ac2-87c3-b75bef3f869f": [
+  {
+   "id": "__subagent_header_019fdbec__",
+   "content": "🔍 nl2sql 执行进度 (6/7)",
+   "status": "in_progress"
+  },
+  {
+   "id": "__subagent_019fdbec_0__",
+   "content": "└ Step 1: knowledge-loader - load business knowledge (0s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_1__",
+   "content": "└ Step 2: schema-linking - identify relevant tables/columns (9s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_2__",
+   "content": "└ Step 3: subproblem - decompose into clause-level subproblems (7s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_3__",
+   "content": "└ Step 4: query-plan - generate programmatic query plan (11s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_4__",
+   "content": "└ Step 5: sql-generation - synthesize SQL and dry_run (3s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_5__",
+   "content": "└ Step 5.5: performance-optimization (1m21s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_6__",
+   "content": "└ Step 6: run_sql - execute",
+   "status": "in_progress"
+  }
+ ],
+ "019fdbec-f1a3-7ec0-9bea-9a07787ae437": [
+  {
+   "id": "__subagent_header_019fdbec__",
+   "content": "🔍 nl2sql 执行进度 (6/7)",
+   "status": "in_progress"
+  },
+  {
+   "id": "__subagent_019fdbec_0__",
+   "content": "└ Step 1: knowledge-loader - load business rules/knowledge (0s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_1__",
+   "content": "└ Step 2: schema-linking - identify relevant tables/columns (0s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_2__",
+   "content": "└ Step 3: subproblem - decompose into clause-level subproblems (7s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_3__",
+   "content": "└ Step 4: query-plan - generate programmatic query plan (7s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_4__",
+   "content": "└ Step 5: sql-generation - synthesize SQL + dry_run (21s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_5__",
+   "content": "└ Step 5.5: performance-optimization (27s)",
+   "status": "completed"
+  },
+  {
+   "id": "__subagent_019fdbec_6__",
+   "content": "└ Step 6: run_sql - execute query",
+   "status": "in_progress"
+  }
+ ]
+}
+=== active_queries ===
+{
+ "019fdbec-15fe-7ac2-87c3-b75bef3f869f": true,
+ "019fdbec-f1a3-7ec0-9bea-9a07787ae437": true
+}
+=== async_tasks ===
+{
+ "019fdbec-15fe-7ac2-87c3-b75bef3f869f": {
+  "task_id": "019fdbec-15fe-7ac2-87c3-b75bef3f869f",
+  "agent_name": "nl2sql",
+  "thread_id": "019fdbec-15fe-7ac2-87c3-b75bef3f869f",
+  "run_id": "019fdbec-1616-70a1-a2b6-8065f688cfde",
+  "status": "running",
+  "created_at": "2026-08-07T11:11:50Z",
+  "last_checked_at": "2026-08-07T11:11:50Z",
+  "last_updated_at": "2026-08-07T11:11:50Z"
+ },
+ "019fdbec-f1a3-7ec0-9bea-9a07787ae437": {
+  "task_id": "019fdbec-f1a3-7ec0-9bea-9a07787ae437",
+  "agent_name": "nl2sql",
+  "thread_id": "019fdbec-f1a3-7ec0-9bea-9a07787ae437",
+  "run_id": "019fdbec-f1ba-77a0-9128-398f61728c5a",
+  "status": "running",
+  "created_at": "2026-08-07T11:12:46Z",
+  "last_checked_at": "2026-08-07T11:12:46Z",
+  "last_updated_at": "2026-08-07T11:12:46Z"
+ }
+}
+=== todos ===
+[
+ {
+  "content": "委派 nl2sql 执行查询（评分衰退最严重的电视剧系列，首季vs末季平均评分下降幅度）",
+  "status": "in_progress"
+ },
+ {
+  "content": "推荐并渲染图表",
+  "status": "pending"
+ },
+ {
+  "content": "生成分析报告",
+  "status": "pending"
+ }
+]

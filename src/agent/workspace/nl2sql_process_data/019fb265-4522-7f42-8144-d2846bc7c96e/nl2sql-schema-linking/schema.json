@@ -1,0 +1,42 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true},
+        {"name": "title_type", "type": "VARCHAR"},
+        {"name": "primary_title", "type": "VARCHAR"},
+        {"name": "average_rating", "type": "DOUBLE"},
+        {"name": "num_votes", "type": "INTEGER"},
+        {"name": "start_year", "type": "INTEGER"}
+      ]
+    },
+    {
+      "name": "titleakas",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true},
+        {"name": "title_id", "type": "VARCHAR", "fk": true},
+        {"name": "region", "type": "VARCHAR"},
+        {"name": "ordering", "type": "INTEGER"}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "titleakas",
+      "from_field": "title_id",
+      "to": "titles",
+      "to_field": "id"
+    }
+  ],
+  "field_mappings": {
+    "标题": {"table": "titles", "field": "primary_title"},
+    "评分": {"table": "titles", "field": "average_rating"},
+    "地区": {"table": "titleakas", "field": "region"},
+    "投票数": {"table": "titles", "field": "num_votes"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success"
+  }
+}

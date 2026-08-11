@@ -1,0 +1,9 @@
+查询计划：电影数量最多的5个电影类型
+
+1. 从 titles 表筛选 title_type = 'movie' 的电影作品（只保留电影，排除短片、电视剧等）
+2. 通过 titles_genres.title_id = titles.id 连接 titles_genres 关联表，获取每部电影对应的类型
+3. 通过 titles_genres.genre_id = genres.id 连接 genres 表，获取类型的显示名称 display_name
+4. 按 genres.display_name 分组（GROUP BY）
+5. 对每组统计电影数量：COUNT(DISTINCT titles.id) AS movie_count
+6. 按 movie_count 降序排序（ORDER BY movie_count DESC）
+7. 取前5行（通过 run_sql 的 limit 参数控制，SQL 中不写 LIMIT）

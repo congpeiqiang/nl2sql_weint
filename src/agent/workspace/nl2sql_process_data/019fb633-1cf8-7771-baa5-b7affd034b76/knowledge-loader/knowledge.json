@@ -1,0 +1,64 @@
+{
+  "user_intent": {
+    "original_question": "查询投票数超过100万的电影有多少部",
+    "domain": "imdb",
+    "keywords": ["电影", "投票数", "100万", "数量"],
+    "intent_type": "count_movies_by_votes"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "num_votes", "operator": ">", "value": 1000000}
+    ],
+    "fields_to_display": ["电影数量"]
+  },
+  "metrics": [
+    {
+      "name": "电影数量",
+      "aliases": ["电影部数", "电影总数"],
+      "formula": "COUNT(*) FROM titles WHERE title_type='movie'",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_movie_type",
+      "name": "电影类型定义",
+      "condition": "titles.title_type = 'movie'"
+    },
+    {
+      "id": "rule_votes",
+      "name": "投票数过滤",
+      "condition": "titles.num_votes > 1000000"
+    }
+  ],
+  "field_mappings": {
+    "电影": {"table": "titles", "field": "title_type", "value": "movie"},
+    "投票数": {"table": "titles", "field": "num_votes"}
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "作品类型",
+      "content": "title_type='movie' 才是电影，titles 表包含9种作品类型需过滤"
+    },
+    {
+      "topic": "投票数字段",
+      "content": "titles.num_votes 为用户投票总数，评分和投票数已合并到 titles 表"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type", "titles.num_votes"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.num_votes > 1000000"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "strategy": "B"
+  }
+}

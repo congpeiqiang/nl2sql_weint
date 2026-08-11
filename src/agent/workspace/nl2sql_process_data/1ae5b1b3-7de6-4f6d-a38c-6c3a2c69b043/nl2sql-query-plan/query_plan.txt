@@ -1,0 +1,9 @@
+查询计划：2000-2023年每年电视剧的平均评分，按年份排列
+
+1. 从 titles 表（别名 t）筛选电视剧：t.title_type = 'tvSeries'
+2. 筛选年份范围：t.start_year BETWEEN 2000 AND 2023
+3. 排除 NULL：t.start_year IS NOT NULL 且 t.average_rating IS NOT NULL
+4. 按年份分组：GROUP BY t.start_year
+5. 计算每年平均评分：AVG(t.average_rating)，保留2位小数 ROUND(..., 2)
+6. 按年份升序排列：ORDER BY t.start_year ASC
+7. 输出列：t.start_year AS year, ROUND(AVG(t.average_rating), 2) AS avg_rating

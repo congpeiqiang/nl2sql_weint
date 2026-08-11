@@ -1,0 +1,57 @@
+{
+  "user_intent": {
+    "original_question": "查询电影类型（genres）的总数量，即有多少个不同的电影类型",
+    "domain": "imdb",
+    "keywords": ["电影类型", "genres", "总数量", "不同"],
+    "intent_type": "count_distinct_genres"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["电影类型总数"]
+  },
+  "metrics": [],
+  "business_rules": [],
+  "field_mappings": {
+    "电影类型": "genres.id / genres.display_name"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "各类型电影平均评分（含热度指数），统计 2000 年后各类型电影的平均评分和热度",
+      "normalized_question": "统计各类型电影的平均评分和热度",
+      "sql": "SELECT g.display_name AS genre, COUNT(DISTINCT t.id) AS movie_count, ROUND(AVG(t.average_rating), 2) AS avg_rating, ROUND(AVG(t.num_votes), 0) AS avg_votes, ROUND(SUM(t.num_votes), 0) AS total_votes, ROUND(AVG(t.runtime_minutes), 1) AS avg_runtime FROM titles t JOIN titles_genres tg ON tg.title_id = t.id JOIN genres g ON g.id = tg.genre_id WHERE t.title_type = 'movie' AND t.num_votes > 5000 AND t.start_year >= 2000 AND t.start_year IS NOT NULL GROUP BY g.id, g.display_name ORDER BY avg_rating DESC",
+      "intent_type": "genre_ratings",
+      "similarity_score": 0.5
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "genres表",
+      "content": "genres 表是 IMDb 标准类型标签表，约28种类型。id 存储的是类型名称字符串（非数字ID），如 action/comedy/drama/horror/sci-fi 等。display_name 为类型显示名。"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["genres"],
+    "main_fields": ["genres.id"],
+    "filter_conditions": [],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 1,
+      "knowledge": 1
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 1,
+      "knowledge": 1
+    }
+  }
+}

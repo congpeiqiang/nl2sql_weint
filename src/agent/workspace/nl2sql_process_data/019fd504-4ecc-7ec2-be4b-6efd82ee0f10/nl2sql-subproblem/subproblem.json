@@ -1,0 +1,27 @@
+{
+  "SELECT": "n.primary_name (人物名), a.actor_movie_count (演员作品数), ROUND(a.actor_avg_rating,2) AS actor_avg_rating (演员作品平均评分), d.director_movie_count (导演作品数), ROUND(d.director_avg_rating,2) AS director_avg_rating (导演作品平均评分), ROUND(d.director_avg_rating - a.actor_avg_rating,2) AS rating_difference (评分差异)",
+  "FROM": "actor_works a (CTE: 演员作品聚合), director_works d (CTE: 导演作品聚合), names n (人物表)",
+  "JOIN": [
+    {"table": "actor_works a", "on": "JOIN director_works d ON a.name_id = d.name_id"},
+    {"table": "names n", "on": "JOIN names n ON a.name_id = n.id"}
+  ],
+  "WHERE": "无（在CTE内部处理筛选）",
+  "GROUP_BY": "无（在CTE内部按 name_id 分组）",
+  "HAVING": "无（在CTE内部处理 HAVING COUNT(*) >= 阈值）",
+  "ORDER_BY": "rating_difference DESC",
+  "LIMIT": "通过 run_sql limit 参数控制（SQL中不写LIMIT）",
+  "CTE_actor_works": {
+    "SELECT": "p.name_id, AVG(t.average_rating) AS actor_avg_rating, COUNT(*) AS actor_movie_count",
+    "FROM": "principals p JOIN titles t ON p.title_id = t.id",
+    "WHERE": "p.category_id IN ('actor','actress') AND t.title_type = 'movie' AND t.average_rating IS NOT NULL",
+    "GROUP_BY": "p.name_id",
+    "HAVING": "COUNT(*) >= 3"
+  },
+  "CTE_director_works": {
+    "SELECT": "p.name_id, AVG(t.average_rating) AS director_avg_rating, COUNT(*) AS director_movie_count",
+    "FROM": "principals p JOIN titles t ON p.title_id = t.id",
+    "WHERE": "p.category_id = 'director' AND t.title_type = 'movie' AND t.average_rating IS NOT NULL",
+    "GROUP_BY": "p.name_id",
+    "HAVING": "COUNT(*) >= 2"
+  }
+}

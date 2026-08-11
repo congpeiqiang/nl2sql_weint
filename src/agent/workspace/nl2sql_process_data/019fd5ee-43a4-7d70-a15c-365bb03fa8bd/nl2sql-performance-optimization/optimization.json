@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT\n  n.primary_name AS actor_name,\n  MIN(t.start_year) AS first_year,\n  MAX(t.start_year) AS last_year,\n  MAX(t.start_year) - MIN(t.start_year) AS career_span\nFROM names n\nJOIN principals p ON p.name_id = n.id\nJOIN titles t ON t.id = p.title_id\nWHERE p.category_id IN ('actor', 'actress')\n  AND t.start_year IS NOT NULL\nGROUP BY n.id, n.primary_name\nORDER BY career_span DESC",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。SQL 已明确列出所需列，JOIN 均有 ON 条件，无子查询/函数包裹列/NOT IN/DISTINCT/LIKE/OR。LIMIT 按任务规范通过 run_sql 的 limit 参数控制，不在 SQL 中书写。"
+}

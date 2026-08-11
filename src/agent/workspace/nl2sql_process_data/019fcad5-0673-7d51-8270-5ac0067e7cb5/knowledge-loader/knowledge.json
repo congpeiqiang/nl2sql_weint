@@ -1,0 +1,82 @@
+{
+  "user_intent": {
+    "original_question": "查询1990年代（1990-1999年）电影的平均评分（average_rating）。按年份分组，统计每年的平均评分。",
+    "domain": "movies",
+    "keywords": ["电影", "平均评分", "average_rating", "年份", "1990", "1999", "分组"],
+    "intent_type": "query_yearly_avg_rating"
+  },
+  "entities": {
+    "time_range": {"start": 1990, "end": 1999},
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "start_year", "operator": "BETWEEN", "value": [1990, 1999]},
+      {"field": "start_year", "operator": "IS NOT NULL"}
+    ],
+    "fields_to_display": ["start_year", "AVG(average_rating)"]
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["average_rating", "avg rating"],
+      "formula": "AVG(t.average_rating)",
+      "related_tables": ["titles"],
+      "aggregation": "AVG"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "NULL年份处理",
+      "condition": "start_year IS NOT NULL"
+    },
+    {
+      "id": "rule_003",
+      "name": "评分可信度（可选）",
+      "condition": "排名类查询应加 num_votes > 10000，但本题为按年份聚合统计，非排名，可不加"
+    }
+  ],
+  "field_mappings": {
+    "电影": "titles.title_type = 'movie'",
+    "年份": "titles.start_year",
+    "平均评分": "titles.average_rating"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 表包含所有作品，title_type='movie' 表示电影"
+    },
+    {
+      "topic": "字段说明",
+      "content": "start_year 为首映年份(INTEGER)，average_rating 为IMDb加权平均分(DOUBLE, 1.0-10.0)"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.start_year", "titles.average_rating", "titles.title_type"],
+    "filter_conditions": ["title_type = 'movie'", "start_year BETWEEN 1990 AND 1999", "start_year IS NOT NULL"],
+    "time_range": "1990 to 1999"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2025-01-01T00:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 2
+    }
+  }
+}

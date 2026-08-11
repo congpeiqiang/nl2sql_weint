@@ -1,0 +1,31 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb唯一作品标识"},
+        {"name": "title_type", "type": "VARCHAR", "description": "作品类型: movie/short/tvSeries等"},
+        {"name": "primary_title", "type": "VARCHAR", "description": "主要标题"},
+        {"name": "original_title", "type": "VARCHAR", "description": "原始标题"},
+        {"name": "is_adult", "type": "INTEGER", "description": "是否成人内容"},
+        {"name": "start_year", "type": "INTEGER", "description": "首映/发布年份"},
+        {"name": "end_year", "type": "INTEGER", "description": "终映年份"},
+        {"name": "runtime_minutes", "type": "INTEGER", "description": "片长(分钟)"},
+        {"name": "average_rating", "type": "DOUBLE", "description": "IMDb加权平均评分(1.0-10.0)"},
+        {"name": "num_votes", "type": "INTEGER", "description": "用户投票总数"}
+      ]
+    }
+  ],
+  "relations": [],
+  "field_mappings": {
+    "电影": {"table": "titles", "field": "title_type", "value": "movie"},
+    "年份": {"table": "titles", "field": "start_year"},
+    "平均评分": {"table": "titles", "field": "average_rating", "aggregation": "AVG"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "main_table": "titles",
+    "data_source": "mysql"
+  }
+}

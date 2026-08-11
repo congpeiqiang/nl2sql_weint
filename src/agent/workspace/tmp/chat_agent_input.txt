@@ -1,0 +1,6 @@
+=== ROOT: chat_agent ===
+id: 019fd9fb-fc87-7aa1-802d-f10e73c1bb85
+start: 2026-08-07 02:09:58.878292+00:00
+end: 2026-08-07 02:10:11.460703+00:00
+total_duration_s: 12.582
+inputs: {"messages": [{"additional_kwargs": {"db_name": "aix_report"}, "content": "找出评分 >= 8.5 但投票数 < 5000 的电影，按评分降序排列", "id": "e5446b87-56d6-4aeb-8816-73de74fe5964", "response_metadata": {}, "type": "human"}]}

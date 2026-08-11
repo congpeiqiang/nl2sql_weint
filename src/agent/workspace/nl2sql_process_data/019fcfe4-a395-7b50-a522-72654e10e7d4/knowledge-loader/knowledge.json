@@ -1,0 +1,75 @@
+{
+  "user_intent": {
+    "original_question": "列出时长大于180分钟的电影标题和片长，按片长降序排列。",
+    "domain": "imdb",
+    "keywords": ["电影", "时长", "片长", "180分钟", "标题", "降序"],
+    "intent_type": "query_movies_by_runtime"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "runtime_minutes", "operator": ">", "value": 180}
+    ],
+    "fields_to_display": ["primary_title", "runtime_minutes"],
+    "order_by": {"field": "runtime_minutes", "direction": "DESC"}
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_type_movie",
+      "name": "电影类型过滤",
+      "condition": "t.title_type = 'movie'",
+      "note": "title_type='movie'才是电影，需排除short/tvSeries/tvEpisode等"
+    },
+    {
+      "id": "rule_runtime_null",
+      "name": "片长NULL处理",
+      "condition": "runtime_minutes IS NOT NULL",
+      "note": "runtime_minutes可能为NULL，查询片长时必须过滤"
+    }
+  ],
+  "field_mappings": {
+    "电影标题": "titles.primary_title",
+    "片长": "titles.runtime_minutes",
+    "电影": "titles.title_type = 'movie'"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "作品类型",
+      "content": "title_type='movie'表示长片电影，通常runtime>=40分钟"
+    },
+    {
+      "topic": "片长分类",
+      "content": ">150 min为超长片，>180 min属于超长片范畴"
+    },
+    {
+      "topic": "NULL处理",
+      "content": "runtime_minutes可能为NULL，需过滤"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.runtime_minutes", "titles.title_type"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.runtime_minutes > 180"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 3
+    }
+  }
+}

@@ -1,0 +1,95 @@
+{
+  "user_intent": {
+    "original_question": "统计电视剧系列（TV series）的数量，按类型或年份等维度进行统计汇总，给出电视剧系列的整体数量统计报告数据。",
+    "domain": "imdb",
+    "keywords": ["电视剧系列", "TV series", "数量", "统计", "类型", "年份", "维度", "汇总"],
+    "intent_type": "query_series_count_statistics"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [{"field": "title_type", "operator": "=", "value": "tvSeries"}],
+    "fields_to_display": ["电视剧系列数量", "类型", "年份/年代"]
+  },
+  "metrics": [
+    {
+      "name": "电视剧系列数量",
+      "aliases": ["TV series数量", "电视剧系列总数"],
+      "formula": "COUNT(DISTINCT titles.id) WHERE title_type = 'tvSeries'",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电视剧系列定义",
+      "condition": "titles.title_type = 'tvSeries'",
+      "content": "tvSeries = 电视剧系列，多季多集的电视剧"
+    },
+    {
+      "id": "rule_002",
+      "name": "年代划分",
+      "condition": "FLOOR(start_year / 10) * 10",
+      "content": "年代（decade）计算公式：FLOOR(start_year / 10) * 10"
+    },
+    {
+      "id": "rule_003",
+      "name": "NULL值处理",
+      "condition": "start_year IS NOT NULL",
+      "content": "start_year 可能为 NULL，查询时建议 WHERE start_year IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "电视剧系列": "titles.title_type = 'tvSeries'",
+    "年份": "titles.start_year",
+    "年代": "FLOOR(titles.start_year / 10) * 10",
+    "类型": "titles_genres.genre_id / genres.id"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "电视剧系列评分趋势分析，分析电视剧各季评分变化趋势，计算评分衰退率",
+      "normalized_question": "电视剧系列评分趋势分析",
+      "sql": "SELECT ... FROM titles s JOIN episodes e ON s.id = e.parent_id ... WHERE s.title_type = 'tvSeries' ...",
+      "intent_type": "query_series_rating_trend",
+      "similarity_score": 0.5
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "作品类型语义",
+      "content": "tvSeries = 电视剧系列，多季多集的电视剧。title_type 可选值: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    },
+    {
+      "topic": "多表JOIN路径",
+      "content": "titles ←→ titles_genres ←→ genres（类型关联路径）"
+    },
+    {
+      "topic": "常用过滤模式",
+      "content": "只查电视剧系列: WHERE t.title_type = 'tvSeries'"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "titles_genres", "genres"],
+    "main_fields": ["titles.id", "titles.title_type", "titles.start_year", "titles_genres.genre_id", "genres.id"],
+    "filter_conditions": ["titles.title_type = 'tvSeries'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T00:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 4,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 4,
+      "knowledge": 3
+    }
+  }
+}

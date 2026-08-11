@@ -1,0 +1,85 @@
+{
+  "user_intent": {
+    "original_question": "查询 average_rating 最高的 10 部电影，显示标题和评分",
+    "domain": "imdb",
+    "keywords": ["average_rating", "电影", "标题", "评分", "top 10"],
+    "intent_type": "query_top_rated_movies"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [{"field": "title_type", "operator": "=", "value": "movie"}],
+    "fields_to_display": ["primary_title", "average_rating"],
+    "order_by": {"field": "average_rating", "direction": "DESC"},
+    "limit": 10
+  },
+  "metrics": [
+    {
+      "name": "average_rating",
+      "aliases": ["评分", "平均评分"],
+      "formula": "titles.average_rating",
+      "related_tables": ["titles"],
+      "aggregation": "none"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_rating_credibility",
+      "name": "评分可信度规则",
+      "condition": "排名类查询应加 num_votes > 10000 过滤",
+      "note": "投票数阈值: <1000低可信, >=1000基本可信, >=10000较可信, >=50000高可信, >=200000极高"
+    },
+    {
+      "id": "rule_title_type",
+      "name": "作品类型语义",
+      "condition": "title_type = 'movie' 表示电影(长片电影, 通常 runtime >= 40 分钟)"
+    }
+  ],
+  "field_mappings": {
+    "标题": "titles.primary_title",
+    "评分": "titles.average_rating",
+    "电影": "titles.title_type = 'movie'"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "各类型电影平均评分（含热度指数），统计 2000 年后各类型电影的平均评分和热度",
+      "normalized_question": "统计2000年后各类型电影的平均评分和热度",
+      "sql": "SELECT g.display_name AS genre, COUNT(DISTINCT t.id) AS movie_count, ROUND(AVG(t.average_rating), 2) AS avg_rating, ROUND(AVG(t.num_votes), 0) AS avg_votes, ROUND(SUM(t.num_votes), 0) AS total_votes, ROUND(AVG(t.runtime_minutes), 1) AS avg_runtime FROM titles t JOIN titles_genres tg ON tg.title_id = t.id JOIN genres g ON g.id = tg.genre_id WHERE t.title_type = 'movie' AND t.num_votes > 5000 AND t.start_year >= 2000 AND t.start_year IS NOT NULL GROUP BY g.id, g.display_name ORDER BY avg_rating DESC",
+      "intent_type": "query_genre_ratings",
+      "similarity_score": 0.5
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "表结构",
+      "content": "titles 表包含 primary_title(标题), average_rating(评分), num_votes(投票数), title_type(作品类型) 等字段"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.average_rating 为 IMDb 加权平均评分(1.0-10.0), 投票数越高越可信"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.average_rating", "titles.num_votes", "titles.title_type"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.num_votes > 10000"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 2
+    }
+  }
+}

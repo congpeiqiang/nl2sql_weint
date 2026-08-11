@@ -1,0 +1,54 @@
+{
+  "tables": [
+    {
+      "name": "names",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true},
+        {"name": "primary_name", "type": "VARCHAR"}
+      ]
+    },
+    {
+      "name": "principals",
+      "columns": [
+        {"name": "id", "type": "INTEGER", "pk": true},
+        {"name": "title_id", "type": "VARCHAR", "fk": true},
+        {"name": "name_id", "type": "VARCHAR", "fk": true},
+        {"name": "category_id", "type": "VARCHAR"}
+      ]
+    },
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true},
+        {"name": "title_type", "type": "VARCHAR"},
+        {"name": "average_rating", "type": "DOUBLE"}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "principals",
+      "from_field": "title_id",
+      "to": "titles",
+      "to_field": "id"
+    },
+    {
+      "from": "principals",
+      "from_field": "name_id",
+      "to": "names",
+      "to_field": "id"
+    }
+  ],
+  "field_mappings": {
+    "人物名": {"table": "names", "field": "primary_name"},
+    "演员": {"table": "principals", "field": "category_id", "value": "('actor','actress')"},
+    "导演": {"table": "principals", "field": "category_id", "value": "'director'"},
+    "作品评分": {"table": "titles", "field": "average_rating"},
+    "作品类型": {"table": "titles", "field": "title_type"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "data_source": "mysql"
+  }
+}

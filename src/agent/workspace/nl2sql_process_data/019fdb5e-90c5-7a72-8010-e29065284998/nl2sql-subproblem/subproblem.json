@@ -1,0 +1,13 @@
+{
+  "SELECT": "titles.primary_title (电影标题), titles.runtime_minutes (片长)",
+  "FROM": "titles",
+  "JOIN": null,
+  "WHERE": [
+    "titles.title_type = 'movie' (只查电影类型)",
+    "titles.runtime_minutes > 180 (片长大于180分钟)"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": "titles.runtime_minutes DESC (按片长降序排列)",
+  "LIMIT": null
+}

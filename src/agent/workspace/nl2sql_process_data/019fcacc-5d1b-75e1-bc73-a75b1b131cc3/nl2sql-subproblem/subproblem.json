@@ -1,0 +1,46 @@
+{
+  "SELECT": "AVG(average_rating) AS avg_rating",
+  "FROM": "titles",
+  "JOIN": null,
+  "WHERE": [
+    "title_type = 'movie'",
+    "start_year BETWEEN 1990 AND 1999",
+    "start_year IS NOT NULL"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": null,
+  "LIMIT": null,
+  "subproblems": [
+    {
+      "id": 1,
+      "type": "filter",
+      "description": "筛选电影类型",
+      "condition": "title_type = 'movie'"
+    },
+    {
+      "id": 2,
+      "type": "filter",
+      "description": "筛选1990年代（1990-1999）",
+      "condition": "start_year BETWEEN 1990 AND 1999"
+    },
+    {
+      "id": 3,
+      "type": "filter",
+      "description": "排除NULL年份",
+      "condition": "start_year IS NOT NULL"
+    },
+    {
+      "id": 4,
+      "type": "aggregation",
+      "description": "计算平均评分",
+      "expression": "AVG(average_rating)"
+    }
+  ],
+  "metadata": {
+    "phase": "subproblem_decomposed",
+    "status": "success",
+    "query_complexity": "simple",
+    "total_subproblems": 4
+  }
+}

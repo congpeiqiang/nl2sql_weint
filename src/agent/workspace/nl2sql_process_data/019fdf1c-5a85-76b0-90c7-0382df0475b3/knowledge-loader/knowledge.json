@@ -1,0 +1,81 @@
+{
+  "user_intent": {
+    "original_question": "查询 average_rating 最高的 10 部电影，显示标题和评分",
+    "domain": "imdb",
+    "keywords": ["average_rating", "电影", "标题", "评分", "Top 10"],
+    "intent_type": "query_top_rated_movies"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "num_votes", "operator": ">", "value": 10000},
+      {"field": "average_rating", "operator": "IS NOT NULL"}
+    ],
+    "fields_to_display": ["primary_title", "average_rating"],
+    "order_by": {"field": "average_rating", "direction": "DESC"},
+    "limit": 10
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["average_rating", "评分"],
+      "formula": "titles.average_rating",
+      "related_tables": ["titles"],
+      "aggregation": "none (直接字段)"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "titles.title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "评分可信度规则",
+      "condition": "排名类查询应加 num_votes > 10000 过滤"
+    },
+    {
+      "id": "rule_003",
+      "name": "NULL值处理",
+      "condition": "average_rating IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "标题": "titles.primary_title",
+    "评分": "titles.average_rating",
+    "电影": "titles.title_type = 'movie'"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "高分电影 Top N（含贝叶斯校正）",
+      "sql": "SELECT t.primary_title, t.average_rating, t.num_votes FROM titles t WHERE t.title_type = 'movie' AND t.num_votes > 1000 AND t.average_rating IS NOT NULL ORDER BY ...",
+      "intent_type": "query_top_rated_movies",
+      "similarity_score": 0.8
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 表包含作品信息，average_rating 和 num_votes 直接存储在该表"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.average_rating 为 IMDb 加权平均分，范围 1.0-10.0；titles.num_votes 为用户投票总数"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.average_rating"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.num_votes > 10000", "titles.average_rating IS NOT NULL"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "strategy": "B"
+  }
+}

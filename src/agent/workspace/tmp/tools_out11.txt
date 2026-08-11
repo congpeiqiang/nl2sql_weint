@@ -1,0 +1,17 @@
+invoke EXC: NotImplementedError: StructuredTool does not support sync invocation.
+Traceback (most recent call last):
+  File "D:\code_work_space\llm\nl2sql\src\agent\workspace\tmp\test_invoke.py", line 11, in <module>
+    r = t.invoke({'echartsOption': opt, 'width': 400, 'height': 300, 'outputType': 'svg'})
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_core\tools\base.py", line 738, in invoke
+    return self.run(tool_input, **kwargs)
+           ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_core\tools\base.py", line 1100, in run
+    raise error_to_raise
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_core\tools\base.py", line 1066, in run
+    response = context.run(self._run, *tool_args, **tool_kwargs)
+  File "D:\code_work_space\llm\nl2sql\src\agent\utils\path_resolver.py", line 393, in wrapped_run
+    return _sanitize_chart_result(original_run(*new_args, **new_kwargs), is_chart)
+                                  ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_core\tools\structured.py", line 99, in _run
+    raise NotImplementedError(msg)
+NotImplementedError: StructuredTool does not support sync invocation.

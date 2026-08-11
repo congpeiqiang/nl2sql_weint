@@ -1,0 +1,13 @@
+{
+  "SELECT": "g.display_name AS genre, COUNT(DISTINCT t.id) AS movie_count",
+  "FROM": "titles t",
+  "JOIN": [
+    {"table": "titles_genres tg", "on": "tg.title_id = t.id"},
+    {"table": "genres g", "on": "g.id = tg.genre_id"}
+  ],
+  "WHERE": ["t.title_type = 'movie'"],
+  "GROUP_BY": ["g.id", "g.display_name"],
+  "HAVING": null,
+  "ORDER_BY": [{"column": "movie_count", "direction": "DESC"}],
+  "LIMIT": null
+}

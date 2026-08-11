@@ -1,0 +1,23 @@
+查询计划：职业生涯跨度最长的前10位演员
+
+1. 从 principals 表筛选演员记录：WHERE p.category_id IN ('actor', 'actress')
+   - 业务规则：演员包含 actor 和 actress 两类
+
+2. 通过 p.title_id = t.id 将 principals 与 titles 表 INNER JOIN
+   - 目的：获取每部作品的 start_year
+
+3. 通过 p.name_id = n.id 将 principals 与 names 表 INNER JOIN
+   - 目的：获取演员姓名 primary_name
+
+4. 过滤掉无年份的作品：WHERE t.start_year IS NOT NULL
+   - 业务规则：start_year 可能为 NULL，必须排除
+
+5. 按演员分组：GROUP BY n.id, n.primary_name
+   - 每个演员一组，计算其职业生涯跨度
+
+6. 计算职业生涯跨度：MAX(t.start_year) - MIN(t.start_year) AS career_span
+   - 指标定义：职业生涯跨度 = 最后一部作品年份 - 第一部作品年份
+
+7. 按职业生涯跨度降序排序：ORDER BY career_span DESC
+
+8. 取前10位演员（通过 run_sql 的 limit 参数控制，SQL 中不写 LIMIT）

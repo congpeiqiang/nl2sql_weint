@@ -1,0 +1,36 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb唯一作品标识"},
+        {"name": "title_type", "type": "VARCHAR", "description": "作品类型: movie/short/tvEpisode/tvSeries等"},
+        {"name": "primary_title", "type": "VARCHAR", "description": "主要标题"},
+        {"name": "start_year", "type": "INTEGER", "description": "首映/发布年份"},
+        {"name": "average_rating", "type": "DOUBLE", "description": "IMDb加权平均评分(1.0-10.0)"},
+        {"name": "num_votes", "type": "INTEGER", "description": "用户投票总数"}
+      ]
+    }
+  ],
+  "relations": [],
+  "field_mappings": {
+    "电视剧": {"table": "titles", "field": "title_type", "value": "tvSeries"},
+    "年份": {"table": "titles", "field": "start_year"},
+    "平均评分": {"table": "titles", "field": "average_rating"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "data_source": "mysql",
+    "main_table": "titles",
+    "filter_conditions": [
+      "titles.title_type = 'tvSeries'",
+      "titles.start_year BETWEEN 2000 AND 2023",
+      "titles.start_year IS NOT NULL",
+      "titles.average_rating IS NOT NULL"
+    ],
+    "group_by": ["titles.start_year"],
+    "aggregation": "AVG(titles.average_rating)",
+    "order_by": ["titles.start_year ASC"]
+  }
+}

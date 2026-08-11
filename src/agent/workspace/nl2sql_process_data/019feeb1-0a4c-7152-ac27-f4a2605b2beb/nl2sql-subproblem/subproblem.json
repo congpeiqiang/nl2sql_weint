@@ -1,0 +1,10 @@
+{
+  "SELECT": "列出需要查询的列: titles.primary_title (电影标题), titles.runtime_minutes (片长)",
+  "FROM": "涉及的表及别名: titles t",
+  "JOIN": "无JOIN，单表查询",
+  "WHERE": "筛选条件列表: [t.title_type = 'movie', t.runtime_minutes > 180]",
+  "GROUP_BY": "无分组",
+  "HAVING": "无分组后筛选",
+  "ORDER_BY": "排序列及方向: t.runtime_minutes DESC (片长降序)",
+  "LIMIT": "不写LIMIT，通过run_sql的limit参数控制"
+}

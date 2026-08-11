@@ -1,0 +1,61 @@
+{
+  "user_intent": {
+    "original_question": "查询数据库中每个表的记录条数",
+    "domain": "imdb",
+    "keywords": ["每个表", "记录条数", "count", "表"],
+    "intent_type": "query_table_row_counts"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["表名", "记录条数"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_schema",
+      "name": "模型名与表名",
+      "condition": "模型名 = 数据库表名（无后缀），例如 titles 表 → 模型名 titles"
+    },
+    {
+      "id": "rule_count",
+      "name": "记录条数统计",
+      "condition": "使用 COUNT(*) 统计每个表的记录条数"
+    }
+  ],
+  "field_mappings": {},
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "IMDb 数据库包含多个表：titles, names, principals, episodes, genres, categories, jobs, professions, titles_genres, principals_characters, names_primaryprofessions, names_knownfortitles, titleakas 等"
+    },
+    {
+      "topic": "字段说明",
+      "content": "每个表都有主键，titles.id 和 names.id 是 VARCHAR 类型"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["所有表"],
+    "main_fields": ["表名", "COUNT(*)"],
+    "filter_conditions": [],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 2,
+      "field_mappings": 0,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 2,
+      "field_mappings": 0,
+      "knowledge": 2
+    }
+  }
+}

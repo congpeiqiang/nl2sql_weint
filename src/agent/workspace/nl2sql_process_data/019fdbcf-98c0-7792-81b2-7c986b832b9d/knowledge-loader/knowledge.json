@@ -1,0 +1,57 @@
+{
+  "user_intent": {
+    "original_question": "统计每个类型的电影数量，从多到少排列",
+    "domain": "imdb",
+    "keywords": ["类型", "电影", "数量", "从多到少"],
+    "intent_type": "count_by_title_type"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["title_type", "count"]
+  },
+  "metrics": [
+    {
+      "name": "作品数量",
+      "aliases": ["电影数量", "数量"],
+      "formula": "COUNT(*)",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_title_type",
+      "name": "作品类型语义",
+      "condition": "title_type 可选值: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    },
+    {
+      "id": "rule_movie_vs_title",
+      "name": "电影 vs 作品",
+      "condition": "title_type = 'movie' 才是电影；titles 表包含9种作品类型"
+    }
+  ],
+  "field_mappings": {
+    "类型": "titles.title_type",
+    "电影数量": "COUNT(*)"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "类型字段",
+      "content": "titles.title_type 表示作品类型: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type"],
+    "filter_conditions": [],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "strategy": "B"
+  }
+}

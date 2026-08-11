@@ -1,0 +1,27 @@
+{
+  "SELECT": [
+    "n.primary_name AS actor_name (演员名)",
+    "MAX(t.start_year) - MIN(t.start_year) AS career_span (职业生涯跨度年数)"
+  ],
+  "FROM": [
+    "names n (人物表)",
+    "principals p (参与者表)",
+    "titles t (作品表)"
+  ],
+  "JOIN": [
+    {"table": "principals p", "on": "p.name_id = n.id", "type": "INNER JOIN"},
+    {"table": "titles t", "on": "t.id = p.title_id", "type": "INNER JOIN"}
+  ],
+  "WHERE": [
+    "p.category_id IN ('actor', 'actress') (演员定义规则：包含男女演员)",
+    "t.start_year IS NOT NULL (排除无年份作品)"
+  ],
+  "GROUP_BY": [
+    "n.id, n.primary_name (按演员分组)"
+  ],
+  "HAVING": [],
+  "ORDER_BY": [
+    "career_span DESC (按职业生涯跨度降序)"
+  ],
+  "LIMIT": 10
+}

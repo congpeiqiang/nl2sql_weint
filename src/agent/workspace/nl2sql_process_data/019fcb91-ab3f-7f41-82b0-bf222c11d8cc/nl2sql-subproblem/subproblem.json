@@ -1,0 +1,45 @@
+{
+  "original_question": "查询 1990 年代（1990-1999）电影的平均评分",
+  "SELECT": "AVG(t.average_rating) AS avg_rating — 1990年代所有电影的平均评分",
+  "FROM": "titles t — IMDb核心作品表",
+  "JOIN": null,
+  "WHERE": [
+    "t.title_type = 'movie' — 只查电影，排除电视剧、短片等",
+    "t.start_year BETWEEN 1990 AND 1999 — 1990年代",
+    "t.start_year IS NOT NULL — 排除年份为NULL的记录",
+    "t.average_rating IS NOT NULL — 排除无评分的记录"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": null,
+  "LIMIT": null,
+  "subproblems": [
+    {
+      "id": "sp1",
+      "clause": "SELECT",
+      "description": "计算平均评分",
+      "detail": "使用 AVG() 聚合函数计算 average_rating 列的平均值",
+      "columns": ["average_rating"],
+      "aggregation": "AVG"
+    },
+    {
+      "id": "sp2",
+      "clause": "FROM",
+      "description": "从titles表查询",
+      "detail": "单表查询，不需要JOIN",
+      "table": "titles"
+    },
+    {
+      "id": "sp3",
+      "clause": "WHERE",
+      "description": "过滤条件",
+      "detail": "三个过滤条件：(1) title_type='movie' 只查电影 (2) start_year BETWEEN 1990 AND 1999 限定年代 (3) average_rating IS NOT NULL 排除无评分记录",
+      "conditions": [
+        {"field": "title_type", "op": "=", "value": "movie"},
+        {"field": "start_year", "op": "BETWEEN", "value": [1990, 1999]},
+        {"field": "start_year", "op": "IS NOT NULL"},
+        {"field": "average_rating", "op": "IS NOT NULL"}
+      ]
+    }
+  ]
+}

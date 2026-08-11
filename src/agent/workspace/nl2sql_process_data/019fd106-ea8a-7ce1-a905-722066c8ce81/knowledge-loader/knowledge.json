@@ -1,0 +1,55 @@
+{
+  "user_intent": {
+    "original_question": "查询每个类型的电影数量，按数量降序排列",
+    "domain": "imdb",
+    "keywords": ["类型", "电影", "数量", "降序"],
+    "intent_type": "query_movie_count_per_genre"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["类型", "电影数量"]
+  },
+  "metrics": [
+    {
+      "name": "电影数量",
+      "aliases": ["作品数量", "数量"],
+      "formula": "COUNT(titles_genres.title_id)",
+      "related_tables": ["titles_genres", "genres"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "类型语义",
+      "condition": "类型(genre)通过 titles_genres 关联表与作品关联，genre_id 存储类型名称字符串"
+    }
+  ],
+  "field_mappings": {
+    "类型": "genres.id / genres.display_name",
+    "电影数量": "COUNT(titles_genres.title_id)"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles_genres 通过 genre_id 关联 genres.id，通过 title_id 关联 titles.id"
+    },
+    {
+      "topic": "字段说明",
+      "content": "genres.id 为类型标识符(如 action/comedy/drama)，display_name 为显示名称"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles_genres", "genres"],
+    "main_fields": ["genres.id", "genres.display_name", "titles_genres.title_id"],
+    "filter_conditions": [],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "strategy": "B"
+  }
+}

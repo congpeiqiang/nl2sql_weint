@@ -1,0 +1,96 @@
+{
+  "user_intent": {
+    "original_question": "查询 average_rating 最高的 10 部经典电影，显示标题和评分。注意：用户明确要求的是'电影'（title_type = 'movie'），不是电视剧系列（tvSeries）。",
+    "domain": "imdb",
+    "keywords": ["average_rating", "最高", "10部", "经典电影", "标题", "评分", "movie"],
+    "intent_type": "query_top_rated_movies"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "num_votes", "operator": ">", "value": 10000}
+    ],
+    "fields_to_display": ["primary_title", "average_rating"],
+    "sort": {"field": "average_rating", "direction": "DESC"},
+    "limit": 10
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["average_rating", "评分"],
+      "formula": "titles.average_rating",
+      "related_tables": ["titles"],
+      "aggregation": "直接字段"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "titles.title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "评分可信度",
+      "condition": "排名类查询应加 num_votes > 10000 过滤"
+    },
+    {
+      "id": "rule_003",
+      "name": "NULL处理",
+      "condition": "average_rating IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "标题": {"table": "titles", "field": "primary_title"},
+    "评分": {"table": "titles", "field": "average_rating"},
+    "电影": {"table": "titles", "field": "title_type", "value": "movie"}
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "高分电影 Top N（含贝叶斯校正）",
+      "sql": "SELECT t.primary_title, t.start_year, t.average_rating, t.num_votes FROM titles t WHERE t.title_type = 'movie' AND t.num_votes > 1000 AND t.average_rating IS NOT NULL ORDER BY bayesian_rating DESC LIMIT 20",
+      "intent_type": "query_top_rated_movies",
+      "similarity_score": 0.7
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "作品类型语义",
+      "content": "title_type='movie' 才是电影，不要用 titles 表代表电影（包含电视剧、短片、游戏等）"
+    },
+    {
+      "topic": "评分可信度",
+      "content": "排名类查询应加 num_votes > 10000 过滤，低投票数影片评分不可靠"
+    },
+    {
+      "topic": "表结构",
+      "content": "titles 表包含 average_rating 和 num_votes 字段，primary_title 为标题"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.average_rating", "titles.title_type", "titles.num_votes"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.num_votes > 10000", "titles.average_rating IS NOT NULL"],
+    "sort": "average_rating DESC",
+    "limit": 10
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 3
+    }
+  }
+}

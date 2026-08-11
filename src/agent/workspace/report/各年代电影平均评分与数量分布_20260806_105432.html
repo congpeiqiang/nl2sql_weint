@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "backgroundColor": "#fff",
+  "title": {
+    "text": "各年代电影平均评分与数量分布",
+    "left": "center"
+  },
+  "tooltip": {
+    "trigger": "axis"
+  },
+  "legend": {
+    "data": [
+      "电影数量",
+      "平均评分"
+    ],
+    "top": "8%"
+  },
+  "grid": {
+    "left": 80,
+    "right": 60,
+    "top": "18%",
+    "bottom": 60
+  },
+  "xAxis": {
+    "type": "category",
+    "data": [
+      "1890",
+      "1900",
+      "1910",
+      "1920",
+      "1930",
+      "1940",
+      "1950",
+      "1960",
+      "1970",
+      "1980",
+      "1990",
+      "2000",
+      "2010",
+      "2020"
+    ],
+    "name": "年代"
+  },
+  "yAxis": [
+    {
+      "type": "value",
+      "name": "电影数量",
+      "axisLabel": {
+        "formatter": "{value}"
+      }
+    },
+    {
+      "type": "value",
+      "name": "平均评分",
+      "min": 0,
+      "max": 7,
+      "axisLabel": {
+        "formatter": "{value}"
+      }
+    }
+  ],
+  "series": [
+    {
+      "name": "电影数量",
+      "type": "bar",
+      "data": [
+        1,
+        33,
+        3125,
+        6062,
+        4092,
+        1392,
+        4434,
+        6521,
+        11392,
+        11572,
+        11167,
+        41878,
+        136906,
+        130462
+      ],
+      "itemStyle": {
+        "color": "#5470c6"
+      }
+    },
+    {
+      "name": "平均评分",
+      "type": "line",
+      "yAxisIndex": 1,
+      "data": [
+        3.5,
+        3.26,
+        5.44,
+        5.58,
+        5.91,
+        6.1,
+        6.37,
+        6.39,
+        5.87,
+        5.94,
+        6.15,
+        6.28,
+        6.2,
+        6.27
+      ],
+      "smooth": true,
+      "itemStyle": {
+        "color": "#ee6666"
+      }
+    }
+  ]
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

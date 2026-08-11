@@ -1,0 +1,55 @@
+{
+  "user_intent": {
+    "original_question": "查询片长（runtime）超过 180 分钟的电影，返回电影标题、片长等信息。",
+    "domain": "imdb",
+    "keywords": ["电影", "片长", "runtime", "180分钟", "标题"],
+    "intent_type": "query_movies_by_runtime"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [{"field": "runtime_minutes", "operator": ">", "value": 180}],
+    "fields_to_display": ["电影标题", "片长"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_type_movie",
+      "name": "电影类型过滤",
+      "condition": "titles.title_type = 'movie'",
+      "note": "title_type='movie' 才是电影，titles 表包含9种作品类型"
+    },
+    {
+      "id": "rule_runtime",
+      "name": "片长字段",
+      "condition": "titles.runtime_minutes",
+      "note": "runtime_minutes 为片长（分钟），电影一般有值，剧集通常为 NULL"
+    }
+  ],
+  "field_mappings": {
+    "电影标题": "titles.primary_title",
+    "片长": "titles.runtime_minutes",
+    "作品类型": "titles.title_type"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影，不要用 titles 表代表电影（包含电视剧、短片、游戏等）"
+    },
+    {
+      "topic": "片长分类",
+      "content": "针对 movie 类型：>150 min 为超长片；runtime_minutes 电影一般有值"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.runtime_minutes", "titles.title_type"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.runtime_minutes > 180"]
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "strategy": "B"
+  }
+}

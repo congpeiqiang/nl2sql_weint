@@ -1,0 +1,63 @@
+{
+  "tables": [
+    {
+      "name": "names",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb 唯一人物标识 (nm开头)"},
+        {"name": "primary_name", "type": "VARCHAR", "pk": false, "description": "全名"},
+        {"name": "birth_year", "type": "INTEGER", "pk": false},
+        {"name": "death_year", "type": "INTEGER", "pk": false}
+      ]
+    },
+    {
+      "name": "principals",
+      "columns": [
+        {"name": "id", "type": "INTEGER", "pk": true},
+        {"name": "title_id", "type": "VARCHAR", "fk": true, "description": "关联 titles.id"},
+        {"name": "name_id", "type": "VARCHAR", "fk": true, "description": "关联 names.id"},
+        {"name": "ordering", "type": "INTEGER", "pk": false},
+        {"name": "category_id", "type": "VARCHAR", "pk": false, "description": "职位类别 actor/actress/director等"},
+        {"name": "job_id", "type": "VARCHAR", "pk": false}
+      ]
+    },
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb 唯一作品标识 (tt开头)"},
+        {"name": "title_type", "type": "VARCHAR", "pk": false, "description": "作品类型 movie/short/tvSeries等"},
+        {"name": "primary_title", "type": "VARCHAR", "pk": false},
+        {"name": "original_title", "type": "VARCHAR", "pk": false},
+        {"name": "is_adult", "type": "INTEGER", "pk": false},
+        {"name": "start_year", "type": "INTEGER", "pk": false},
+        {"name": "end_year", "type": "INTEGER", "pk": false},
+        {"name": "runtime_minutes", "type": "INTEGER", "pk": false},
+        {"name": "average_rating", "type": "DOUBLE", "pk": false},
+        {"name": "num_votes", "type": "INTEGER", "pk": false}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "principals",
+      "from_field": "title_id",
+      "to": "titles",
+      "to_field": "id"
+    },
+    {
+      "from": "principals",
+      "from_field": "name_id",
+      "to": "names",
+      "to_field": "id"
+    }
+  ],
+  "field_mappings": {
+    "演员姓名": {"table": "names", "field": "primary_name"},
+    "参演电影数量": {"table": "principals", "field": "title_id", "aggregation": "COUNT(DISTINCT)"},
+    "演员类别": {"table": "principals", "field": "category_id"},
+    "作品类型": {"table": "titles", "field": "title_type"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success"
+  }
+}

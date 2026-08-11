@@ -1,0 +1,16 @@
+{
+  "SELECT": "n.primary_name (演员姓名), COUNT(DISTINCT p.title_id) AS movie_count (参演电影数量)",
+  "FROM": "names n (人物表，别名n)",
+  "JOIN": [
+    {"table": "principals p", "on": "p.name_id = n.id", "description": "通过参与者表关联演员与作品"},
+    {"table": "titles t", "on": "t.id = p.title_id", "description": "关联作品信息以过滤作品类型"}
+  ],
+  "WHERE": [
+    "p.category_id IN ('actor', 'actress') — 演员定义规则：必须同时包含actor和actress",
+    "t.title_type = 'movie' — 只统计电影，排除电视剧、短片等"
+  ],
+  "GROUP_BY": "n.id, n.primary_name — 按演员分组统计",
+  "HAVING": null,
+  "ORDER_BY": "movie_count DESC — 按参演电影数量降序排列",
+  "LIMIT": "10 — 通过run_sql的limit参数控制，SQL中不写LIMIT子句"
+}

@@ -1,0 +1,94 @@
+{
+  "user_intent": {
+    "original_question": "按十年分组统计电影的平均评分和数量。即按 start_year 每十年为一个区间（如 1900-1909、1910-1919、...、2020-2029），统计每个十年区间内电影（title_type='movie'）的数量和平均评分。",
+    "domain": "imdb",
+    "keywords": ["十年", "分组", "电影", "平均评分", "数量", "start_year", "title_type", "movie"],
+    "intent_type": "query_decade_movie_stats"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "start_year", "operator": "IS NOT NULL"}
+    ],
+    "fields_to_display": ["decade", "movie_count", "avg_rating"],
+    "group_by": "decade (FLOOR(start_year/10)*10)"
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["avg_rating", "平均分"],
+      "formula": "AVG(t.average_rating)",
+      "related_tables": ["titles"],
+      "aggregation": "AVG"
+    },
+    {
+      "name": "电影数量",
+      "aliases": ["count", "数量"],
+      "formula": "COUNT(*)",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_decade",
+      "name": "年代划分",
+      "condition": "FLOOR(start_year / 10) * 10"
+    },
+    {
+      "id": "rule_movie",
+      "name": "电影类型",
+      "condition": "title_type = 'movie'"
+    },
+    {
+      "id": "rule_null",
+      "name": "NULL处理",
+      "condition": "start_year IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "电影": {"table": "titles", "field": "title_type", "value": "movie"},
+    "年份": {"table": "titles", "field": "start_year"},
+    "评分": {"table": "titles", "field": "average_rating"},
+    "年代": {"table": "titles", "field": "FLOOR(start_year/10)*10"}
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "年代划分",
+      "content": "年代（decade）计算公式：FLOOR(start_year / 10) * 10，示例：1994 → 1990, 2005 → 2000, 2023 → 2020"
+    },
+    {
+      "topic": "电影类型",
+      "content": "title_type = 'movie' 才是电影，不要用 titles 表代表电影，它包含电视剧、短片、游戏等"
+    },
+    {
+      "topic": "NULL处理",
+      "content": "start_year 可能为 NULL，查询时建议 WHERE start_year IS NOT NULL"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type", "titles.start_year", "titles.average_rating"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.start_year IS NOT NULL"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 4,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 2,
+      "business_rules": 3,
+      "field_mappings": 4,
+      "knowledge": 3
+    }
+  }
+}

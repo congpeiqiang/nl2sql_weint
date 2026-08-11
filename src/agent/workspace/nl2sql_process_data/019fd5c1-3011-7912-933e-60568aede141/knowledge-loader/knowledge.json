@@ -1,0 +1,97 @@
+{
+  "user_intent": {
+    "original_question": "统计 2000-2023 年每年电影产量，并计算相比上一年的增长率",
+    "domain": "imdb",
+    "keywords": ["电影", "产量", "每年", "2000-2023", "增长率", "上一年"],
+    "intent_type": "query_movie_production_yearly_growth"
+  },
+  "entities": {
+    "time_range": {"start": 2000, "end": 2023},
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "start_year", "operator": "BETWEEN", "value": [2000, 2023]},
+      {"field": "start_year", "operator": "IS NOT NULL"}
+    ],
+    "fields_to_display": ["年份", "电影产量", "增长率"]
+  },
+  "metrics": [
+    {
+      "name": "电影产量",
+      "aliases": ["电影数量", "产量", "电影数"],
+      "formula": "COUNT(*) WHERE title_type='movie' GROUP BY start_year",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    },
+    {
+      "name": "年增长率",
+      "aliases": ["相比上一年增长率", "同比增长率"],
+      "formula": "(current_year_count - previous_year_count) / previous_year_count * 100",
+      "related_tables": ["titles"],
+      "aggregation": "LAG window function"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型定义",
+      "condition": "title_type = 'movie' 才是电影，titles 表包含9种作品类型"
+    },
+    {
+      "id": "rule_002",
+      "name": "NULL值处理",
+      "condition": "start_year 可能为 NULL，查询时需 WHERE start_year IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "电影": "titles.title_type = 'movie'",
+    "年份": "titles.start_year",
+    "产量": "COUNT(*)",
+    "增长率": "(COUNT(*) - LAG(COUNT(*)) OVER (ORDER BY start_year)) / LAG(COUNT(*)) OVER (ORDER BY start_year)"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "各类型电影平均评分（含热度指数），统计 2000 年后各类型电影的平均评分和热度",
+      "sql": "SELECT g.display_name AS genre, COUNT(DISTINCT t.id) AS movie_count, ROUND(AVG(t.average_rating), 2) AS avg_rating, ROUND(AVG(t.num_votes), 0) AS avg_votes, ROUND(SUM(t.num_votes), 0) AS total_votes, ROUND(AVG(t.runtime_minutes), 1) AS avg_runtime FROM titles t JOIN titles_genres tg ON tg.title_id = t.id JOIN genres g ON g.id = tg.genre_id WHERE t.title_type = 'movie' AND t.num_votes > 5000 AND t.start_year >= 2000 AND t.start_year IS NOT NULL GROUP BY g.id, g.display_name ORDER BY avg_rating DESC",
+      "intent_type": "query_genre_ratings",
+      "similarity_score": 0.5
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "电影类型",
+      "content": "title_type = 'movie' 才是电影（长片），不要用 titles 表代表电影"
+    },
+    {
+      "topic": "NULL处理",
+      "content": "start_year 可能为 NULL，查询时建议 WHERE start_year IS NOT NULL"
+    },
+    {
+      "topic": "增长率计算",
+      "content": "年增长率 = (当年产量 - 上一年产量) / 上一年产量，可用 LAG 窗口函数获取上一年产量"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.start_year", "titles.title_type"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.start_year BETWEEN 2000 AND 2023", "titles.start_year IS NOT NULL"],
+    "time_range": "2000 to 2023"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 4,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 2,
+      "business_rules": 2,
+      "field_mappings": 4,
+      "knowledge": 3
+    }
+  }
+}

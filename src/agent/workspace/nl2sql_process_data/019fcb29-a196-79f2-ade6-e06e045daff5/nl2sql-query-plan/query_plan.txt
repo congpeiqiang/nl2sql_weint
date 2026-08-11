@@ -1,0 +1,8 @@
+查询计划：查询1990年代电影的平均评分
+
+1. 从 titles 表（别名 t）中筛选数据
+2. 过滤条件：title_type = 'movie'（只查电影）
+3. 过滤条件：start_year >= 1990 AND start_year <= 1999（1990年代）
+4. 过滤条件：average_rating IS NOT NULL（排除无评分记录）
+5. 对筛选后的记录计算 AVG(average_rating)，得到平均评分
+6. 返回单行结果：1990年代电影的平均评分

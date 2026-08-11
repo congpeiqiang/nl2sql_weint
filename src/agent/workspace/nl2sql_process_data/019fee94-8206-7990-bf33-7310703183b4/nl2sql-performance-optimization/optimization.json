@@ -1,0 +1,6 @@
+{
+  "sql": "WITH actor_works AS (\n    SELECT p.name_id, AVG(t.average_rating) AS actor_avg_rating, COUNT(*) AS actor_movie_count\n    FROM principals p\n    JOIN titles t ON p.title_id = t.id\n    WHERE p.category_id IN ('actor', 'actress') AND t.title_type = 'movie' AND t.average_rating IS NOT NULL\n    GROUP BY p.name_id\n    HAVING COUNT(*) >= 3\n),\ndirector_works AS (\n    SELECT p.name_id, AVG(t.average_rating) AS director_avg_rating, COUNT(*) AS director_movie_count\n    FROM principals p\n    JOIN titles t ON p.title_id = t.id\n    WHERE p.category_id = 'director' AND t.title_type = 'movie' AND t.average_rating IS NOT NULL\n    GROUP BY p.name_id\n    HAVING COUNT(*) >= 3\n)\nSELECT\n    n.primary_name,\n    a.actor_movie_count,\n    ROUND(a.actor_avg_rating, 2) AS actor_avg_rating,\n    d.director_movie_count,\n    ROUND(d.director_avg_rating, 2) AS director_avg_rating\nFROM actor_works a\nJOIN director_works d ON a.name_id = d.name_id\nJOIN names n ON a.name_id = n.id",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。SQL 已使用 CTE 聚合、明确列名、所有 JOIN 均有 ON 条件，无 SELECT *、无笛卡尔积、无函数包裹列、无 NOT IN。LIMIT 通过 run_sql 参数控制（符合任务规范），聚合查询本身无需 LIMIT。"
+}

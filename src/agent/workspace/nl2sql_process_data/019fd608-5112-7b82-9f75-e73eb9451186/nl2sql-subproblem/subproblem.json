@@ -1,0 +1,21 @@
+{
+  "SELECT": [
+    "genres.display_name AS genre_name (类型名)",
+    "titles.primary_title AS movie_title (电影标题)",
+    "titles.average_rating AS rating (评分)"
+  ],
+  "FROM": "titles t, titles_genres tg, genres g",
+  "JOIN": [
+    {"table": "titles_genres tg", "on": "tg.title_id = t.id"},
+    {"table": "genres g", "on": "g.id = tg.genre_id"}
+  ],
+  "WHERE": [
+    "t.title_type = 'movie' (只查电影)",
+    "t.num_votes > 10000 (评分可信度过滤)",
+    "t.average_rating IS NOT NULL (排除无评分记录)"
+  ],
+  "GROUP_BY": "g.id, g.display_name (按类型分组，找出每个类型的最高评分电影)",
+  "HAVING": "无",
+  "ORDER_BY": "g.display_name ASC (按类型名排序)",
+  "WINDOW": "ROW_NUMBER() OVER (PARTITION BY g.id ORDER BY t.average_rating DESC) AS rn (每个类型内按评分降序排名，取rn=1)"
+}

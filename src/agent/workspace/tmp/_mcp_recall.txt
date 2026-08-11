@@ -1,0 +1,62 @@
+  annotations=ToolAnnotations(title="Get Instructions", readOnlyHint=True),
+    )
+    def get_instructions() -> dict:
+        """Return business rules and instructions from knowledge/rules/*.md."""
+        from wren.context import load_rules  # noqa: PLC0415
+
+        content, used_legacy = load_rules(ctx.project)
+        return {"instructions": content or "", "used_legacy": used_legacy}
+
+    @mcp.tool(
+        annotations=ToolAnnotations(title="Recall Queries", readOnlyHint=True),
+    )
+    def recall_queries(question: str, limit: int = 3) -> dict:
+        """Recall confirmed NL->SQL examples similar to the given question.
+
+        Works with the ``memory`` extra (semantic search) or falls back to a
+        dependency-free token-overlap search over knowledge/sql/*.md. Returns
+        ``{"matches": [...]}``.
+        """
+        from wren.memory.index_backend import get_index  # noqa: PLC0415
+
+        try:
+            from wren.memory.cli import _default_memory_path  # noqa: PLC0415
+
+            mem_path = str(_default_memory_path())
+        except ImportError:
+            mem_path = str(ctx.project / ".wren" / "memory")
+
+        idx = get_index(ctx.project, mem_path)
+        return {"matches": idx.search(question, limit=limit)}
+
+    @mcp.tool(
+        annotations=ToolAnnotations(title="Get Context", readOnlyHint=True),
+    )
+    def get_context(
+        question: str,
+        limit: int = 5,
+        item_type: str | None = None,
+        model_name: str | None = None,
+    ) -> dict:
+        """Semantic retrieval of the schema fragments relevant to a question.
+
+        The schema-axis twin of ``recall_queries``: instead of NL->SQL
+        exemplars, this returns models/columns/cubes ranked by relevance.
+        Uses embedding search when the ``memory`` extra is installed and the
+        schema has been indexed (``wren memory index``); otherwise falls back
+        to the full plain-text schema description (same content as
+        ``describe_schema``).
+        """
+        from wren.context import build_json  # noqa: PLC0415
+        from wren.memory import schema_indexer  # noqa: PLC0415
+
+        manifest = build_json(ctx.project)
+        try:
+            from wren.memory.cli import _default_memory_path  # noqa: PLC0415
+            from wren.memory.store import MemoryStore  # noqa: PLC0415
+
+            store = MemoryStore(path=str(_default_memory_path()))
+            return store.get_context(
+                manifest,
+                question,
+                li

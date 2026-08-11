@@ -1,0 +1,4 @@
+1. 从 titles 表筛选 title_type='movie' 且 average_rating IS NOT NULL 的行
+2. 选择 primary_title（标题）和 average_rating（评分）两列
+3. 按 average_rating DESC 降序排序
+4. 取前 10 行

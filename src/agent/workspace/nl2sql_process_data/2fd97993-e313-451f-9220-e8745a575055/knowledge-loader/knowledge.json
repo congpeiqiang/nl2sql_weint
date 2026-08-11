@@ -1,0 +1,76 @@
+{
+  "user_intent": {
+    "original_question": "查询 Comedy 类型的电影有多少部",
+    "domain": "imdb",
+    "keywords": ["Comedy", "类型", "电影", "数量"],
+    "intent_type": "count_movies_by_genre"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "genre", "operator": "=", "value": "comedy"}
+    ],
+    "fields_to_display": ["电影数量"]
+  },
+  "metrics": [
+    {
+      "name": "电影数量",
+      "aliases": ["电影部数", "电影总数"],
+      "formula": "COUNT(DISTINCT t.id)",
+      "related_tables": ["titles", "titles_genres", "genres"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_movie",
+      "name": "电影类型语义",
+      "condition": "t.title_type = 'movie' 才是电影，titles 表包含多种作品类型"
+    },
+    {
+      "id": "rule_genre",
+      "name": "genre_id 是字符串",
+      "condition": "genres.id 存的是字符串如 'comedy'，不是数字ID"
+    }
+  ],
+  "field_mappings": {
+    "电影": "titles.title_type = 'movie'",
+    "Comedy类型": "genres.id = 'comedy'",
+    "电影数量": "COUNT(DISTINCT titles.id)"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles ←→ titles_genres ←→ genres，通过 title_id 和 genre_id 关联"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles_genres 联合主键 (title_id, genre_id)，genre_id 关联 genres.id"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "titles_genres", "genres"],
+    "main_fields": ["titles.id", "titles.title_type", "titles_genres.genre_id", "genres.id"],
+    "filter_conditions": ["t.title_type = 'movie'", "g.id = 'comedy'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 2
+    }
+  }
+}

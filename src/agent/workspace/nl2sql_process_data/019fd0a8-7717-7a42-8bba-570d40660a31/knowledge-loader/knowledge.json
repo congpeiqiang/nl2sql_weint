@@ -1,0 +1,48 @@
+{
+  "user_intent": {
+    "original_question": "查询每个类型的电影数量，按数量降序排列",
+    "domain": "imdb",
+    "keywords": ["类型", "电影", "数量", "降序"],
+    "intent_type": "query_title_type_count"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["title_type", "count"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_type_semantics",
+      "name": "作品类型语义",
+      "condition": "title_type 字段表示作品类型: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    }
+  ],
+  "field_mappings": {
+    "类型": "titles.title_type",
+    "电影数量": "COUNT(*) over titles grouped by title_type"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 表是 IMDb 核心作品表，包含所有电影、短片、电视剧集、电视剧系列等，约1000万+条记录。title_type 字段表示作品类型。"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.title_type 可选值: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type"],
+    "filter_conditions": [],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "strategy": "B",
+    "timestamp": "2026-07-28T10:00:00"
+  }
+}

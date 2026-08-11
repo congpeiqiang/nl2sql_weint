@@ -1,0 +1,22 @@
+1. 创建CTE actor_works：
+   a. 从 principals p 表筛选 category_id IN ('actor', 'actress') 的记录
+   b. 通过 p.title_id = t.id 连接 titles t 表
+   c. 过滤 t.title_type = 'movie' 且 t.average_rating IS NOT NULL
+   d. 按 p.name_id 分组
+   e. 计算 AVG(t.average_rating) AS actor_avg_rating 和 COUNT(*) AS actor_movie_count
+   f. 用 HAVING COUNT(*) >= 3 筛选演员作品数 >= 3 的人
+
+2. 创建CTE director_works：
+   a. 从 principals p 表筛选 category_id = 'director' 的记录
+   b. 通过 p.title_id = t.id 连接 titles t 表
+   c. 过滤 t.title_type = 'movie' 且 t.average_rating IS NOT NULL
+   d. 按 p.name_id 分组
+   e. 计算 AVG(t.average_rating) AS director_avg_rating 和 COUNT(*) AS director_movie_count
+   f. 用 HAVING COUNT(*) >= 3 筛选导演作品数 >= 3 的人
+
+3. 主查询：
+   a. 从 actor_works a 表开始
+   b. 通过 a.name_id = d.name_id 连接 director_works d 表（找出同时是演员和导演的人）
+   c. 通过 a.name_id = n.id 连接 names n 表获取人物姓名
+   d. 选择 n.primary_name, a.actor_movie_count, ROUND(a.actor_avg_rating, 2) AS actor_avg_rating, d.director_movie_count, ROUND(d.director_avg_rating, 2) AS director_avg_rating
+   e. 不写LIMIT子句，通过run_sql的limit参数控制返回行数

@@ -1,0 +1,10 @@
+1. 从 principals 表取导演记录 pd，筛选 pd.category_id = 'director'
+2. 通过 pd.title_id 连接 titles t，筛选 t.title_type = 'movie' 且 t.average_rating IS NOT NULL
+3. 通过 pa.title_id = t.id 自连接 principals pa，筛选 pa.category_id IN ('actor','actress')，得到该电影中的演员
+4. 通过 pd.name_id = d.id 连接 names d，获取导演名 d.primary_name
+5. 通过 pa.name_id = a.id 连接 names a，获取演员名 a.primary_name
+6. 按 d.id, d.primary_name, a.id, a.primary_name 分组
+7. 计算合作次数 COUNT(*) 和平均评分 AVG(t.average_rating)
+8. HAVING 过滤：COUNT(*) >= 3 且 AVG(t.average_rating) >= 7.5
+9. 按合作次数 DESC, 平均评分 DESC 排序
+10. 通过 run_sql 的 limit 参数控制返回行数（不写 SQL LIMIT 子句）

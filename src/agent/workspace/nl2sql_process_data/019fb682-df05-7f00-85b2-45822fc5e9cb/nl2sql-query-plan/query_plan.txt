@@ -1,0 +1,14 @@
+查询计划：参演电影平均评分最高的前10位演员（参演电影数>=5且每部电影投票数>50000）
+
+1. 从 titles 表筛选电影：t.title_type = 'movie' 且 t.num_votes > 50000（每部电影投票数>50000）
+2. 通过 principals 表连接 titles 和 names：
+   - principals.title_id = titles.id
+   - principals.name_id = names.id
+3. 筛选演员：p.category_id IN ('actor', 'actress')
+4. 按演员分组：GROUP BY n.id, n.primary_name
+5. 计算每个演员的：
+   - 参演电影数 = COUNT(DISTINCT p.title_id)
+   - 平均评分 = AVG(t.average_rating)
+6. 应用 HAVING 过滤：COUNT(DISTINCT p.title_id) >= 5（参演电影数>=5）
+7. 按平均评分降序排序：ORDER BY AVG(t.average_rating) DESC
+8. 取前10位演员（通过 run_sql 的 limit 参数控制，SQL 中不写 LIMIT）

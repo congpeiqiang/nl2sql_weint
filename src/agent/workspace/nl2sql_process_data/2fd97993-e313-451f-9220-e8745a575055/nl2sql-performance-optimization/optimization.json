@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT COUNT(DISTINCT t.id) AS movie_count\nFROM titles t\nJOIN titles_genres tg ON tg.title_id = t.id\nJOIN genres g ON g.id = tg.genre_id\nWHERE t.title_type = 'movie' AND g.id = 'comedy'",
+  "optimized_sql": "SELECT COUNT(DISTINCT t.id) AS movie_count\nFROM titles t\nJOIN titles_genres tg ON tg.title_id = t.id\nJOIN genres g ON g.id = tg.genre_id\nWHERE t.title_type = 'movie' AND g.id = 'comedy'",
+  "issues": [],
+  "summary": "共发现 0 个性能问题。该查询为聚合计数查询，返回单行结果，无需 LIMIT；JOIN 均带 ON 条件，无笛卡尔积；未使用 SELECT *；DISTINCT 用于正确去重计数，必要且合理。"
+}

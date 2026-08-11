@@ -1,0 +1,13 @@
+{
+  "sql": "SELECT primary_title, runtime_minutes\nFROM titles\nWHERE title_type = 'movie' AND runtime_minutes > 180 AND runtime_minutes IS NOT NULL\nORDER BY runtime_minutes DESC",
+  "optimized_sql": "SELECT primary_title, runtime_minutes\nFROM titles\nWHERE title_type = 'movie' AND runtime_minutes > 180 AND runtime_minutes IS NOT NULL\nORDER BY runtime_minutes DESC",
+  "issues": [
+    {
+      "rule": "no_limit",
+      "severity": "low",
+      "message": "SQL中无LIMIT子句，但根据任务规范，LIMIT通过run_sql的limit参数控制，不在SQL中写入",
+      "suggestion": "通过run_sql(sql, limit=N)控制返回行数"
+    }
+  ],
+  "summary": "共发现 1 个性能问题，0 个高风险。SQL已明确列出所需列，无JOIN、无子查询、无函数包裹列、无NOT IN、无DISTINCT、无LIKE通配符、无OR条件，且已有ORDER BY。SQL无需修改。"
+}

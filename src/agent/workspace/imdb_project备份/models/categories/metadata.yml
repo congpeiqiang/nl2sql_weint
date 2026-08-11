@@ -1,0 +1,18 @@
+name: categories
+table_reference:
+  table: categories
+columns:
+- name: code
+  type: VARCHAR
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+- name: display_name
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+cached: false
+primary_key: code
+properties:
+  description: '职位类别表。包含12种标准职位分类: actor/actress/director/writer/producer等。区别于jobs表的自由格式职位名称。'

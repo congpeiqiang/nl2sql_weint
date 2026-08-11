@@ -1,0 +1,16 @@
+{
+  "SELECT": "COUNT(DISTINCT titles.id) AS movie_count",
+  "FROM": "titles",
+  "JOIN": [
+    {"table": "titles_genres", "on": "titles_genres.title_id = titles.id"},
+    {"table": "genres", "on": "titles_genres.genre_id = genres.id"}
+  ],
+  "WHERE": [
+    "titles.title_type = 'movie'",
+    "genres.id = 'comedy'"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": null,
+  "LIMIT": null
+}

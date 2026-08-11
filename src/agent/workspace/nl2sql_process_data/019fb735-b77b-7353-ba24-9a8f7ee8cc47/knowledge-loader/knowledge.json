@@ -1,0 +1,93 @@
+{
+  "user_intent": {
+    "original_question": "查询参演电影数量最多的前 10 位演员，显示演员姓名和参演电影数量",
+    "domain": "imdb",
+    "keywords": ["演员", "参演电影数量", "前10", "演员姓名"],
+    "intent_type": "query_prolific_actors"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "category_id", "operator": "IN", "value": ["actor", "actress"]},
+      {"field": "title_type", "operator": "=", "value": "movie"}
+    ],
+    "fields_to_display": ["演员姓名", "参演电影数量"],
+    "limit": 10
+  },
+  "metrics": [
+    {
+      "name": "参演电影数量",
+      "aliases": ["作品总数", "movie_count"],
+      "formula": "COUNT(DISTINCT p.title_id)",
+      "related_tables": ["names", "principals", "titles"],
+      "aggregation": "COUNT(DISTINCT)"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_actor",
+      "name": "演员定义规则",
+      "condition": "category_id IN ('actor', 'actress')"
+    },
+    {
+      "id": "rule_movie",
+      "name": "电影类型",
+      "condition": "t.title_type = 'movie'"
+    }
+  ],
+  "field_mappings": {
+    "演员姓名": "names.primary_name",
+    "参演电影数量": "COUNT(DISTINCT principals.title_id)"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "高产演员分析（含多面手得分），找出参演高分电影最多的演员，同时计算角色多样性",
+      "normalized_question": "找出参演高分电影最多的演员",
+      "sql": "SELECT n.primary_name, COUNT(DISTINCT p.title_id) AS movie_count, ... FROM names n JOIN principals p ON p.name_id = n.id JOIN titles t ON t.id = p.title_id WHERE p.category_id IN ('actor', 'actress') AND t.title_type = 'movie' ... GROUP BY n.id, n.primary_name ORDER BY movie_count DESC LIMIT 20",
+      "intent_type": "query_prolific_actors",
+      "similarity_score": 1.0
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "演员定义",
+      "content": "查询演员时必须同时包含 category_id IN ('actor', 'actress')，IMDb 按性别区分"
+    },
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影，titles 表包含多种作品类型"
+    },
+    {
+      "topic": "多表JOIN路径",
+      "content": "titles ←→ principals ←→ names"
+    },
+    {
+      "topic": "NULL处理",
+      "content": "start_year 可能为 NULL，查询时建议 WHERE start_year IS NOT NULL"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["names", "principals", "titles"],
+    "main_fields": ["names.primary_name", "principals.title_id", "principals.name_id", "principals.category_id", "titles.title_type"],
+    "filter_conditions": ["p.category_id IN ('actor', 'actress')", "t.title_type = 'movie'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 4
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 4
+    }
+  }
+}

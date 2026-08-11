@@ -1,0 +1,14 @@
+{
+  "SELECT": "t.primary_title AS 片名, t.average_rating AS 评分",
+  "FROM": "titles t",
+  "JOIN": null,
+  "WHERE": [
+    "t.title_type = 'movie'",
+    "t.average_rating IS NOT NULL",
+    "t.num_votes > 10000"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": "t.average_rating DESC",
+  "LIMIT": 10
+}

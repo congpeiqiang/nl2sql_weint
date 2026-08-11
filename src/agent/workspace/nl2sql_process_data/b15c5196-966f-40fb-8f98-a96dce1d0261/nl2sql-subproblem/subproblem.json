@@ -1,0 +1,21 @@
+{
+  "SELECT": [
+    "t.start_year AS year",
+    "ROUND(AVG(t.average_rating), 2) AS avg_rating"
+  ],
+  "FROM": {
+    "table": "titles",
+    "alias": "t"
+  },
+  "JOIN": null,
+  "WHERE": [
+    "t.title_type = 'tvSeries'",
+    "t.start_year BETWEEN 2000 AND 2023",
+    "t.start_year IS NOT NULL",
+    "t.average_rating IS NOT NULL"
+  ],
+  "GROUP_BY": ["t.start_year"],
+  "HAVING": null,
+  "ORDER_BY": ["t.start_year ASC"],
+  "LIMIT": null
+}

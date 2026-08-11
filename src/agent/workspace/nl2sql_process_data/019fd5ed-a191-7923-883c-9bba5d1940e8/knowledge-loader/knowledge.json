@@ -1,0 +1,106 @@
+{
+  "user_intent": {
+    "original_question": "找出每个电影类型中评分最高的电影，显示类型名、电影标题和评分",
+    "domain": "imdb",
+    "keywords": ["电影类型", "评分最高", "电影", "类型名", "电影标题", "评分"],
+    "intent_type": "query_top_rated_movie_per_genre"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "num_votes", "operator": ">", "value": 10000}
+    ],
+    "fields_to_display": ["类型名", "电影标题", "评分"]
+  },
+  "metrics": [
+    {
+      "name": "最高评分",
+      "aliases": ["评分最高", "最高分"],
+      "formula": "MAX(t.average_rating)",
+      "related_tables": ["titles"],
+      "aggregation": "MAX"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "t.title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "评分可信度",
+      "condition": "t.num_votes > 10000 AND t.average_rating IS NOT NULL"
+    },
+    {
+      "id": "rule_003",
+      "name": "NULL值处理",
+      "condition": "t.start_year IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "类型名": {"table": "genres", "field": "display_name"},
+    "电影标题": {"table": "titles", "field": "primary_title"},
+    "评分": {"table": "titles", "field": "average_rating"}
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "各类型电影平均评分（含热度指数）",
+      "normalized_question": "统计各类型电影的平均评分和热度",
+      "sql": "SELECT g.display_name AS genre, COUNT(DISTINCT t.id) AS movie_count, ROUND(AVG(t.average_rating), 2) AS avg_rating FROM titles t JOIN titles_genres tg ON tg.title_id = t.id JOIN genres g ON g.id = tg.genre_id WHERE t.title_type = 'movie' AND t.num_votes > 5000 AND t.start_year >= 2000 AND t.start_year IS NOT NULL GROUP BY g.id, g.display_name ORDER BY avg_rating DESC",
+      "intent_type": "query_genre_ratings",
+      "similarity_score": 0.75
+    },
+    {
+      "id": "hqa_002",
+      "original_question": "各年代最佳影片",
+      "normalized_question": "找出每个年代评分最高的电影",
+      "sql": "WITH ranked AS (SELECT primary_title, start_year, average_rating, num_votes, FLOOR(start_year / 10) * 10 AS decade, ROW_NUMBER() OVER (PARTITION BY FLOOR(start_year / 10) * 10 ORDER BY average_rating DESC) AS rn FROM titles WHERE title_type = 'movie' AND num_votes > 50000 AND start_year IS NOT NULL) SELECT decade AS decade_range, primary_title, start_year, average_rating, num_votes FROM ranked WHERE rn = 1 ORDER BY decade_range DESC",
+      "intent_type": "query_top_rated_per_group",
+      "similarity_score": 0.82
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 通过 titles_genres 关联 genres，多对多关系。titles_genres 联合主键 (title_id, genre_id)。"
+    },
+    {
+      "topic": "字段说明",
+      "content": "genres.id 存的是字符串如 'action', 'comedy'，不是数字ID。genres.display_name 是类型显示名。"
+    },
+    {
+      "topic": "评分可信度",
+      "content": "排名类查询应加 num_votes > 10000 过滤，低投票数影片评分不可靠。"
+    },
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影，titles 表包含电视剧、短片、游戏等9种类型。"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "titles_genres", "genres"],
+    "main_fields": ["genres.display_name", "titles.primary_title", "titles.average_rating"],
+    "filter_conditions": ["t.title_type = 'movie'", "t.num_votes > 10000", "t.average_rating IS NOT NULL"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 4
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 4
+    }
+  }
+}

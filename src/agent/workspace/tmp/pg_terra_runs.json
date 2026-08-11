@@ -1,0 +1,164 @@
+[
+  {
+    "name": "ChatOpenAI",
+    "run_type": "llm",
+    "start": "2026-07-28 06:31:02.782218+00:00",
+    "duration_s": 0.263,
+    "parent_id": "54dd483a",
+    "trace_id": "54dd483a-5709-4d9b-9f05-076ab4834d72",
+    "id": "019fa76b-6b7e-7cd3-9c3c-a6074819c2ff"
+  },
+  {
+    "name": "ChatOpenAI",
+    "run_type": "llm",
+    "start": "2026-07-28 06:31:02.778472+00:00",
+    "duration_s": 0.232,
+    "parent_id": "23888938",
+    "trace_id": "23888938-e89e-468e-971b-a21f7d0e4d06",
+    "id": "019fa76b-6b7a-78c2-86ac-f61dcfbbc264"
+  },
+  {
+    "name": "ChatOpenAI",
+    "run_type": "llm",
+    "start": "2026-07-28 06:31:02.764363+00:00",
+    "duration_s": 0.308,
+    "parent_id": "a62ce903",
+    "trace_id": "a62ce903-6a39-4a20-983f-bbbaa35b4aba",
+    "id": "019fa76b-6b6c-7552-92c3-9de5754a26d8"
+  },
+  {
+    "name": "ChatPromptTemplate",
+    "run_type": "prompt",
+    "start": "2026-07-28 06:31:02.759901+00:00",
+    "duration_s": 0.002,
+    "parent_id": "019fa76b",
+    "trace_id": "23888938-e89e-468e-971b-a21f7d0e4d06",
+    "id": "019fa76b-6b67-7201-83eb-2dcbadd4a993"
+  },
+  {
+    "name": "ChatPromptTemplate",
+    "run_type": "prompt",
+    "start": "2026-07-28 06:31:02.757863+00:00",
+    "duration_s": 0.005,
+    "parent_id": "019fa76b",
+    "trace_id": "54dd483a-5709-4d9b-9f05-076ab4834d72",
+    "id": "019fa76b-6b65-76e0-81f3-b0672fda8f0b"
+  },
+  {
+    "name": "ChatPromptTemplate",
+    "run_type": "prompt",
+    "start": "2026-07-28 06:31:02.756620+00:00",
+    "duration_s": 0.003,
+    "parent_id": "019fa76b",
+    "trace_id": "23888938-e89e-468e-971b-a21f7d0e4d06",
+    "id": "019fa76b-6b64-7173-b254-ba409335230b"
+  },
+  {
+    "name": "ChatPromptTemplate",
+    "run_type": "prompt",
+    "start": "2026-07-28 06:31:02.754159+00:00",
+    "duration_s": 0.001,
+    "parent_id": "019fa76b",
+    "trace_id": "a62ce903-6a39-4a20-983f-bbbaa35b4aba",
+    "id": "019fa76b-6b62-7a02-bbdf-2d599f582dd4"
+  },
+  {
+    "name": "ChatPromptTemplate",
+    "run_type": "prompt",
+    "start": "2026-07-28 06:31:02.752146+00:00",
+    "duration_s": 0.003,
+    "parent_id": "019fa76b",
+    "trace_id": "54dd483a-5709-4d9b-9f05-076ab4834d72",
+    "id": "019fa76b-6b60-72f0-9af2-68505ccf6db7"
+  },
+  {
+    "name": "ChatPromptTemplate",
+    "run_type": "prompt",
+    "start": "2026-07-28 06:31:02.749768+00:00",
+    "duration_s": 0.004,
+    "parent_id": "019fa76b",
+    "trace_id": "23888938-e89e-468e-971b-a21f7d0e4d06",
+    "id": "019fa76b-6b5d-7ba2-8a4c-8d48a9cfbceb"
+  },
+  {
+    "name": "ChatPromptTemplate",
+    "run_type": "prompt",
+    "start": "2026-07-28 06:31:02.746275+00:00",
+    "duration_s": 0.005,
+    "parent_id": "019fa76b",
+    "trace_id": "a62ce903-6a39-4a20-983f-bbbaa35b4aba",
+    "id": "019fa76b-6b5a-7cf0-b7d4-a5b5c1e7d2d2"
+  },
+  {
+    "name": "ChatPromptTemplate",
+    "run_type": "prompt",
+    "start": "2026-07-28 06:31:02.745131+00:00",
+    "duration_s": 0.003,
+    "parent_id": "019fa76b",
+    "trace_id": "54dd483a-5709-4d9b-9f05-076ab4834d72",
+    "id": "019fa76b-6b59-70d3-8b81-72fe615068fc"
+  },
+  {
+    "name": "ChatPromptTemplate",
+    "run_type": "prompt",
+    "start": "2026-07-28 06:31:02.736816+00:00",
+    "duration_s": 0.003,
+    "parent_id": "019fa76b",
+    "trace_id": "a62ce903-6a39-4a20-983f-bbbaa35b4aba",
+    "id": "019fa76b-6b50-7573-816c-90a56d7510b0"
+  },
+  {
+    "name": "RunnableLambda",
+    "run_type": "chain",
+    "start": "2026-07-28 06:31:02.732184+00:00",
+    "duration_s": 0.042,
+    "parent_id": "23888938",
+    "trace_id": "23888938-e89e-468e-971b-a21f7d0e4d06",
+    "id": "019fa76b-6b4c-7e63-89a8-e862f9ece410"
+  },
+  {
+    "name": "RunnableLambda",
+    "run_type": "chain",
+    "start": "2026-07-28 06:31:02.731418+00:00",
+    "duration_s": 0.046,
+    "parent_id": "54dd483a",
+    "trace_id": "54dd483a-5709-4d9b-9f05-076ab4834d72",
+    "id": "019fa76b-6b4b-7262-a773-0cf7f8d678e6"
+  },
+  {
+    "name": "RunnableLambda",
+    "run_type": "chain",
+    "start": "2026-07-28 06:31:02.730554+00:00",
+    "duration_s": 0.03,
+    "parent_id": "a62ce903",
+    "trace_id": "a62ce903-6a39-4a20-983f-bbbaa35b4aba",
+    "id": "019fa76b-6b4a-79e2-84ab-c988f8543efd"
+  },
+  {
+    "name": "RunnableSequence",
+    "run_type": "chain",
+    "start": "2026-07-28 06:31:02.729374+00:00",
+    "duration_s": 0.283,
+    "parent_id": null,
+    "trace_id": "23888938-e89e-468e-971b-a21f7d0e4d06",
+    "id": "23888938-e89e-468e-971b-a21f7d0e4d06"
+  },
+  {
+    "name": "RunnableSequence",
+    "run_type": "chain",
+    "start": "2026-07-28 06:31:02.728496+00:00",
+    "duration_s": 0.318,
+    "parent_id": null,
+    "trace_id": "54dd483a-5709-4d9b-9f05-076ab4834d72",
+    "id": "54dd483a-5709-4d9b-9f05-076ab4834d72"
+  },
+  {
+    "name": "RunnableSequence",
+    "run_type": "chain",
+    "start": "2026-07-28 06:31:02.724681+00:00",
+    "duration_s": 0.351,
+    "parent_id": null,
+    "trace_id": "a62ce903-6a39-4a20-983f-bbbaa35b4aba",
+    "id": "a62ce903-6a39-4a20-983f-bbbaa35b4aba"
+  }
+]

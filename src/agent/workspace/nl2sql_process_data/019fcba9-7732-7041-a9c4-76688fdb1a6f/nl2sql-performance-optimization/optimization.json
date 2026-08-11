@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT g.display_name AS genre, COUNT(DISTINCT t.id) AS movie_count\nFROM titles t\nJOIN titles_genres tg ON tg.title_id = t.id\nJOIN genres g ON g.id = tg.genre_id\nWHERE t.title_type = 'movie'\nGROUP BY g.id, g.display_name\nORDER BY movie_count DESC",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。SQL结构良好：明确列出SELECT列、所有JOIN均有ON条件、无子查询、无函数包裹列、无NOT IN、COUNT(DISTINCT)在此场景下必要（一部电影可属于多个类型）、有ORDER BY。LIMIT由run_sql参数控制，符合规范。"
+}

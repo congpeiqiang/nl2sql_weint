@@ -1,0 +1,23 @@
+{
+  "SELECT": [
+    "n.primary_name AS 演员名",
+    "(MAX(t.start_year) - MIN(t.start_year)) AS 职业生涯跨度"
+  ],
+  "FROM": [
+    {"table": "names", "alias": "n"},
+    {"table": "principals", "alias": "p"},
+    {"table": "titles", "alias": "t"}
+  ],
+  "JOIN": [
+    {"table": "principals p", "on": "p.name_id = n.id", "type": "INNER JOIN"},
+    {"table": "titles t", "on": "t.id = p.title_id", "type": "INNER JOIN"}
+  ],
+  "WHERE": [
+    "p.category_id IN ('actor', 'actress')",
+    "t.start_year IS NOT NULL"
+  ],
+  "GROUP_BY": ["n.id", "n.primary_name"],
+  "HAVING": [],
+  "ORDER_BY": ["职业生涯跨度 DESC"],
+  "LIMIT": 10
+}

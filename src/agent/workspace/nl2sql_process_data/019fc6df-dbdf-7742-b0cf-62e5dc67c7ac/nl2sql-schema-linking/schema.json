@@ -1,0 +1,25 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb 唯一作品标识"},
+        {"name": "title_type", "type": "VARCHAR", "description": "作品类型: movie/short/tvSeries等"},
+        {"name": "start_year", "type": "INTEGER", "description": "首映/发布年份"},
+        {"name": "average_rating", "type": "DOUBLE", "description": "IMDb加权平均评分(1.0-10.0)"},
+        {"name": "num_votes", "type": "INTEGER", "description": "用户投票总数"}
+      ]
+    }
+  ],
+  "relations": [],
+  "field_mappings": {
+    "电影": {"table": "titles", "field": "title_type", "value": "movie"},
+    "年份": {"table": "titles", "field": "start_year"},
+    "平均评分": {"table": "titles", "field": "average_rating"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "note": "单表查询，仅需 titles 表。筛选 title_type='movie' 且 start_year BETWEEN 1990 AND 1999，计算 AVG(average_rating)"
+  }
+}

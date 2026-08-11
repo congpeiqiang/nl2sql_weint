@@ -1,0 +1,34 @@
+StructuredTool(name='ingest_source', description='Fetch a URL or copy a local file into sources/. Returns the saved filename, character count, and whether content was truncated to fit the size limit.', args_schema={'type': 'object', 'properties': {'source': {'type': 'string', 'description': 'URL (http/https) or absolute path to a .md/.txt file'}}, 'required': ['source'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}, response_format='content_and_artifact', coroutine=<function convert_mcp_tool_to_langchain_tool.<locals>.call_tool at 0x000002B1DB64AAC0>),
+
+StructuredTool(name='compile_wiki', description='Run the incremental compile pipeline: extract concepts from new/changed sources, generate wiki pages, resolve interlinks, and rebuild the index. Requires an LLM provider with credentials.', args_schema={'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {}}, response_format='content_and_artifact', coroutine=<function convert_mcp_tool_to_langchain_tool.<locals>.call_tool at 0x000002B1DB675620>),
+
+StructuredTool(name='query_wiki', description='Ask a natural-language question. Selects relevant pages with the LLM, loads them, and returns a grounded answer with citations. Set save=true to persist the answer as a wiki page. Requires an LLM provider.', args_schema={'type': 'object', 'properties': {'question': {'type': 'string', 'description': 'The natural-language question to answer.'}, 'save': {'type': 'boolean', 'description': 'Persist the answer as a wiki/queries/ page when true.'}}, 'required': ['question'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}, response_format='content_and_artifact', coroutine=<function convert_mcp_tool_to_langchain_tool.<locals>.call_tool at 0x000002B1DB6760C0>),
+
+StructuredTool(name='search_pages', description='Select pages relevant to a question and return their full content. Uses semantic embeddings when available, falling back to LLM-based selection over the wiki index. Requires an LLM provider.', args_schema={'type': 'object', 'properties': {'question': {'type': 'string', 'description': 'The query used to rank pages.'}}, 'required': ['question'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}, response_format='content_and_artifact', coroutine=<function convert_mcp_tool_to_langchain_tool.<locals>.call_tool at 0x000002B1DB675580>),
+
+StructuredTool(name='read_page', description='Read a single wiki page by slug. Searches concepts/ first, then queries/. Returns the parsed frontmatter and body. No LLM call required.', args_schema={'type': 'object', 'properties': {'slug': {'type': 'string', 'description': 'Page slug, without .md extension.'}}, 'required': ['slug'], 'additionalProperties': False, '$schema': 'http://json-schema.org/draft-07/schema#'}, response_format='content_and_artifact', coroutine=<function convert_mcp_tool_to_langchain_tool.<locals>.call_tool at 0x000002B1DB675760>),
+
+StructuredTool(name='lint_wiki', description='Run rule-based quality checks (broken wikilinks, orphans, duplicates, empty pages, broken citations). Returns structured diagnostics. No LLM call.', args_schema={'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {}}, response_format='content_and_artifact', coroutine=<function convert_mcp_tool_to_langchain_tool.<locals>.call_tool at 0x000002B1DB675800>),
+
+StructuredTool(name='wiki_status', description='Summarize the wiki: page count, source count, last compile time, orphaned pages, and pending source changes. Read-only — never modifies the workspace.', args_schema={'$schema': 'http://json-schema.org/draft-07/schema#', 'type': 'object', 'properties': {}}, response_format='content_and_artifact', coroutine=<function convert_mcp_tool_to_langchain_tool.<locals>.call_tool at 0x000002B1DB676160>)]
+
+
+
+
+工具名称	功能说明	是否需要 LLM
+ingest_source	从 URL 或本地文件（.md/.txt）导入内容到 sources/ 目录。返回保存的文件名、字符数及是否因大小限制被截断	❌ 否
+compile_wiki	运行增量编译流程：从新增/变更的来源中提取概念、生成维基页面、解析内部链接并重建索引	✅ 是
+query_wiki	用自然语言提问。LLM 会选择相关页面，返回带引用的有据可查的回答。设置 save=true 可将回答保存为维基页面	✅ 是
+search_pages	根据问题检索相关页面并返回完整内容。优先使用语义嵌入（向量检索），若无则回退到基于 LLM 的索引筛选	✅ 是
+read_page	通过 slug（页面名称，不含 .md 后缀）读取单个维基页面，返回解析后的 frontmatter 和正文	❌ 否
+lint_wiki	运行基于规则的质量检查：损坏的维基链接、孤立页面、重复内容、空页面、损坏的引用。返回结构化诊断报告	❌ 否
+wiki_status	汇总维基状态：页面数量、来源数量、上次编译时间、孤立页面数、待处理的来源变更。只读操作，不会修改工作区
+
+1.  ingest_source  →  导入外部内容（网址或本地文件）
+        ↓
+2.  compile_wiki   →  将导入的内容编译成维基页面
+        ↓
+3a. query_wiki     →  提问并获取带引用的答案
+3b. search_pages   →  搜索并获取相关页面全文
+        ↓
+4.  lint_wiki / wiki_status → 质量检查与状态监控（日常维护）

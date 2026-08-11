@@ -1,0 +1,66 @@
+{
+  "user_intent": {
+    "original_question": "找出评分 >= 8.5 但投票数 < 5000 的电影，按评分降序排列。",
+    "domain": "imdb",
+    "keywords": ["电影", "评分", "average_rating", "投票数", "num_votes", "8.5", "5000", "降序"],
+    "intent_type": "query_hidden_gem_movies"
+  },
+  "entities": {
+    "filters": [
+      {"field": "average_rating", "operator": ">=", "value": 8.5},
+      {"field": "num_votes", "operator": "<", "value": 5000}
+    ],
+    "fields_to_display": ["电影标题", "评分", "投票数"],
+    "order_by": {"field": "average_rating", "direction": "DESC"}
+  },
+  "metrics": [
+    {
+      "name": "宝藏片指数 (Hidden Gem Score)",
+      "aliases": ["宝藏片", "被忽视的好片"],
+      "formula": "average_rating / LOG10(num_votes + 1)",
+      "threshold": "rating >= 8.5 AND votes < 5000",
+      "related_tables": ["titles"],
+      "aggregation": "none"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "titles.title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "评分可信度",
+      "condition": "average_rating IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "电影标题": "titles.primary_title",
+    "评分": "titles.average_rating",
+    "投票数": "titles.num_votes"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "宝藏片定义",
+      "content": "宝藏片 = 被忽视的好片，定义为 rating >= 8.5 AND votes < 5000"
+    },
+    {
+      "topic": "表关系",
+      "content": "titles 表包含 average_rating 和 num_votes 字段，title_type='movie' 表示电影"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.average_rating", "titles.num_votes"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.average_rating >= 8.5", "titles.num_votes < 5000"],
+    "order_by": "titles.average_rating DESC"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "strategy": "B",
+    "timestamp": "2026-07-28T10:00:00"
+  }
+}

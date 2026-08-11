@@ -1,0 +1,9 @@
+查询计划：列出时长大于180分钟的电影标题和片长，按片长降序排列
+
+1. 从 titles 表查询数据
+2. 筛选 title_type = 'movie'（只保留电影类型）
+3. 筛选 runtime_minutes > 180（片长大于180分钟）
+4. 选择字段：primary_title（电影标题）、runtime_minutes（片长）
+5. 按 runtime_minutes DESC 排序（片长降序）
+6. 无需 JOIN（单表查询）
+7. 无需 GROUP BY / HAVING（无聚合需求）

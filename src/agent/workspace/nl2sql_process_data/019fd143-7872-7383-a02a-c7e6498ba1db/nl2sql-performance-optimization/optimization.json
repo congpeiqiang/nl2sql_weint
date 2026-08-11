@@ -1,0 +1,13 @@
+{
+  "sql": "SELECT n.primary_name AS actor_name,\n  ROUND(AVG(t.average_rating), 2) AS avg_rating,\n  COUNT(DISTINCT p.title_id) AS movie_count\nFROM names n\nJOIN principals p ON p.name_id = n.id\nJOIN titles t ON t.id = p.title_id\nWHERE p.category_id IN ('actor', 'actress')\n  AND t.title_type = 'movie'\n  AND t.num_votes > 50000\nGROUP BY n.id, n.primary_name\nHAVING COUNT(DISTINCT p.title_id) >= 5\nORDER BY AVG(t.average_rating) DESC",
+  "optimized_sql": "SELECT n.primary_name AS actor_name,\n  ROUND(AVG(t.average_rating), 2) AS avg_rating,\n  COUNT(DISTINCT p.title_id) AS movie_count\nFROM names n\nJOIN principals p ON p.name_id = n.id\nJOIN titles t ON t.id = p.title_id\nWHERE p.category_id IN ('actor', 'actress')\n  AND t.title_type = 'movie'\n  AND t.num_votes > 50000\nGROUP BY n.id, n.primary_name\nHAVING COUNT(DISTINCT p.title_id) >= 5\nORDER BY AVG(t.average_rating) DESC",
+  "issues": [
+    {
+      "rule": "no_limit",
+      "severity": "low",
+      "message": "SQL 中无 LIMIT 子句。但根据 run_sql LIMIT 规范，LIMIT 通过 run_sql 的 limit 参数控制（服务端自动追加 cap），SQL 中不写 LIMIT 以避免语法冲突。聚合查询（GROUP BY）本身通常不需要 LIMIT。",
+      "suggestion": "通过 run_sql(sql, limit=10) 控制返回前10行"
+    }
+  ],
+  "summary": "共发现 1 个低风险问题（无 LIMIT，属任务规范要求），无高风险问题。SQL 已优化，无需修改。"
+}

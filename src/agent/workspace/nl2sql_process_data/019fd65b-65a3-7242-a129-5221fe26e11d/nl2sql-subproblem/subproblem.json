@@ -1,0 +1,29 @@
+{
+  "SELECT": [
+    "n.primary_name AS actor_name",
+    "MAX(t.start_year) - MIN(t.start_year) AS career_span"
+  ],
+  "FROM": {
+    "names": "n",
+    "principals": "p",
+    "titles": "t"
+  },
+  "JOIN": [
+    {
+      "table": "principals p",
+      "on": "p.name_id = n.id"
+    },
+    {
+      "table": "titles t",
+      "on": "p.title_id = t.id"
+    }
+  ],
+  "WHERE": [
+    "p.category_id IN ('actor', 'actress')",
+    "t.start_year IS NOT NULL"
+  ],
+  "GROUP_BY": ["n.id", "n.primary_name"],
+  "HAVING": [],
+  "ORDER_BY": ["career_span DESC"],
+  "LIMIT": 10
+}

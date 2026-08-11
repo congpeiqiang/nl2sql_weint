@@ -1,0 +1,232 @@
+0:class SkillDataMiddleware(AgentMiddleware):
+1:    """
+2:    Skill 数据传输中间件 - 按 thread_id 隔离
+3:    存储路径: /workspace/nl2sql_process_data/{thread_id}/knowledge.json
+4:    """
+5:
+6:    def __init__(self, backend=None, data_dir: str = "/workspace/nl2sql_process_data"):
+7:        self.backend = backend
+8:        self.data_dir = data_dir
+9:        self._current_thread_id: Optional[str] = None
+10:
+11:        # ============================================
+12:        # 🔧 新增：LangGraph 中间件接口
+13:        # ============================================
+14:
+15:        def wrap_tool_call(self, request, call_next):
+16:            """
+17:            LangGraph 中间件标准接口
+18:            在工具调用前后注入 Skill 数据
+19:            """
+20:            # 1. 预处理：在调用工具前注入 session 数据
+21:            if hasattr(request, 'tool_call'):
+22:                tool_name = request.tool_call.name
+23:                print(f"🔧 [SkillDataMiddleware] 执行工具: {tool_name}")
+24:
+25:                # 从请求中提取 thread_id
+26:                if hasattr(request, 'state') and request.state:
+27:                    thread_id = request.state.get('thread_id')
+28:                    if thread_id:
+29:                        self.set_thread_id(thread_id)
+30:                        print(f"📌 [SkillDataMiddleware] 会话 ID: {thread_id}")
+31:
+32:            # 2. 调用下一个中间件或执行工具
+33:            try:
+34:                response = call_next(request)
+35:                print(f"✅ [SkillDataMiddleware] 工具执行成功")
+36:                return response
+37:            except Exception as e:
+38:                print(f"❌ [SkillDataMiddleware] 工具执行失败: {e}")
+39:                raise
+40:
+41:        def __call__(self, request, call_next):
+42:            """
+43:            兼容旧版本的调用方式
+44:            """
+45:            return self.wrap_tool_call(request, call_next)
+46:
+47:    def set_thread_id(self, thread_id: str):
+48:        """设置当前会话 ID"""
+49:        self._current_thread_id = thread_id
+50:
+51:        # 确保会话目录存在
+52:        if self.backend and thread_id:
+53:            session_dir = f"{self.data_dir}/{thread_id}"
+54:            self.backend.create_dir(session_dir)
+55:
+56:    def _get_session_dir(self) -> str:
+57:        """获取当前会话的目录路径"""
+58:        if not self._current_thread_id:
+59:            raise RuntimeError("❌ thread_id 未设置，请先调用 set_thread_id()")
+60:        return f"{self.data_dir}/{self._current_thread_id}"
+61:
+62:    def _get_file_path(self, filename: str) -> str:
+63:        """获取当前会话的文件路径"""
+64:        return f"{self._get_session_dir()}/{filename}"
+65:
+66:    def save_output(self, skill_name: str, data: Dict[str, Any], filename: str) -> None:
+67:        """
+68:        保存 Skill 输出到当前会话
+69:
+70:        Args:
+71:            skill_name: Skill 名称
+72:            data: 要保存的数据
+73:            filename: 文件名（默认 knowledge.json）
+74:        """
+75:        if not self.backend:
+76:            return
+77:
+78:        # 在会话目录下按 Skill 分目录存储
+79:        skill_dir = f"{self._get_session_dir()}/{skill_name}"
+80:        self.backend.create_dir(skill_dir)
+81:
+82:        file_path = f"{skill_dir}/{filename}"
+83:
+84:        # 读取现有数据
+85:        existing_data = {}
+86:        try:
+87:            content = self.backend.read(file_path)
+88:            if content:
+89:                existing_data = json.loads(content)
+90:        except:
+91:            pass
+92:
+93:        # 合并数据（保留历史记录）
+94:        if "history" not in existing_data:
+95:            existing_data["history"] = []
+96:
+97:        # 添加新记录
+98:        existing_data["history"].append({
+99:            "timestamp": datetime.now().isoformat(),
+100:            "data": data
+101:        })
+102:
+103:        # 保存最新数据到根
+104:        existing_data["current"] = data
+105:        existing_data["last_updated"] = datetime.now().isoformat()
+106:
+107:        # 写入文件
+108:        self.backend.write(file_path, json.dumps(existing_data, indent=2, ensure_ascii=False))
+109:
+110:    def get_output(self, skill_name: str, key: Optional[str] = None, filename: str = "knowledge.json") -> Any:
+111:        """
+112:        获取指定 Skill 的输出数据
+113:
+114:        Args:
+115:            skill_name: Skill 名称
+116:            key: 可选，指定获取的键（如 "current", "history"）
+117:            filename: 文件名
+118:        """
+119:        if not self.backend or not self._current_thread_id:
+120:            return None
+121:
+122:        file_path = f"{self._get_session_dir()}/{skill_name}/{filename}"
+123:
+124:        try:
+125:            content = self.backend.read(file_path)
+126:            if not content:
+127:                return None
+128:
+129:            data = json.loads(content)
+130:
+131:            if key:
+132:                return data.get(key)
+133:            return data.get("current")  # 默认返回最新数据
+134:        except:
+135:            return None
+136:
+137:    def get_all_outputs(self) -> Dict[str, Any]:
+138:        """获取当前会话所有 Skill 的输出"""
+139:        if not self.backend or not self._current_thread_id:
+140:            return {}
+141:
+142:        result = {}
+143:        session_dir = self._get_session_dir()
+144:
+145:        try:
+146:            # 列出所有 Skill 目录
+147:            items = self.backend.list_dir(session_dir)
+148:
+149:            for item in items:
+150:                # 检查是否是 Skill 目录
+151:                skill_path = f"{session_dir}/{item}"
+152:                if self.backend.is_dir(skill_path):
+153:                    # 读取 knowledge.json
+154:                    data = self.get_output(item)
+155:                    if data:
+156:                        result[item] = data
+157:        except:
+158:            pass
+159:
+160:        return result
+161:
+162:    def get_session_data(self, thread_id: str, skill_name: Optional[str] = None) -> Any:
+163:        """
+164:        获取指定会话的数据（用于调试）
+165:
+166:        Args:
+167:            thread_id: 会话 ID
+168:            skill_name: 可选，指定 Skill 名称
+169:        """
+170:        if not self.backend:
+171:            return None
+172:
+173:        session_dir = f"{self.data_dir}/{thread_id}"
+174:
+175:        if skill_name:
+176:            file_path = f"{session_dir}/{skill_name}/knowledge.json"
+177:            try:
+178:                content = self.backend.read(file_path)
+179:                return json.loads(content) if content else None
+180:            except:
+181:                return None
+182:        else:
+183:            # 返回整个会话目录的内容
+184:            result = {}
+185:            try:
+186:                items = self.backend.list_dir(session_dir)
+187:                for item in items:
+188:                    skill_path = f"{session_dir}/{item}"
+189:                    if self.backend.is_dir(skill_path):
+190:                        file_path = f"{skill_path}/knowledge.json"
+191:                        content = self.backend.read(file_path)
+192:                        if content:
+193:                            result[item] = json.loads(content)
+194:            except:
+195:                pass
+196:            return result
+197:
+198:    def clear_session(self, thread_id: Optional[str] = None) -> None:
+199:        """清除指定会话的数据"""
+200:        if not self.backend:
+201:            return
+202:
+203:        target_id = thread_id or self._current_thread_id
+204:        if not target_id:
+205:            return
+206:
+207:        session_dir = f"{self.data_dir}/{target_id}"
+208:        try:
+209:            self.backend.delete_dir(session_dir)
+210:        except:
+211:            pass
+212:
+213:    def list_sessions(self) -> list:
+214:        """列出所有有数据的会话"""
+215:        if not self.backend:
+216:            return []
+217:
+218:        result = []
+219:        try:
+220:            items = self.backend.list_dir(self.data_dir)
+221:            for item in items:
+222:                if self.backend.is_dir(f"{self.data_dir}/{item}"):
+223:                    # 检查是否有 Skill 数据
+224:                    skill_dirs = self.backend.list_dir(f"{self.data_dir}/{item}")
+225:                    if skill_dirs:
+226:                        result.append(item)
+227:        except:
+228:            pass
+229:
+230:        return result
+231:

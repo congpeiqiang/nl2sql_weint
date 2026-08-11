@@ -1,0 +1,60 @@
+tools: ['generate_echarts', 'generate_line_chart', 'generate_bar_chart', 'generate_pie_chart', 'generate_radar_chart', 'generate_scatter_chart', 'generate_sankey_chart', 'generate_funnel_chart', 'generate_gauge_chart', 'generate_treemap_chart', 'generate_sunburst_chart', 'generate_heatmap_chart', 'generate_candlestick_chart', 'generate_boxplot_chart', 'generate_graph_chart', 'generate_parallel_chart', 'generate_tree_chart']
+ainvoke EXC: McpError: MCP error -32602: Invalid arguments for tool generate_echarts: [
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "object",
+    "path": [
+      "echartsOption"
+    ],
+    "message": "Expected string, received object"
+  }
+]
+Traceback (most recent call last):
+  File "D:\code_work_space\llm\nl2sql\src\agent\workspace\tmp\test_mcp2.py", line 22, in main
+    r = await t.ainvoke({'echartsOption': opt, 'width': 400, 'height': 300, 'outputType': 'svg'})
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_core\tools\structured.py", line 70, in ainvoke
+    return await super().ainvoke(input, config, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_core\tools\base.py", line 748, in ainvoke
+    return await self.arun(tool_input, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_core\tools\base.py", line 1230, in arun
+    raise error_to_raise
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_core\tools\base.py", line 1196, in arun
+    response = await coro_with_context(coro, context)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_core\tools\structured.py", line 124, in _arun
+    return await self.coroutine(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_mcp_adapters\tools.py", line 506, in call_tool
+    call_tool_result = await handler(request)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_mcp_adapters\tools.py", line 487, in execute_tool
+    raise captured_exception
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\langchain_mcp_adapters\tools.py", line 471, in execute_tool
+    call_tool_result = await tool_session.call_tool(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\mcp\client\session.py", line 401, in call_tool
+    result = await self.send_request(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "D:\code_work_space\llm\nl2sql\.venv\Lib\site-packages\mcp\shared\session.py", line 306, in send_request
+    raise McpError(response_or_error.error)
+mcp.shared.exceptions.McpError: MCP error -32602: Invalid arguments for tool generate_echarts: [
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "object",
+    "path": [
+      "echartsOption"
+    ],
+    "message": "Expected string, received object"
+  }
+]

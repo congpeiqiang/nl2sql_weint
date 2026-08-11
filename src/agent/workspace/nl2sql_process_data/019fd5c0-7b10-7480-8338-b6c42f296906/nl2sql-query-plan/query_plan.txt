@@ -1,0 +1,7 @@
+1. 从 names 表（别名 n）开始，获取演员姓名 primary_name
+2. 通过 principals 表（别名 p）连接：p.name_id = n.id，筛选 p.category_id IN ('actor', 'actress') 确保只统计演员
+3. 通过 titles 表（别名 t）连接：t.id = p.title_id，筛选 t.start_year IS NOT NULL 排除无年份作品
+4. 按演员分组 GROUP BY n.id, n.primary_name
+5. 计算每个演员的职业生涯跨度：MAX(t.start_year) - MIN(t.start_year) AS career_span
+6. 按 career_span DESC 排序
+7. 取前10行（通过 run_sql limit 参数控制）

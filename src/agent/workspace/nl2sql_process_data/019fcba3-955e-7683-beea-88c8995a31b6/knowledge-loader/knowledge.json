@@ -1,0 +1,67 @@
+{
+  "user_intent": {
+    "original_question": "查询投票数（num_votes）超过 100 万的电影数量",
+    "domain": "movies",
+    "keywords": ["电影", "投票数", "num_votes", "100万", "数量"],
+    "intent_type": "count_movies_by_votes"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [{"field": "num_votes", "operator": ">", "value": 1000000}],
+    "fields_to_display": ["电影数量(COUNT)"]
+  },
+  "metrics": [
+    {
+      "name": "电影数量",
+      "aliases": ["影片数量", "movie count"],
+      "formula": "COUNT(*)",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影定义",
+      "condition": "titles.title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "投票数可信度",
+      "condition": "num_votes > 10000 为可信，> 200000 为极高"
+    }
+  ],
+  "field_mappings": {
+    "投票数": "titles.num_votes",
+    "电影": "titles.title_type = 'movie'",
+    "电影数量": "COUNT(*)"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影，titles 表包含电视剧、短片、游戏等多种类型"
+    },
+    {
+      "topic": "num_votes字段",
+      "content": "num_votes 为 INTEGER 类型，表示用户投票总数，越高越可信"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.num_votes", "titles.title_type"],
+    "filter_conditions": ["titles.title_type = 'movie'", "titles.num_votes > 1000000"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "strategy": "B",
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 2
+    }
+  }
+}

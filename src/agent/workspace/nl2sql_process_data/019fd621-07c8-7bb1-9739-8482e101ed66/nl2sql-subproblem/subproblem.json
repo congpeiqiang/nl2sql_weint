@@ -1,0 +1,18 @@
+{
+  "SELECT": "导演名(d.primary_name), 演员名(a.primary_name), 合作次数(COUNT(*)), 合作电影平均评分(AVG(t.average_rating))",
+  "FROM": "principals pd (导演), titles t, principals pa (演员), names d, names a",
+  "JOIN": [
+    {"table": "titles t", "on": "pd.title_id = t.id AND t.title_type = 'movie'"},
+    {"table": "principals pa", "on": "pa.title_id = t.id AND pa.category_id IN ('actor','actress')"},
+    {"table": "names d", "on": "pd.name_id = d.id"},
+    {"table": "names a", "on": "pa.name_id = a.id"}
+  ],
+  "WHERE": [
+    "pd.category_id = 'director'",
+    "t.average_rating IS NOT NULL"
+  ],
+  "GROUP_BY": "d.id, d.primary_name, a.id, a.primary_name",
+  "HAVING": "COUNT(*) >= 3 AND AVG(t.average_rating) >= 7.5",
+  "ORDER_BY": "合作次数 DESC, 平均评分 DESC",
+  "LIMIT": "通过 run_sql limit 参数控制"
+}

@@ -1,0 +1,17 @@
+{
+  "SELECT": "names.primary_name AS actor_name, principals.ordering AS role_ordering",
+  "FROM": "titles t, principals p, names n",
+  "JOIN": [
+    {"table": "principals p", "on": "p.title_id = t.id"},
+    {"table": "names n", "on": "p.name_id = n.id"}
+  ],
+  "WHERE": [
+    "t.primary_title = 'The Matrix'",
+    "t.title_type = 'movie'",
+    "p.category_id IN ('actor', 'actress')"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": "principals.ordering ASC",
+  "LIMIT": null
+}

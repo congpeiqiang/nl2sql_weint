@@ -1,0 +1,13 @@
+{
+  "sql": "SELECT\n  d.primary_name AS director_name,\n  a.primary_name AS actor_name,\n  COUNT(*) AS collaboration_count,\n  ROUND(AVG(t.average_rating), 2) AS avg_rating\nFROM principals pd\nJOIN titles t ON pd.title_id = t.id AND t.title_type = 'movie'\nJOIN principals pa ON pa.title_id = t.id\n  AND pa.category_id IN ('actor', 'actress')\nJOIN names d ON pd.name_id = d.id\nJOIN names a ON pa.name_id = a.id\nWHERE pd.category_id = 'director'\n  AND t.num_votes > 5000\n  AND t.average_rating IS NOT NULL\nGROUP BY d.id, d.primary_name, a.id, a.primary_name\nHAVING COUNT(*) >= 3 AND AVG(t.average_rating) >= 7.5\nORDER BY collaboration_count DESC, avg_rating DESC",
+  "optimized_sql": "SELECT\n  d.primary_name AS director_name,\n  a.primary_name AS actor_name,\n  pairs.cnt AS collaboration_count,\n  pairs.avg_rating\nFROM (\n  SELECT pd.name_id AS director_id, pa.name_id AS actor_id, COUNT(*) AS cnt, ROUND(AVG(t.average_rating), 2) AS avg_rating\n  FROM principals pd\n  JOIN titles t ON pd.title_id = t.id AND t.title_type = 'movie' AND t.num_votes > 5000 AND t.average_rating IS NOT NULL\n  JOIN principals pa ON pa.title_id = t.id AND pa.category_id IN ('actor', 'actress')\n  WHERE pd.category_id = 'director'\n  GROUP BY pd.name_id, pa.name_id\n  HAVING COUNT(*) >= 3 AND AVG(t.average_rating) >= 7.5\n) pairs\nJOIN names d ON pairs.director_id = d.id\nJOIN names a ON pairs.actor_id = a.id\nORDER BY pairs.cnt DESC, pairs.avg_rating DESC",
+  "issues": [
+    {
+      "rule": "query_timeout",
+      "severity": "high",
+      "message": "原始SQL执行超时（300s），因直接JOIN principals表两次并同时JOIN names表导致查询复杂度过高",
+      "suggestion": "使用子查询先聚合导演-演员对，再JOIN names表获取姓名，减少JOIN复杂度"
+    }
+  ],
+  "summary": "原始SQL执行超时，已优化为子查询结构：先通过子查询聚合导演-演员合作对（含合作次数和平均评分），再JOIN names表获取姓名。优化后查询成功执行。"
+}

@@ -1,0 +1,14 @@
+{
+  "SELECT": "titles.primary_title (片名), titles.average_rating (评分)",
+  "FROM": "titles",
+  "JOIN": null,
+  "WHERE": [
+    "titles.title_type = 'movie' (只查电影)",
+    "titles.average_rating IS NOT NULL (评分不为空)",
+    "titles.num_votes > 10000 (评分可信度过滤，排名类查询推荐做法)"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": "titles.average_rating DESC (按评分降序)",
+  "LIMIT": 10
+}

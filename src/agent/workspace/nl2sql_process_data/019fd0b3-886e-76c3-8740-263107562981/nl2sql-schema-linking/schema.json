@@ -1,0 +1,47 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb 唯一作品标识"},
+        {"name": "title_type", "type": "VARCHAR", "description": "作品类型: movie/short/tvEpisode等"}
+      ]
+    },
+    {
+      "name": "titles_genres",
+      "columns": [
+        {"name": "title_id", "type": "VARCHAR", "pk": true, "fk": true, "description": "作品ID, 关联 titles.id"},
+        {"name": "genre_id", "type": "VARCHAR", "pk": true, "fk": true, "description": "类型ID, 关联 genres.id"}
+      ]
+    },
+    {
+      "name": "genres",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "类型标识符(字符串): action/comedy/drama等"},
+        {"name": "display_name", "type": "VARCHAR", "description": "类型显示名"}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "titles_genres",
+      "from_field": "title_id",
+      "to": "titles",
+      "to_field": "id"
+    },
+    {
+      "from": "titles_genres",
+      "from_field": "genre_id",
+      "to": "genres",
+      "to_field": "id"
+    }
+  ],
+  "field_mappings": {
+    "类型": {"table": "genres", "field": "display_name"},
+    "电影数量": {"table": "titles", "field": "COUNT(DISTINCT id)"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success"
+  }
+}

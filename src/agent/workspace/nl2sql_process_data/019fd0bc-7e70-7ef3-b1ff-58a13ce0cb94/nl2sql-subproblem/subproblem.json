@@ -1,0 +1,16 @@
+{
+  "SELECT": "n.primary_name AS 演员名, COUNT(DISTINCT p.title_id) AS 参演电影数",
+  "FROM": "names n, principals p, titles t",
+  "JOIN": [
+    {"table": "principals p", "on": "p.name_id = n.id"},
+    {"table": "titles t", "on": "t.id = p.title_id"}
+  ],
+  "WHERE": [
+    "p.category_id IN ('actor', 'actress')",
+    "t.title_type = 'movie'"
+  ],
+  "GROUP_BY": "n.id, n.primary_name",
+  "HAVING": null,
+  "ORDER_BY": "参演电影数 DESC",
+  "LIMIT": 10
+}

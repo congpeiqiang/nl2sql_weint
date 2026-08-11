@@ -1,0 +1,33 @@
+{
+  "SELECT": [
+    "s.primary_title AS series_title (系列名)",
+    "COUNT(DISTINCT e.season_number) AS total_seasons (总季数)",
+    "首季平均评分 first_season_rating",
+    "末季平均评分 last_season_rating",
+    "ROUND((first_season_rating - last_season_rating) / first_season_rating * 100, 2) AS decline_rate_pct (评分衰退率)"
+  ],
+  "FROM": [
+    "titles s (系列表, 别名s)",
+    "episodes e (剧集关联表, 别名e)",
+    "titles ep (剧集标题表, 别名ep)"
+  ],
+  "JOIN": [
+    {"table": "episodes e", "on": "s.id = e.parent_id", "description": "系列 → 剧集关联"},
+    {"table": "titles ep", "on": "e.id = ep.id", "description": "剧集 → 剧集标题(获取评分)"}
+  ],
+  "WHERE": [
+    "s.title_type = 'tvSeries' (只查电视剧系列)",
+    "ep.average_rating IS NOT NULL (剧集评分非空)",
+    "e.season_number IS NOT NULL (季号非空)"
+  ],
+  "GROUP_BY": [
+    "s.id, s.primary_title, e.season_number (按系列和季分组计算各季平均评分)"
+  ],
+  "HAVING": [
+    "COUNT(DISTINCT e.season_number) >= 3 (至少3季，保证衰退分析有意义)"
+  ],
+  "ORDER_BY": [
+    "decline_rate_pct DESC (按衰退率降序)"
+  ],
+  "LIMIT": "10 (Top 10)"
+}

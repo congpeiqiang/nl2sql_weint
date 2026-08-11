@@ -1,0 +1,12 @@
+查询计划：1990年代（1990-1999）电影的平均评分
+
+1. 从 titles 表（别名 t）筛选 title_type = 'movie' 的行（只统计电影）
+2. 进一步筛选 start_year BETWEEN 1990 AND 1999（限定1990年代）
+3. 排除 average_rating 为 NULL 的行（保证评分有效）
+4. 对筛选后的行计算 AVG(t.average_rating) 得到平均评分
+5. 返回单行结果：平均评分（avg_rating）
+
+说明：
+- 单表查询，无需 JOIN
+- 无 GROUP BY / HAVING / ORDER BY
+- 无 LIMIT（通过 run_sql 的 limit 参数控制）

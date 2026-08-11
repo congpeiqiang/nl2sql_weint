@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "series": [
+    {
+      "data": [
+        [
+          10,
+          6
+        ],
+        [
+          10,
+          14
+        ],
+        [
+          10,
+          5
+        ],
+        [
+          10,
+          8
+        ],
+        [
+          10,
+          5
+        ],
+        [
+          10,
+          5
+        ],
+        [
+          10,
+          8
+        ],
+        [
+          9.9,
+          105
+        ],
+        [
+          9.9,
+          15
+        ],
+        [
+          9.8,
+          79
+        ],
+        [
+          9.7,
+          120
+        ],
+        [
+          9.6,
+          45
+        ],
+        [
+          9.5,
+          200
+        ],
+        [
+          9.4,
+          350
+        ],
+        [
+          9.3,
+          500
+        ],
+        [
+          9.2,
+          800
+        ],
+        [
+          9.1,
+          1200
+        ],
+        [
+          9,
+          1500
+        ],
+        [
+          8.9,
+          2000
+        ],
+        [
+          8.8,
+          2500
+        ],
+        [
+          8.7,
+          3000
+        ],
+        [
+          8.6,
+          4000
+        ],
+        [
+          8.5,
+          4500
+        ]
+      ],
+      "type": "scatter",
+      "symbolSize": 8,
+      "emphasis": {
+        "focus": "series",
+        "itemStyle": {
+          "shadowBlur": 10,
+          "shadowOffsetX": 0,
+          "shadowColor": "rgba(0, 0, 0, 0.5)"
+        }
+      }
+    }
+  ],
+  "title": {
+    "left": "center",
+    "text": "评分≥8.5且投票数<5000的电影：评分 vs 投票数分布"
+  },
+  "tooltip": {
+    "trigger": "item"
+  },
+  "xAxis": {
+    "name": "平均评分",
+    "type": "value",
+    "scale": true
+  },
+  "yAxis": {
+    "name": "投票数",
+    "type": "value",
+    "scale": true
+  }
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

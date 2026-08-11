@@ -1,0 +1,62 @@
+{
+  "tables": [
+    {
+      "name": "names",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb人物标识 (nm开头)"},
+        {"name": "primary_name", "type": "VARCHAR", "description": "全名"},
+        {"name": "birth_year", "type": "INTEGER"},
+        {"name": "death_year", "type": "INTEGER"}
+      ]
+    },
+    {
+      "name": "principals",
+      "columns": [
+        {"name": "id", "type": "INTEGER", "pk": true},
+        {"name": "title_id", "type": "VARCHAR", "fk": true, "description": "关联 titles.id"},
+        {"name": "name_id", "type": "VARCHAR", "fk": true, "description": "关联 names.id"},
+        {"name": "ordering", "type": "INTEGER"},
+        {"name": "category_id", "type": "VARCHAR", "description": "actor/actress/director等"},
+        {"name": "job_id", "type": "VARCHAR"}
+      ]
+    },
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb作品标识 (tt开头)"},
+        {"name": "title_type", "type": "VARCHAR", "description": "movie/short/tvSeries等"},
+        {"name": "primary_title", "type": "VARCHAR"},
+        {"name": "average_rating", "type": "DOUBLE", "description": "IMDb加权平均评分"},
+        {"name": "num_votes", "type": "INTEGER", "description": "用户投票总数"},
+        {"name": "start_year", "type": "INTEGER"}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "principals",
+      "from_field": "title_id",
+      "to": "titles",
+      "to_field": "id",
+      "type": "MANY_TO_ONE"
+    },
+    {
+      "from": "principals",
+      "from_field": "name_id",
+      "to": "names",
+      "to_field": "id",
+      "type": "MANY_TO_ONE"
+    }
+  ],
+  "field_mappings": {
+    "演员名": {"table": "names", "field": "primary_name"},
+    "平均评分": {"table": "titles", "field": "average_rating"},
+    "投票数": {"table": "titles", "field": "num_votes"},
+    "参演电影数": {"table": "principals", "field": "COUNT(DISTINCT title_id)"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "data_source": "mysql"
+  }
+}

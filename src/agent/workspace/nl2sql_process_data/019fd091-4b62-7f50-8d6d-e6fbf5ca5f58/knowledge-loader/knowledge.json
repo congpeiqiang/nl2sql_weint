@@ -1,0 +1,76 @@
+{
+  "user_intent": {
+    "original_question": "查询每个类型的电影数量，按数量降序排列",
+    "domain": "imdb",
+    "keywords": ["类型", "电影数量", "降序"],
+    "intent_type": "query_movie_count_by_type"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["类型", "电影数量"],
+    "group_by": ["类型"],
+    "order_by": ["电影数量 DESC"]
+  },
+  "metrics": [
+    {
+      "name": "电影数量",
+      "aliases": ["movie_count", "作品数量"],
+      "formula": "COUNT(DISTINCT id)",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "作品类型语义",
+      "condition": "title_type 字段表示作品类型: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    },
+    {
+      "id": "rule_002",
+      "name": "电影定义",
+      "condition": "title_type = 'movie' 才是电影，titles 表包含9种作品类型"
+    }
+  ],
+  "field_mappings": {
+    "类型": "titles.title_type",
+    "电影数量": "COUNT(titles.id)"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "作品类型",
+      "content": "title_type 可选值: movie(电影), short(短片), tvSeries(电视剧系列), tvEpisode(剧集), tvMovie(电视电影), tvMiniSeries(迷你剧), tvSpecial(电视特辑), video(录像带/数字发行), videoGame(电子游戏)"
+    },
+    {
+      "topic": "Cube指标",
+      "content": "movie_analytics cube 提供 movie_count 度量(COUNT(DISTINCT id)) 和 title_type_category 维度(作品类型)"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type", "titles.id"],
+    "filter_conditions": [],
+    "time_range": null,
+    "group_by": ["titles.title_type"],
+    "order_by": ["COUNT(titles.id) DESC"]
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 2
+    }
+  }
+}

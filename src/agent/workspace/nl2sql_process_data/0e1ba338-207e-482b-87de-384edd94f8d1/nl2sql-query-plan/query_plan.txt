@@ -1,0 +1,28 @@
+查询计划：Christopher Nolan 导演的电影平均评分
+
+目标：计算 Christopher Nolan 作为导演执导的所有电影（title_type='movie'）的平均评分。
+
+步骤：
+1. 从 names 表筛选出 primary_name = 'Christopher Nolan' 的人物记录，获取其 id
+2. 通过 principals 表连接：principals.name_id = names.id，筛选 category_id = 'director'（即 Nolan 作为导演参与的作品）
+3. 通过 titles 表连接：principals.title_id = titles.id，筛选 title_type = 'movie'（只统计电影）
+4. 过滤 average_rating IS NOT NULL（排除无评分的电影）
+5. 对筛选出的电影计算 AVG(t.average_rating) 作为平均评分
+
+涉及表：
+- names (n): 用于匹配导演姓名
+- principals (p): 用于关联人物与作品，并限定导演角色
+- titles (t): 用于获取作品类型和评分
+
+JOIN 关系：
+- p.name_id = n.id
+- p.title_id = t.id
+
+WHERE 条件：
+- n.primary_name = 'Christopher Nolan'
+- p.category_id = 'director'
+- t.title_type = 'movie'
+- t.average_rating IS NOT NULL
+
+聚合：
+- SELECT AVG(t.average_rating) AS avg_rating

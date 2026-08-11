@@ -1,0 +1,1272 @@
+{
+  "catalog": "wren",
+  "schema": "public",
+  "models": [
+    {
+      "name": "categories",
+      "tableReference": {
+        "table": "categories"
+      },
+      "columns": [
+        {
+          "name": "code",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true
+        },
+        {
+          "name": "display_name",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false
+        }
+      ],
+      "cached": false,
+      "primaryKey": "code",
+      "properties": {
+        "description": "职位类别表。包含12种标准职位分类: actor/actress/director/writer/producer等。区别于jobs表的自由格式职位名称。"
+      }
+    },
+    {
+      "name": "episodes",
+      "tableReference": {
+        "table": "episodes"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "自增主键"
+          }
+        },
+        {
+          "name": "parent_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false
+        },
+        {
+          "name": "season_number",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "季号"
+          }
+        },
+        {
+          "name": "episode_number",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "集号"
+          }
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "剧集关联表。连接电视剧集与其所属的系列。"
+      }
+    },
+    {
+      "name": "genres",
+      "tableReference": {
+        "table": "genres"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "类型标识符, 如: action/comedy/drama/horror/sci-fi等 (字符串, 非数字)"
+          }
+        },
+        {
+          "name": "display_name",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": false
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "IMDb 标准类型标签表。约28种类型, genre_id存储的是类型名称字符串(非数字ID)。"
+      }
+    },
+    {
+      "name": "jobs",
+      "tableReference": {
+        "table": "jobs"
+      },
+      "columns": [
+        {
+          "name": "code",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true
+        },
+        {
+          "name": "display_name",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false
+        }
+      ],
+      "cached": false,
+      "primaryKey": "code",
+      "properties": {
+        "description": "自由格式职位名称表。约3万种细粒度职位, IMDb的职位名称是自由文本无标准化层级。"
+      }
+    },
+    {
+      "name": "names",
+      "tableReference": {
+        "table": "names"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "IMDb 唯一人物标识 (nm开头7-8位字符串)"
+          }
+        },
+        {
+          "name": "primary_name",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "全名(最常用拼写形式)"
+          }
+        },
+        {
+          "name": "birth_year",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "出生年份"
+          }
+        },
+        {
+          "name": "death_year",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "逝世年份(NULL=仍健在)"
+          }
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "IMDb 人物表。包含所有影视从业者信息(演员、导演、编剧等)，约1200万+条记录。"
+      }
+    },
+    {
+      "name": "names_knownfortitles",
+      "tableReference": {
+        "table": "names_knownfortitles"
+      },
+      "columns": [
+        {
+          "name": "name_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "人物ID, 关联 names.id"
+          }
+        },
+        {
+          "name": "title_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "作品ID, 关联 titles.id"
+          }
+        }
+      ],
+      "cached": false,
+      "properties": {
+        "description": "人物代表作表。记录每个人最知名的作品(通常1-4部), 联合主键(name_id, title_id)。"
+      }
+    },
+    {
+      "name": "names_primaryprofessions",
+      "tableReference": {
+        "table": "names_primaryprofessions"
+      },
+      "columns": [
+        {
+          "name": "name_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "人物ID, 关联 names.id"
+          }
+        },
+        {
+          "name": "profession_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "职业ID, 关联 professions.id"
+          }
+        }
+      ],
+      "cached": false,
+      "properties": {
+        "description": "人物-职业多对多关联表。记录每个人的主要职业, 联合主键(name_id, profession_id)。"
+      }
+    },
+    {
+      "name": "principals",
+      "tableReference": {
+        "table": "principals"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "自增主键"
+          }
+        },
+        {
+          "name": "title_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "作品ID, 关联 titles.id"
+          }
+        },
+        {
+          "name": "name_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "人物ID, 关联 names.id"
+          }
+        },
+        {
+          "name": "ordering",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "排序号(1=最主要的角色/参与者, 值越小越重要)"
+          }
+        },
+        {
+          "name": "category_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "职位类别, 关联 categories.id (如actor/director)"
+          }
+        },
+        {
+          "name": "job_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "具体职位, 关联 jobs.id (更细化的职位描述)"
+          }
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "核心参与者表。最核心的人物-作品关联表, 记录每部作品的关键参与者, 约5000万+条。ordering=1为最主要角色。"
+      }
+    },
+    {
+      "name": "principals_characters",
+      "tableReference": {
+        "table": "principals_characters"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "自增主键"
+          }
+        },
+        {
+          "name": "principal_id",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "关联 principals.id"
+          }
+        },
+        {
+          "name": "character_display_name",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": false
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "角色名关联表。将principals记录与角色名一对一关联(principals.characters可能含JSON数组)。"
+      }
+    },
+    {
+      "name": "professions",
+      "tableReference": {
+        "table": "professions"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "职业名称: actor/actress/director/producer/writer/composer/cinematographer/editor/stunts等"
+          }
+        },
+        {
+          "name": "display_name",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "职业表。人物的主要职业分类(来源: name.basics数据集的primaryProfession字段)。包含约40种职业。"
+      }
+    },
+    {
+      "name": "titleakaattributes",
+      "tableReference": {
+        "table": "titleakaattributes"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "属性标识符"
+          }
+        },
+        {
+          "name": "display_name",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "别名属性表。别名类型的属性标记: alternative/dvd/festival/fake_working_title/imdb_display/tv/working/script。"
+      }
+    },
+    {
+      "name": "titleakas",
+      "tableReference": {
+        "table": "titleakas"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "自增主键"
+          }
+        },
+        {
+          "name": "title_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "作品ID, 关联 titles.id"
+          }
+        },
+        {
+          "name": "ordering",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "排序号(1=主要别名)"
+          }
+        },
+        {
+          "name": "title",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "别名标题文本"
+          }
+        },
+        {
+          "name": "region",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "使用该别名的地区(ISO 3166-1 alpha-2), 如US/CN/FR"
+          }
+        },
+        {
+          "name": "language",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "别名语言(ISO 639-1), 如en/zh/fr"
+          }
+        },
+        {
+          "name": "is_original_title",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "是否为原始标题(0/1)"
+          }
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "作品别名表。非原始语言标题/其他名称/地区特定名称, 数百万条记录。region和language可为NULL。"
+      }
+    },
+    {
+      "name": "titleakas_titleakaattributes",
+      "tableReference": {
+        "table": "titleakas_titleakaattributes"
+      },
+      "columns": [
+        {
+          "name": "titleaka_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "别名ID, 关联 titleakas.id"
+          }
+        },
+        {
+          "name": "titleakaattribute_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "属性ID, 关联 titleakaattributes.id"
+          }
+        }
+      ],
+      "cached": false,
+      "properties": {
+        "description": "别名-属性关联表。"
+      }
+    },
+    {
+      "name": "titleakas_titleakatypes",
+      "tableReference": {
+        "table": "titleakas_titleakatypes"
+      },
+      "columns": [
+        {
+          "name": "titleaka_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "别名ID, 关联 titleakas.id"
+          }
+        },
+        {
+          "name": "titleakatype_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "类型ID, 关联 titleakatypes.id"
+          }
+        }
+      ],
+      "cached": false,
+      "properties": {
+        "description": "别名-类型关联表。"
+      }
+    },
+    {
+      "name": "titleakatypes",
+      "tableReference": {
+        "table": "titleakatypes"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "类型标识符"
+          }
+        },
+        {
+          "name": "display_name",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "别名类型表。较小范围的别名分类: alternative/working/imdb_display等。"
+      }
+    },
+    {
+      "name": "titles",
+      "tableReference": {
+        "table": "titles"
+      },
+      "columns": [
+        {
+          "name": "id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "IMDb 唯一作品标识 (tt开头7-8位字符串)"
+          }
+        },
+        {
+          "name": "title_type",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "作品类型: movie/short/tvEpisode/tvSeries/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+          }
+        },
+        {
+          "name": "primary_title",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "主要标题 (通常为原始语言标题)"
+          }
+        },
+        {
+          "name": "original_title",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "原始标题 (可能与primary_title相同)"
+          }
+        },
+        {
+          "name": "is_adult",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "是否成人内容 (0=否, 1=是)"
+          }
+        },
+        {
+          "name": "start_year",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "首映/发布年份"
+          }
+        },
+        {
+          "name": "end_year",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "终映年份 (电视剧/系列使用, 电影通常为NULL)"
+          }
+        },
+        {
+          "name": "runtime_minutes",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "片长(分钟), 电视剧集通常为NULL"
+          }
+        },
+        {
+          "name": "average_rating",
+          "type": "DOUBLE",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "IMDb加权平均评分(1.0-10.0), 投票数越高越可信"
+          }
+        },
+        {
+          "name": "num_votes",
+          "type": "INTEGER",
+          "isCalculated": false,
+          "notNull": false,
+          "isPrimaryKey": false,
+          "properties": {
+            "description": "用户投票总数"
+          }
+        }
+      ],
+      "cached": false,
+      "primaryKey": "id",
+      "properties": {
+        "description": "IMDb 核心作品表。包含所有电影、短片、电视剧集、电视系列等信息，约1000万+条记录。评分和投票数已从 ratings 表合并到此表。"
+      }
+    },
+    {
+      "name": "titles_genres",
+      "tableReference": {
+        "table": "titles_genres"
+      },
+      "columns": [
+        {
+          "name": "title_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "作品ID, 关联 titles.id"
+          }
+        },
+        {
+          "name": "genre_id",
+          "type": "VARCHAR",
+          "isCalculated": false,
+          "notNull": true,
+          "isPrimaryKey": true,
+          "properties": {
+            "description": "类型ID, 关联 genres.id"
+          }
+        }
+      ],
+      "cached": false,
+      "properties": {
+        "description": "作品-类型多对多关联表。联合主键(title_id, genre_id)。"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "name": "principals_titles",
+      "models": [
+        "principals",
+        "titles"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "principals.title_id = titles.id",
+      "description": "参与者 → 作品：每个参与者记录关联一部作品"
+    },
+    {
+      "name": "principals_names",
+      "models": [
+        "principals",
+        "names"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "principals.name_id = names.id",
+      "description": "参与者 → 人物：每个参与者记录关联一个人物"
+    },
+    {
+      "name": "principals_categories",
+      "models": [
+        "principals",
+        "categories"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "principals.category_id = categories.code",
+      "description": "参与者 → 职位类别：每个参与者有一个职位类别（actor/director等）"
+    },
+    {
+      "name": "principals_jobs",
+      "models": [
+        "principals",
+        "jobs"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "principals.job_id = jobs.code",
+      "description": "参与者 → 具体职位：每个参与者可有一个细化职位描述"
+    },
+    {
+      "name": "titles_genres_titles",
+      "models": [
+        "titles_genres",
+        "titles"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "titles_genres.title_id = titles.id",
+      "description": "作品-类型关联 → 作品"
+    },
+    {
+      "name": "titles_genres_genres",
+      "models": [
+        "titles_genres",
+        "genres"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "titles_genres.genre_id = genres.id",
+      "description": "作品-类型关联 → 类型"
+    },
+    {
+      "name": "names_knownfortitles_names",
+      "models": [
+        "names_knownfortitles",
+        "names"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "names_knownfortitles.name_id = names.id"
+    },
+    {
+      "name": "names_knownfortitles_titles",
+      "models": [
+        "names_knownfortitles",
+        "titles"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "names_knownfortitles.title_id = titles.id",
+      "description": "人物代表作 → 作品"
+    },
+    {
+      "name": "names_primaryprofessions_names",
+      "models": [
+        "names_primaryprofessions",
+        "names"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "names_primaryprofessions.name_id = names.id"
+    },
+    {
+      "name": "names_primaryprofessions_professions",
+      "models": [
+        "names_primaryprofessions",
+        "professions"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "names_primaryprofessions.profession_id = professions.id",
+      "description": "人物-职业关联 → 职业"
+    },
+    {
+      "name": "episodes_titles_parent",
+      "models": [
+        "episodes",
+        "titles"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "episodes.parent_id = titles.id",
+      "description": "剧集 → 父系列：episodes.parent_id = titles.id（系列）"
+    },
+    {
+      "name": "episodes_titles_episode",
+      "models": [
+        "episodes",
+        "titles"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "episodes.id = titles.id",
+      "description": "剧集 → 自身标题：episodes.id = titles.id（剧集）"
+    },
+    {
+      "name": "principals_characters_principals",
+      "models": [
+        "principals_characters",
+        "principals"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "principals_characters.principal_id = principals.id"
+    },
+    {
+      "name": "titleakas_titles",
+      "models": [
+        "titleakas",
+        "titles"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "titleakas.title_id = titles.id",
+      "description": "别名 → 作品"
+    },
+    {
+      "name": "titleakas_titleakaattributes",
+      "models": [
+        "titleakas",
+        "titleakaattributes"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "titleakas.title_id = titleakaattributes.id"
+    },
+    {
+      "name": "titleakas_titleakaattributes_titleakaattributes",
+      "models": [
+        "titleakas_titleakaattributes",
+        "titleakaattributes"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "titleakas_titleakaattributes.titleaka_id = titleakaattributes.id"
+    },
+    {
+      "name": "titleakas_titleakatypes_titleakaattributes",
+      "models": [
+        "titleakas_titleakatypes",
+        "titleakaattributes"
+      ],
+      "joinType": "MANY_TO_ONE",
+      "condition": "titleakas_titleakatypes.titleaka_id = titleakaattributes.id"
+    }
+  ],
+  "views": [],
+  "cubes": [
+    {
+      "name": "movie_analytics",
+      "description": "电影多维分析立方体 — 支持按年代、类型、评分区间等维度下钻聚合",
+      "baseObject": "titles",
+      "measures": [
+        {
+          "name": "movie_count",
+          "sql": "COUNT(DISTINCT id)",
+          "expression": "COUNT(DISTINCT id)",
+          "type": "count",
+          "description": "电影数量"
+        },
+        {
+          "name": "avg_rating",
+          "sql": "AVG(average_rating)",
+          "expression": "AVG(average_rating)",
+          "type": "avg",
+          "description": "平均评分"
+        },
+        {
+          "name": "total_votes",
+          "sql": "SUM(num_votes)",
+          "expression": "SUM(num_votes)",
+          "type": "sum",
+          "description": "总投票数"
+        },
+        {
+          "name": "avg_runtime",
+          "sql": "AVG(runtime_minutes)",
+          "expression": "AVG(runtime_minutes)",
+          "type": "avg",
+          "description": "平均片长（分钟）"
+        },
+        {
+          "name": "high_rated_ratio",
+          "sql": "SUM(CASE WHEN average_rating >= 8.0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)",
+          "expression": "SUM(CASE WHEN average_rating >= 8.0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)",
+          "type": "number",
+          "description": "高分片占比（评分>=8.0）"
+        },
+        {
+          "name": "popularity_index",
+          "sql": "AVG(num_votes) / NULLIF(AVG(AVG(num_votes)) OVER (), 0)",
+          "expression": "AVG(num_votes) / NULLIF(AVG(AVG(num_votes)) OVER (), 0)",
+          "type": "number",
+          "description": "热度指数（相对于整体平均）"
+        },
+        {
+          "name": "rating_votes_weighted",
+          "sql": "SUM(average_rating * num_votes) / NULLIF(SUM(num_votes), 0)",
+          "expression": "SUM(average_rating * num_votes) / NULLIF(SUM(num_votes), 0)",
+          "type": "number",
+          "description": "投票加权平均评分（更准确的整体评价）"
+        },
+        {
+          "name": "total_runtime_hours",
+          "sql": "SUM(runtime_minutes) / 60.0",
+          "expression": "SUM(runtime_minutes) / 60.0",
+          "type": "number",
+          "description": "总片长（小时）"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "decade",
+          "sql": "FLOOR(start_year / 10) * 10",
+          "expression": "FLOOR(start_year / 10) * 10",
+          "type": "int",
+          "description": "年代（如 1990, 2000, 2010）"
+        },
+        {
+          "name": "rating_tier",
+          "sql": "CASE WHEN average_rating >= 8.0 THEN '高分(8-10)' WHEN average_rating >= 6.0 THEN '中分(6-8)' WHEN average_rating >= 4.0 THEN '低分(4-6)' ELSE '极低(0-4)' END",
+          "expression": "CASE WHEN average_rating >= 8.0 THEN '高分(8-10)' WHEN average_rating >= 6.0 THEN '中分(6-8)' WHEN average_rating >= 4.0 THEN '低分(4-6)' ELSE '极低(0-4)' END",
+          "type": "string",
+          "description": "评分等级"
+        },
+        {
+          "name": "runtime_tier",
+          "sql": "CASE WHEN runtime_minutes < 40 THEN '短片' WHEN runtime_minutes < 90 THEN '标准' WHEN runtime_minutes < 150 THEN '长片' ELSE '超长片' END",
+          "expression": "CASE WHEN runtime_minutes < 40 THEN '短片' WHEN runtime_minutes < 90 THEN '标准' WHEN runtime_minutes < 150 THEN '长片' ELSE '超长片' END",
+          "type": "string",
+          "description": "片长分类"
+        },
+        {
+          "name": "vote_tier",
+          "sql": "CASE WHEN num_votes >= 200000 THEN '极高热度' WHEN num_votes >= 50000 THEN '高热度' WHEN num_votes >= 10000 THEN '中等热度' WHEN num_votes >= 1000 THEN '低热度' ELSE '冷门' END",
+          "expression": "CASE WHEN num_votes >= 200000 THEN '极高热度' WHEN num_votes >= 50000 THEN '高热度' WHEN num_votes >= 10000 THEN '中等热度' WHEN num_votes >= 1000 THEN '低热度' ELSE '冷门' END",
+          "type": "string",
+          "description": "热度等级"
+        },
+        {
+          "name": "is_adult_content",
+          "sql": "CASE WHEN is_adult = 1 THEN '成人内容' ELSE '普通内容' END",
+          "expression": "CASE WHEN is_adult = 1 THEN '成人内容' ELSE '普通内容' END",
+          "type": "string",
+          "description": "成人内容标识"
+        },
+        {
+          "name": "title_type_category",
+          "sql": "title_type",
+          "expression": "title_type",
+          "type": "string",
+          "description": "作品类型"
+        },
+        {
+          "name": "start_year",
+          "sql": "start_year",
+          "expression": "start_year",
+          "type": "int",
+          "description": "上映年份"
+        },
+        {
+          "name": "vote_bucket_100k",
+          "sql": "FLOOR(num_votes / 100000) * 100000",
+          "expression": "FLOOR(num_votes / 100000) * 100000",
+          "type": "int",
+          "description": "投票数十万分档"
+        }
+      ]
+    },
+    {
+      "name": "person_productivity",
+      "description": "影视从业者生产力分析立方体",
+      "baseObject": "names",
+      "joins": [
+        {
+          "name": "principals",
+          "sql": "names.id = principals.name_id"
+        },
+        {
+          "name": "titles",
+          "sql": "principals.title_id = titles.id"
+        },
+        {
+          "name": "names_primaryprofessions",
+          "sql": "names.id = names_primaryprofessions.name_id"
+        },
+        {
+          "name": "professions",
+          "sql": "names_primaryprofessions.profession_id = professions.id"
+        }
+      ],
+      "measures": [
+        {
+          "name": "total_titles",
+          "sql": "COUNT(DISTINCT principals.title_id)",
+          "expression": "COUNT(DISTINCT principals.title_id)",
+          "type": "count",
+          "description": "参与作品总数"
+        },
+        {
+          "name": "role_diversity",
+          "sql": "COUNT(DISTINCT principals.category_id)",
+          "expression": "COUNT(DISTINCT principals.category_id)",
+          "type": "count",
+          "description": "角色类型多样性（担任过多少种不同职位）"
+        },
+        {
+          "name": "career_span",
+          "sql": "MAX(titles.start_year) - MIN(titles.start_year)",
+          "expression": "MAX(titles.start_year) - MIN(titles.start_year)",
+          "type": "number",
+          "description": "职业生涯跨度（年）"
+        },
+        {
+          "name": "avg_work_rating",
+          "sql": "AVG(titles.average_rating)",
+          "expression": "AVG(titles.average_rating)",
+          "type": "avg",
+          "description": "参与作品的平均评分"
+        },
+        {
+          "name": "productivity_density",
+          "sql": "COUNT(DISTINCT principals.title_id) * 1.0 / NULLIF(MAX(titles.start_year) - MIN(titles.start_year) + 1, 0)",
+          "expression": "COUNT(DISTINCT principals.title_id) * 1.0 / NULLIF(MAX(titles.start_year) - MIN(titles.start_year) + 1, 0)",
+          "type": "number",
+          "description": "生产力密度（年均产出作品数）"
+        },
+        {
+          "name": "total_votes_received",
+          "sql": "SUM(titles.num_votes)",
+          "expression": "SUM(titles.num_votes)",
+          "type": "sum",
+          "description": "参与作品的总投票数"
+        },
+        {
+          "name": "director_title_count",
+          "sql": "COUNT(DISTINCT CASE WHEN principals.category_id = 'director' THEN principals.title_id END)",
+          "expression": "COUNT(DISTINCT CASE WHEN principals.category_id = 'director' THEN principals.title_id END)",
+          "type": "count",
+          "description": "导演作品数"
+        },
+        {
+          "name": "actor_title_count",
+          "sql": "COUNT(DISTINCT CASE WHEN principals.category_id IN ('actor', 'actress') THEN principals.title_id END)",
+          "expression": "COUNT(DISTINCT CASE WHEN principals.category_id IN ('actor', 'actress') THEN principals.title_id END)",
+          "type": "count",
+          "description": "演员作品数"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "profession",
+          "sql": "professions.display_name",
+          "expression": "professions.display_name",
+          "type": "string",
+          "description": "主要职业（从 names_primaryprofessions 关联）"
+        },
+        {
+          "name": "is_alive",
+          "sql": "CASE WHEN names.death_year IS NULL THEN '健在' ELSE '已故' END",
+          "expression": "CASE WHEN names.death_year IS NULL THEN '健在' ELSE '已故' END",
+          "type": "string",
+          "description": "是否健在"
+        },
+        {
+          "name": "birth_decade",
+          "sql": "FLOOR(names.birth_year / 10) * 10",
+          "expression": "FLOOR(names.birth_year / 10) * 10",
+          "type": "int",
+          "description": "出生年代"
+        },
+        {
+          "name": "alive_status",
+          "sql": "CASE WHEN names.death_year IS NULL THEN 'living' ELSE 'deceased' END",
+          "expression": "CASE WHEN names.death_year IS NULL THEN 'living' ELSE 'deceased' END",
+          "type": "string"
+        },
+        {
+          "name": "primary_role",
+          "sql": "principals.category_id",
+          "expression": "principals.category_id",
+          "type": "string",
+          "description": "在作品中的角色类别"
+        },
+        {
+          "name": "is_multi_role",
+          "sql": "CASE WHEN COUNT(DISTINCT principals.category_id) >= 2 THEN '多角色' ELSE '单一角色' END",
+          "expression": "CASE WHEN COUNT(DISTINCT principals.category_id) >= 2 THEN '多角色' ELSE '单一角色' END",
+          "type": "string",
+          "description": "是否多角色从业者"
+        }
+      ]
+    },
+    {
+      "name": "series_health",
+      "description": "电视剧系列健康度分析立方体",
+      "baseObject": "titles",
+      "joins": [
+        {
+          "name": "episodes",
+          "sql": "titles.id = episodes.parent_id"
+        },
+        {
+          "name": "episode_titles",
+          "sql": "episodes.id = episode_titles.id",
+          "model": "titles"
+        }
+      ],
+      "measures": [
+        {
+          "name": "total_seasons",
+          "sql": "COUNT(DISTINCT episodes.season_number)",
+          "expression": "COUNT(DISTINCT episodes.season_number)",
+          "type": "count",
+          "description": "总季数"
+        },
+        {
+          "name": "total_episodes",
+          "sql": "COUNT(DISTINCT episodes.id)",
+          "expression": "COUNT(DISTINCT episodes.id)",
+          "type": "count",
+          "description": "总集数"
+        },
+        {
+          "name": "avg_episode_rating",
+          "sql": "AVG(episode_titles.average_rating)",
+          "expression": "AVG(episode_titles.average_rating)",
+          "type": "avg",
+          "description": "剧集平均评分"
+        },
+        {
+          "name": "episode_per_season",
+          "sql": "COUNT(DISTINCT episodes.id) * 1.0 / NULLIF(COUNT(DISTINCT episodes.season_number), 0)",
+          "expression": "COUNT(DISTINCT episodes.id) * 1.0 / NULLIF(COUNT(DISTINCT episodes.season_number), 0)",
+          "type": "number",
+          "description": "每季平均集数"
+        },
+        {
+          "name": "series_longevity",
+          "sql": "MAX(episode_titles.start_year) - MIN(episode_titles.start_year)",
+          "expression": "MAX(episode_titles.start_year) - MIN(episode_titles.start_year)",
+          "type": "number",
+          "description": "播出跨度（年）"
+        },
+        {
+          "name": "rating_volatility",
+          "sql": "STDDEV(episode_titles.average_rating)",
+          "expression": "STDDEV(episode_titles.average_rating)",
+          "type": "number",
+          "description": "评分波动性（标准差）"
+        },
+        {
+          "name": "best_season_avg",
+          "sql": "MAX(AVG(episode_titles.average_rating))",
+          "expression": "MAX(AVG(episode_titles.average_rating))",
+          "type": "number",
+          "description": "最佳季平均评分"
+        },
+        {
+          "name": "worst_season_avg",
+          "sql": "MIN(AVG(episode_titles.average_rating))",
+          "expression": "MIN(AVG(episode_titles.average_rating))",
+          "type": "number",
+          "description": "最差季平均评分"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "series_status",
+          "sql": "CASE WHEN titles.end_year IS NULL THEN '在播' ELSE '已完结' END",
+          "expression": "CASE WHEN titles.end_year IS NULL THEN '在播' ELSE '已完结' END",
+          "type": "string",
+          "description": "系列状态"
+        },
+        {
+          "name": "season_number",
+          "sql": "episodes.season_number",
+          "expression": "episodes.season_number",
+          "type": "int",
+          "description": "季号"
+        },
+        {
+          "name": "series_decade",
+          "sql": "FLOOR(titles.start_year / 10) * 10",
+          "expression": "FLOOR(titles.start_year / 10) * 10",
+          "type": "int",
+          "description": "系列开播年代"
+        },
+        {
+          "name": "longevity_tier",
+          "sql": "CASE WHEN (MAX(episode_titles.start_year) - MIN(episode_titles.start_year)) >= 10 THEN '长寿(10年+)' WHEN (MAX(episode_titles.start_year) - MIN(episode_titles.start_year)) >= 5 THEN '中寿(5-10年)' ELSE '短寿(<5年)' END",
+          "expression": "CASE WHEN (MAX(episode_titles.start_year) - MIN(episode_titles.start_year)) >= 10 THEN '长寿(10年+)' WHEN (MAX(episode_titles.start_year) - MIN(episode_titles.start_year)) >= 5 THEN '中寿(5-10年)' ELSE '短寿(<5年)' END",
+          "type": "string",
+          "description": "寿命等级"
+        }
+      ]
+    }
+  ],
+  "dataSource": "mysql",
+  "layoutVersion": 3
+}

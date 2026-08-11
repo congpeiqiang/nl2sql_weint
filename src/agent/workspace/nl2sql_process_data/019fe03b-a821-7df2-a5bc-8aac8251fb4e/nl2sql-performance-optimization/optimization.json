@@ -1,0 +1,13 @@
+{
+  "sql": "SELECT primary_title, average_rating\nFROM titles\nWHERE title_type = 'movie'\n  AND average_rating IS NOT NULL\n  AND num_votes > 10000\nORDER BY average_rating DESC",
+  "optimized_sql": null,
+  "issues": [
+    {
+      "rule": "no_limit",
+      "severity": "low",
+      "message": "SQL 中无 LIMIT 子句，但按任务规范通过 run_sql 的 limit 参数控制行数（limit=10），服务端会自动追加 cap，因此不构成问题",
+      "suggestion": "通过 run_sql(sql, limit=10) 控制返回行数"
+    }
+  ],
+  "summary": "共发现 1 个低风险提示（无 LIMIT 由 run_sql limit 参数处理），无高风险问题，SQL 无需修改"
+}

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "backgroundColor": "#fff",
+  "title": {
+    "text": "2000-2023年电影产量及同比增长率",
+    "left": "center"
+  },
+  "tooltip": {
+    "trigger": "axis"
+  },
+  "legend": {
+    "data": [
+      "电影产量",
+      "同比增长率"
+    ],
+    "top": "8%"
+  },
+  "grid": {
+    "left": 80,
+    "right": 80,
+    "top": "18%",
+    "bottom": 60
+  },
+  "xAxis": {
+    "type": "category",
+    "data": [
+      "2000",
+      "2001",
+      "2002",
+      "2003",
+      "2004",
+      "2005",
+      "2006",
+      "2007",
+      "2008",
+      "2009",
+      "2010",
+      "2011",
+      "2012",
+      "2013",
+      "2014",
+      "2015",
+      "2016",
+      "2017",
+      "2018",
+      "2019",
+      "2020",
+      "2021",
+      "2022",
+      "2023"
+    ]
+  },
+  "yAxis": [
+    {
+      "type": "value",
+      "name": "产量(部)",
+      "axisLabel": {
+        "formatter": "{value}"
+      }
+    },
+    {
+      "type": "value",
+      "name": "增长率(%)",
+      "axisLabel": {
+        "formatter": "{value}%"
+      }
+    }
+  ],
+  "series": [
+    {
+      "name": "电影产量",
+      "type": "bar",
+      "data": [
+        1453,
+        1557,
+        1688,
+        2007,
+        2259,
+        2826,
+        3565,
+        6081,
+        9151,
+        11291,
+        12340,
+        13405,
+        14398,
+        14881,
+        15766,
+        13150,
+        8495,
+        10481,
+        16102,
+        17888,
+        16014,
+        18810,
+        20725,
+        20923
+      ],
+      "itemStyle": {
+        "color": "#5470c6"
+      }
+    },
+    {
+      "name": "同比增长率",
+      "type": "line",
+      "yAxisIndex": 1,
+      "data": [
+        null,
+        7.16,
+        8.41,
+        18.9,
+        12.56,
+        25.1,
+        26.15,
+        70.58,
+        50.49,
+        23.39,
+        9.29,
+        8.63,
+        7.41,
+        3.35,
+        5.95,
+        -16.59,
+        -35.4,
+        23.38,
+        53.63,
+        11.09,
+        -10.48,
+        17.46,
+        10.18,
+        0.96
+      ],
+      "smooth": true,
+      "itemStyle": {
+        "color": "#ee6666"
+      }
+    }
+  ]
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

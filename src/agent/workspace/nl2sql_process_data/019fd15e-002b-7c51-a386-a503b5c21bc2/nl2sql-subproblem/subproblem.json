@@ -1,0 +1,13 @@
+{
+  "SELECT": "FLOOR(t.start_year / 10) * 10 AS decade, COUNT(*) AS movie_count, AVG(t.average_rating) AS avg_rating",
+  "FROM": "titles t",
+  "JOIN": null,
+  "WHERE": [
+    "t.title_type = 'movie'",
+    "t.start_year IS NOT NULL"
+  ],
+  "GROUP_BY": "FLOOR(t.start_year / 10) * 10",
+  "HAVING": null,
+  "ORDER_BY": "decade ASC",
+  "LIMIT": null
+}

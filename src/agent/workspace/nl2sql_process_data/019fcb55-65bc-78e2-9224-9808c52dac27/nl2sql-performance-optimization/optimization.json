@@ -1,0 +1,18 @@
+{
+  "sql": "SELECT ROUND(AVG(t.average_rating), 2) AS avg_rating\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year >= 1990\n  AND t.start_year <= 1999\n  AND t.average_rating IS NOT NULL",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。SQL 为单表聚合查询，返回单行结果，无需 LIMIT。无 SELECT *、无 JOIN、无子查询、无函数包裹列（ROUND包裹的是聚合结果而非列）、无 NOT IN、无 LIKE 前缀通配符。SQL 已是最优状态。",
+  "checks": {
+    "select_star": "pass - 使用聚合函数 AVG，非 SELECT *",
+    "no_limit": "pass - 聚合查询返回单行，无需 LIMIT",
+    "join_no_on": "pass - 无 JOIN",
+    "subquery": "pass - 无子查询",
+    "function_wrapping_column": "pass - ROUND 包裹的是聚合结果 AVG()，非直接包裹列",
+    "not_in": "pass - 无 NOT IN",
+    "distinct": "pass - 无 DISTINCT",
+    "like_prefix_wildcard": "pass - 无 LIKE",
+    "or_condition": "pass - 无 OR",
+    "limit_no_order_by": "pass - 无 LIMIT"
+  }
+}

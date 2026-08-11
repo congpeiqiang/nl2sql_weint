@@ -1,0 +1,46 @@
+# 类型统计视图
+# 按类型聚合的统计指标：电影数、平均评分、热度等
+name: genre_stats
+description: "按类型聚合的统计指标视图，每行一个类型"
+
+model: genres
+
+joins:
+  - name: titles_genres
+    sql: "genres.id = titles_genres.genre_id"
+  - name: titles
+    sql: "titles_genres.title_id = titles.id"
+
+dimensions:
+  - name: genre_id
+    sql: "genres.id"
+    type: string
+  - name: genre_name
+    sql: "genres.display_name"
+    type: string
+
+measures:
+  - name: title_count
+    sql: "COUNT(DISTINCT titles_genres.title_id)"
+    type: count
+  - name: avg_rating
+    sql: "AVG(titles.average_rating)"
+    type: avg
+  - name: avg_votes
+    sql: "AVG(titles.num_votes)"
+    type: avg
+  - name: avg_runtime
+    sql: "AVG(titles.runtime_minutes)"
+    type: avg
+  - name: first_appearance
+    sql: "MIN(titles.start_year)"
+    type: number
+  - name: last_appearance
+    sql: "MAX(titles.start_year)"
+    type: number
+  - name: movie_count
+    sql: "SUM(CASE WHEN titles.title_type = 'movie' THEN 1 ELSE 0 END)"
+    type: count
+  - name: series_count
+    sql: "SUM(CASE WHEN titles.title_type = 'tvSeries' THEN 1 ELSE 0 END)"
+    type: count

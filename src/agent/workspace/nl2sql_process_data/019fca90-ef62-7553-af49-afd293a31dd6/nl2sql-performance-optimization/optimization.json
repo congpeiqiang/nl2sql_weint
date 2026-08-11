@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT AVG(average_rating) AS avg_rating\nFROM titles\nWHERE title_type = 'movie' AND start_year BETWEEN 1990 AND 1999",
+  "optimized_sql": "SELECT AVG(average_rating) AS avg_rating\nFROM titles\nWHERE title_type = 'movie' AND start_year BETWEEN 1990 AND 1999",
+  "issues": [],
+  "summary": "共发现 0 个性能问题。该查询为单表聚合查询，返回单行结果，无 SELECT *、无笛卡尔积、无函数包裹列、无 NOT IN 等性能隐患，无需优化。"
+}

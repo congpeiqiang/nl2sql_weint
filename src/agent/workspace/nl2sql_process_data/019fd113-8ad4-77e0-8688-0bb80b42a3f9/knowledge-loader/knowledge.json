@@ -1,0 +1,95 @@
+{
+  "user_intent": {
+    "original_question": "查询克里斯托弗·诺兰（Christopher Nolan）导演的电影的平均评分（average_rating）",
+    "domain": "imdb",
+    "keywords": ["克里斯托弗·诺兰", "Christopher Nolan", "导演", "电影", "平均评分", "average_rating"],
+    "intent_type": "query_director_movie_avg_rating"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "names.primary_name", "operator": "=", "value": "Christopher Nolan"},
+      {"field": "principals.category_id", "operator": "=", "value": "director"},
+      {"field": "titles.title_type", "operator": "=", "value": "movie"}
+    ],
+    "fields_to_display": ["平均评分"]
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["average_rating", "avg_rating"],
+      "formula": "AVG(t.average_rating)",
+      "related_tables": ["titles"],
+      "aggregation": "AVG"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "导演定义",
+      "condition": "principals.category_id = 'director'"
+    },
+    {
+      "id": "rule_002",
+      "name": "电影类型过滤",
+      "condition": "titles.title_type = 'movie'"
+    },
+    {
+      "id": "rule_003",
+      "name": "评分可信度",
+      "condition": "排名类查询应加 num_votes > 10000 过滤"
+    }
+  ],
+  "field_mappings": {
+    "导演": "principals.category_id = 'director'",
+    "克里斯托弗·诺兰": "names.primary_name = 'Christopher Nolan'",
+    "电影": "titles.title_type = 'movie'",
+    "平均评分": "AVG(titles.average_rating)"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "导演-演员黄金搭档分析，找出合作 3 次以上且合作作品平均评分 >= 7.5 的导演-演员组合",
+      "sql_query": "SELECT d.primary_name AS director_name, a.primary_name AS actor_name, COUNT(*) AS collaboration_count, ROUND(AVG(t.average_rating), 2) AS avg_rating FROM principals pd JOIN titles t ON pd.title_id = t.id AND t.title_type = 'movie' JOIN principals pa ON pa.title_id = t.id AND pa.category_id IN ('actor', 'actress') JOIN names d ON pd.name_id = d.id JOIN names a ON pa.name_id = a.id WHERE pd.category_id = 'director' AND t.num_votes > 5000 AND t.average_rating IS NOT NULL GROUP BY d.id, d.primary_name, a.id, a.primary_name HAVING COUNT(*) >= 3 AND AVG(t.average_rating) >= 7.5 ORDER BY collaboration_count DESC, avg_rating DESC LIMIT 20",
+      "intent_type": "director_actor_collaboration",
+      "similarity_score": 0.5
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles ←→ principals ←→ names 核心路径：作品通过 principals 关联人物，principals.category_id = 'director' 表示导演"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.average_rating 为 IMDb 加权平均评分(1.0-10.0)，titles.title_type='movie' 表示电影"
+    },
+    {
+      "topic": "导演查询",
+      "content": "导演的 category_id = 'director'，不要用 job_id 来查导演（job 是自由格式，不标准）"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "principals", "names"],
+    "main_fields": ["titles.average_rating", "titles.title_type", "principals.category_id", "names.primary_name"],
+    "filter_conditions": ["names.primary_name = 'Christopher Nolan'", "principals.category_id = 'director'", "titles.title_type = 'movie'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 4,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 4,
+      "knowledge": 3
+    }
+  }
+}

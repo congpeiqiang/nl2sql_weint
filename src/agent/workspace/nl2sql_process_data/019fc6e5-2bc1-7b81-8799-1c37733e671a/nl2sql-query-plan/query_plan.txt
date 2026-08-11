@@ -1,0 +1,5 @@
+1. 从 titles 表（别名 t）筛选 title_type='movie' 的电影
+2. 进一步筛选 start_year BETWEEN 1990 AND 1999（1990年代）
+3. 处理 NULL：start_year IS NOT NULL 且 average_rating IS NOT NULL
+4. 对筛选后的电影计算 AVG(t.average_rating) 作为平均评分
+5. 返回单行结果：平均评分

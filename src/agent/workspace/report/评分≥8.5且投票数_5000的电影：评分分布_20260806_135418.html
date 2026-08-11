@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "series": [
+    {
+      "data": [
+        7,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "type": "bar"
+    }
+  ],
+  "title": {
+    "left": "center",
+    "text": "评分≥8.5且投票数<5000的电影：评分分布"
+  },
+  "tooltip": {
+    "trigger": "axis"
+  },
+  "xAxis": {
+    "data": [
+      "10.0",
+      "9.9",
+      "9.8",
+      "9.7",
+      "9.6",
+      "9.5",
+      "9.4",
+      "9.3",
+      "9.2",
+      "9.1",
+      "9.0",
+      "8.9",
+      "8.8",
+      "8.7",
+      "8.6",
+      "8.5"
+    ],
+    "name": "评分区间",
+    "type": "category"
+  },
+  "yAxis": {
+    "name": "电影数量",
+    "type": "value"
+  }
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

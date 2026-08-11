@@ -1,0 +1,8 @@
+1. 从 titles 表筛选 title_type='movie' 的行（只统计电影，排除短片/电视剧等）
+2. 通过 principals.title_id = titles.id 连接 principals 表
+3. 通过 principals.name_id = names.id 连接 names 表
+4. 在 principals 表中筛选 category_id IN ('actor', 'actress')（演员定义规则：包含男女演员）
+5. 按 names.id, names.primary_name 分组
+6. 计算每个演员的参演电影数量 COUNT(DISTINCT principals.title_id)
+7. 按参演电影数量降序排序
+8. 取前10行

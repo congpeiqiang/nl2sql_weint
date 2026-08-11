@@ -1,0 +1,38 @@
+{
+  "SELECT": [
+    "n.primary_name AS 人物名",
+    "a.actor_movie_count AS 演员作品数",
+    "ROUND(a.actor_avg_rating, 2) AS 演员平均评分",
+    "d.director_movie_count AS 导演作品数",
+    "ROUND(d.director_avg_rating, 2) AS 导演平均评分",
+    "ROUND(d.director_avg_rating - a.actor_avg_rating, 2) AS 评分差异"
+  ],
+  "FROM": [
+    {"table": "actor_works", "alias": "a"},
+    {"table": "director_works", "alias": "d"},
+    {"table": "names", "alias": "n"}
+  ],
+  "JOIN": [
+    {"table": "director_works d", "on": "a.name_id = d.name_id"},
+    {"table": "names n", "on": "a.name_id = n.id"}
+  ],
+  "WHERE": [],
+  "GROUP_BY": [],
+  "HAVING": [],
+  "ORDER_BY": [
+    {"column": "rating_difference", "direction": "DESC"}
+  ],
+  "LIMIT": null,
+  "CTE": [
+    {
+      "name": "actor_works",
+      "description": "计算每个人作为演员参演电影的平均评分和作品数",
+      "sql": "SELECT p.name_id, AVG(t.average_rating) AS actor_avg_rating, COUNT(*) AS actor_movie_count FROM principals p JOIN titles t ON p.title_id = t.id WHERE p.category_id IN ('actor', 'actress') AND t.title_type = 'movie' AND t.average_rating IS NOT NULL GROUP BY p.name_id HAVING COUNT(*) >= 3"
+    },
+    {
+      "name": "director_works",
+      "description": "计算每个人作为导演执导电影的平均评分和作品数",
+      "sql": "SELECT p.name_id, AVG(t.average_rating) AS director_avg_rating, COUNT(*) AS director_movie_count FROM principals p JOIN titles t ON p.title_id = t.id WHERE p.category_id = 'director' AND t.title_type = 'movie' AND t.average_rating IS NOT NULL GROUP BY p.name_id HAVING COUNT(*) >= 2"
+    }
+  ]
+}

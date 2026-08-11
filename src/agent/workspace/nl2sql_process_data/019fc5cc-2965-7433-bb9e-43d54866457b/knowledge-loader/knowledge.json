@@ -1,0 +1,74 @@
+{
+  "user_intent": {
+    "original_question": "统计数据库中电视剧系列（TV series）的数量，按系列分组统计，返回各电视剧系列及其数量。",
+    "domain": "imdb",
+    "keywords": ["电视剧系列", "TV series", "tvSeries", "数量", "分组", "系列"],
+    "intent_type": "count_episodes_per_series"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [{"field": "title_type", "operator": "=", "value": "tvSeries"}],
+    "fields_to_display": ["电视剧系列名称", "剧集数量"]
+  },
+  "metrics": [
+    {
+      "name": "剧集数量",
+      "aliases": ["集数", "episode count"],
+      "formula": "COUNT(DISTINCT e.id)",
+      "related_tables": ["titles", "episodes"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电视剧系列类型",
+      "condition": "t.title_type = 'tvSeries'"
+    },
+    {
+      "id": "rule_002",
+      "name": "剧集关联路径",
+      "condition": "titles (series) ←→ episodes ←→ titles (episode)，episodes.parent_id = series.id"
+    }
+  ],
+  "field_mappings": {
+    "电视剧系列名称": {"table": "titles", "field": "primary_title"},
+    "系列ID": {"table": "titles", "field": "id"},
+    "剧集ID": {"table": "episodes", "field": "id"},
+    "父系列ID": {"table": "episodes", "field": "parent_id"}
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "剧集路径: titles (series) ←→ episodes ←→ titles (episode)，通过 episodes.parent_id = series.id 关联"
+    },
+    {
+      "topic": "字段说明",
+      "content": "tvSeries = 电视剧系列（如《老友记》整体），tvEpisode = 单个剧集，通过 episodes 表关联"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "episodes"],
+    "main_fields": ["titles.id", "titles.primary_title", "episodes.id", "episodes.parent_id"],
+    "filter_conditions": ["titles.title_type = 'tvSeries'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 4,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 4,
+      "knowledge": 2
+    }
+  }
+}

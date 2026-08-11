@@ -1,0 +1,15 @@
+{
+  "SELECT": "AVG(t.average_rating) AS avg_rating（1990年代电影的平均评分）",
+  "FROM": "titles t",
+  "JOIN": null,
+  "WHERE": [
+    "t.title_type = 'movie'",
+    "t.start_year BETWEEN 1990 AND 1999",
+    "t.start_year IS NOT NULL",
+    "t.average_rating IS NOT NULL"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": null,
+  "LIMIT": null
+}

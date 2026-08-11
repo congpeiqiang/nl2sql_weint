@@ -1,0 +1,53 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb 唯一作品标识 (tt开头)"},
+        {"name": "title_type", "type": "VARCHAR", "description": "作品类型: movie/short/tvEpisode/tvSeries等"},
+        {"name": "primary_title", "type": "VARCHAR", "description": "主要标题"},
+        {"name": "average_rating", "type": "DOUBLE", "description": "IMDb加权平均评分(1.0-10.0)"},
+        {"name": "num_votes", "type": "INTEGER", "description": "用户投票总数"}
+      ]
+    },
+    {
+      "name": "episodes",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "剧集ID, 关联titles.id(作为剧集)"},
+        {"name": "parent_id", "type": "VARCHAR", "fk": true, "description": "父系列ID, 关联titles.id(作为系列)"},
+        {"name": "season_number", "type": "INTEGER", "description": "季号"},
+        {"name": "episode_number", "type": "INTEGER", "description": "集号"}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "episodes",
+      "from_field": "parent_id",
+      "to": "titles",
+      "to_field": "id",
+      "type": "MANY_TO_ONE",
+      "description": "剧集 → 父系列"
+    },
+    {
+      "from": "episodes",
+      "from_field": "id",
+      "to": "titles",
+      "to_field": "id",
+      "type": "MANY_TO_ONE",
+      "description": "剧集 → 自身标题"
+    }
+  ],
+  "field_mappings": {
+    "系列名称": {"table": "titles", "field": "primary_title"},
+    "系列类型": {"table": "titles", "field": "title_type"},
+    "季号": {"table": "episodes", "field": "season_number"},
+    "剧集评分": {"table": "titles", "field": "average_rating"},
+    "剧集投票数": {"table": "titles", "field": "num_votes"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "data_source": "mysql"
+  }
+}

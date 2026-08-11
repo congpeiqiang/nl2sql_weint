@@ -1,0 +1,13 @@
+{
+  "sql": "SELECT t.primary_title, t.average_rating, t.num_votes\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.average_rating >= 8.5\n  AND t.num_votes < 5000\nORDER BY t.average_rating DESC",
+  "optimized_sql": "SELECT t.primary_title, t.average_rating, t.num_votes\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.average_rating >= 8.5\n  AND t.num_votes < 5000\nORDER BY t.average_rating DESC",
+  "issues": [
+    {
+      "rule": "no_limit",
+      "severity": "low",
+      "message": "SQL 中未写 LIMIT 子句",
+      "suggestion": "按任务规范，LIMIT 通过 run_sql 的 limit 参数控制（服务端自动追加默认 cap 1000 行），SQL 中不写 LIMIT 以避免语法冲突。此规则不适用。"
+    }
+  ],
+  "summary": "共发现 1 个低风险提示（无 LIMIT），但按任务规范通过 run_sql limit 参数控制，无需修改。SQL 已明确列出所需列，无 SELECT *、无笛卡尔积、无函数包裹列、无 NOT IN，性能良好。"
+}

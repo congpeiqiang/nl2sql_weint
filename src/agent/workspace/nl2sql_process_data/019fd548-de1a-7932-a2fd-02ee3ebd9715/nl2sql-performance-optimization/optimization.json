@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT FLOOR(t.start_year / 10) * 10 AS decade,\n       COUNT(*) AS movie_count,\n       AVG(t.average_rating) AS avg_rating\nFROM titles t\nWHERE t.title_type = 'movie' AND t.start_year IS NOT NULL\nGROUP BY FLOOR(t.start_year / 10) * 10\nORDER BY decade ASC",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。SQL 为单表聚合查询，已明确列出所需列，无 SELECT *、无笛卡尔积、无子查询、WHERE 中无函数包裹列。聚合查询（GROUP BY）结果行数有限（年代数量固定），无需 LIMIT。"
+}

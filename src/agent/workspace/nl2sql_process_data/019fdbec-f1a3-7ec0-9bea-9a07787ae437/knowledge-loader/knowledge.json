@@ -1,0 +1,104 @@
+{
+  "user_intent": {
+    "original_question": "找出评分衰退最严重的电视剧系列，计算首季平均评分和末季平均评分的下降幅度",
+    "domain": "imdb",
+    "keywords": ["评分衰退", "电视剧系列", "首季平均评分", "末季平均评分", "下降幅度"],
+    "intent_type": "query_series_rating_decline"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "tvSeries"},
+      {"field": "average_rating", "operator": "IS NOT NULL", "value": null},
+      {"field": "season_number", "operator": "IS NOT NULL", "value": null}
+    ],
+    "fields_to_display": ["series_title", "total_seasons", "first_season_rating", "last_season_rating", "decline_rate_pct"]
+  },
+  "metrics": [
+    {
+      "name": "评分衰退率",
+      "aliases": ["下降幅度", "衰退率", "Decline Rate"],
+      "formula": "(S1_avg_rating - S_last_avg_rating) / S1_avg_rating",
+      "related_tables": ["titles", "episodes"],
+      "aggregation": "AVG",
+      "threshold": "> 30% 为严重衰退"
+    },
+    {
+      "name": "平均评分",
+      "aliases": ["首季平均评分", "末季平均评分"],
+      "formula": "AVG(ep.average_rating) GROUP BY season_number",
+      "related_tables": ["titles", "episodes"],
+      "aggregation": "AVG"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电视剧系列类型",
+      "condition": "t.title_type = 'tvSeries'"
+    },
+    {
+      "id": "rule_002",
+      "name": "评分可信度",
+      "condition": "排名类查询应加 num_votes > 10000 过滤"
+    },
+    {
+      "id": "rule_003",
+      "name": "剧集路径",
+      "condition": "titles (series) ←→ episodes ←→ titles (episode)"
+    }
+  ],
+  "field_mappings": {
+    "电视剧系列": "titles.primary_title",
+    "季号": "episodes.season_number",
+    "剧集评分": "titles.average_rating (episode)",
+    "系列ID": "titles.id (series)",
+    "父系列ID": "episodes.parent_id"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "电视剧系列评分趋势分析，分析电视剧各季评分变化趋势，计算评分衰退率",
+      "sql": "WITH season_ratings AS (SELECT s.id AS series_id, s.primary_title AS series_title, e.season_number, ROUND(AVG(ep.average_rating), 2) AS season_avg_rating, COUNT(DISTINCT e.id) AS episode_count FROM titles s JOIN episodes e ON s.id = e.parent_id JOIN titles ep ON e.id = ep.id WHERE s.title_type = 'tvSeries' AND ep.average_rating IS NOT NULL AND e.season_number IS NOT NULL GROUP BY s.id, s.primary_title, e.season_number), series_stats AS (SELECT series_id, series_title, COUNT(*) AS total_seasons, MAX(season_number) AS max_season, MIN(season_number) AS min_season, MAX(CASE WHEN season_number = (SELECT MIN(season_number) FROM season_ratings sr2 WHERE sr2.series_id = sr.series_id) THEN season_avg_rating END) AS first_season_rating, MAX(CASE WHEN season_number = (SELECT MAX(season_number) FROM season_ratings sr2 WHERE sr2.series_id = sr.series_id) THEN season_avg_rating END) AS last_season_rating FROM season_ratings sr GROUP BY series_id, series_title HAVING COUNT(*) >= 3) SELECT series_title, total_seasons, first_season_rating, last_season_rating, ROUND((first_season_rating - last_season_rating) / first_season_rating * 100, 2) AS decline_rate_pct FROM series_stats ORDER BY decline_rate_pct DESC LIMIT 30",
+      "intent_type": "query_series_rating_trend",
+      "similarity_score": 0.95
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles (series) ←→ episodes ←→ titles (episode)；episodes.parent_id = series.id 且 episodes.id = episode.id"
+    },
+    {
+      "topic": "字段说明",
+      "content": "episodes.season_number 为季号；episodes.episode_number 为集号；剧集评分在 titles.average_rating"
+    },
+    {
+      "topic": "评分衰退率定义",
+      "content": "Decline Rate = (S1_avg_rating - S_last_avg_rating) / S1_avg_rating；> 30% 为严重衰退"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "episodes"],
+    "main_fields": ["titles.id", "titles.primary_title", "titles.title_type", "titles.average_rating", "episodes.parent_id", "episodes.id", "episodes.season_number"],
+    "filter_conditions": ["t.title_type = 'tvSeries'", "ep.average_rating IS NOT NULL", "e.season_number IS NOT NULL"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 5,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 2,
+      "business_rules": 3,
+      "field_mappings": 5,
+      "knowledge": 3
+    }
+  }
+}

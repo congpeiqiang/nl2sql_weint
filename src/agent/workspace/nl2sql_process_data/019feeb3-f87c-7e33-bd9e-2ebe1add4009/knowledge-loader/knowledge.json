@@ -1,0 +1,72 @@
+{
+  "user_intent": {
+    "original_question": "统计 IMDb 数据库中每种 title_type 的作品数量",
+    "domain": "imdb",
+    "keywords": ["title_type", "作品数量", "统计", "每种"],
+    "intent_type": "count_by_title_type"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["title_type", "作品数量"]
+  },
+  "metrics": [
+    {
+      "name": "作品总数",
+      "aliases": ["作品数量", "count"],
+      "formula": "COUNT(*)",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_title_type",
+      "name": "title_type 语义",
+      "condition": "title_type 可选值: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    },
+    {
+      "id": "rule_titles_not_movie",
+      "name": "titles 表包含多种作品类型",
+      "condition": "titles 表包含 9 种作品类型，不要用 titles 表代表电影"
+    }
+  ],
+  "field_mappings": {
+    "title_type": {"table": "titles", "field": "title_type"},
+    "作品数量": {"table": "titles", "field": "COUNT(*)"}
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 表是作品表，包含 title_type 字段，用于区分作品类型"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.title_type 可选值: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type"],
+    "filter_conditions": [],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 2
+    }
+  }
+}

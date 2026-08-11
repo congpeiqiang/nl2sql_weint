@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT AVG(t.average_rating) AS avg_rating\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 1990 AND 1999\n  AND t.average_rating IS NOT NULL",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "未发现性能问题。SQL为单表聚合查询，WHERE条件已正确过滤，无需LIMIT（聚合返回单行），无JOIN/子查询/函数包裹列等隐患。"
+}

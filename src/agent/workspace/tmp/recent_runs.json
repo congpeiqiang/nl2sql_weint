@@ -1,0 +1,182 @@
+[
+  {
+    "name": "execute",
+    "run_type": "tool",
+    "start": "2026-08-11 02:28:21.746374+00:00",
+    "duration_s": null,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-4472-75a3-906c-301a622e6e81"
+  },
+  {
+    "name": "MessageSlimmerMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:21.737433+00:00",
+    "duration_s": null,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-4469-7452-8be5-402d7a86ddbb"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:21.723593+00:00",
+    "duration_s": null,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-445b-78f1-9990-73ce48eb98e5"
+  },
+  {
+    "name": "tools",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:21.720656+00:00",
+    "duration_s": null,
+    "parent_id": "019feea3",
+    "trace_id": "019feea3",
+    "id": "019feea6-4458-7d31-a53e-d66cd3cb2136"
+  },
+  {
+    "name": "TodoListMiddleware.after_model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:21.659382+00:00",
+    "duration_s": 0.046,
+    "parent_id": "019feea3",
+    "trace_id": "019feea3",
+    "id": "019feea6-441b-7091-9492-4bd30d7df174"
+  },
+  {
+    "name": "ChatDeepSeek",
+    "run_type": "llm",
+    "start": "2026-08-11 02:28:19.692611+00:00",
+    "duration_s": 1.513,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3c6c-7103-8ace-4462a8ee4f19"
+  },
+  {
+    "name": "MemoryMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.675515+00:00",
+    "duration_s": 1.542,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3c5b-7911-a6c3-327adabe1fbb"
+  },
+  {
+    "name": "AnthropicPromptCachingMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.658936+00:00",
+    "duration_s": 1.58,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3c4a-7581-8da6-717ff3da8c41"
+  },
+  {
+    "name": "QueryKeywordsMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.645415+00:00",
+    "duration_s": 1.618,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3c3d-7972-b236-147b97595513"
+  },
+  {
+    "name": "SkillsMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.626300+00:00",
+    "duration_s": 1.653,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3c2a-7e13-bd70-1f538157f73f"
+  },
+  {
+    "name": "AsyncSubAgentMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.606596+00:00",
+    "duration_s": 1.698,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3c16-7fa2-a41f-f71ed4196713"
+  },
+  {
+    "name": "SummarizationMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.583706+00:00",
+    "duration_s": 1.741,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3bff-7201-8a28-d0abde4703db"
+  },
+  {
+    "name": "SubAgentMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.564578+00:00",
+    "duration_s": 1.794,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3bec-7193-9555-19e8399fc7a8"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.548005+00:00",
+    "duration_s": 1.872,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3bdc-7db3-b41a-3f1a4f670989"
+  },
+  {
+    "name": "TodoListMiddleware.awrap_model_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.529760+00:00",
+    "duration_s": 1.945,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3bc9-7bb1-bcc2-07986cad1c33"
+  },
+  {
+    "name": "model",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.523629+00:00",
+    "duration_s": 2.024,
+    "parent_id": "019feea3",
+    "trace_id": "019feea3",
+    "id": "019feea6-3bc3-7a00-a30c-66aa030e1ae3"
+  },
+  {
+    "name": "write_file",
+    "run_type": "tool",
+    "start": "2026-08-11 02:28:19.434003+00:00",
+    "duration_s": 0.012,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3b69-7032-a1aa-472f211b5c2c"
+  },
+  {
+    "name": "MessageSlimmerMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.426647+00:00",
+    "duration_s": 0.021,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3b62-7230-9340-68a2cdade8a1"
+  },
+  {
+    "name": "FilesystemMiddleware.awrap_tool_call",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.416377+00:00",
+    "duration_s": 0.038,
+    "parent_id": "019feea6",
+    "trace_id": "019feea3",
+    "id": "019feea6-3b58-70d3-b790-3d69ab4f955c"
+  },
+  {
+    "name": "tools",
+    "run_type": "chain",
+    "start": "2026-08-11 02:28:19.414239+00:00",
+    "duration_s": 0.049,
+    "parent_id": "019feea3",
+    "trace_id": "019feea3",
+    "id": "019feea6-3b56-70c1-99b1-4a1d4305b5fe"
+  }
+]

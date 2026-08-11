@@ -1,0 +1,51 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb 唯一作品标识"},
+        {"name": "title_type", "type": "VARCHAR", "description": "作品类型: movie/short/tvSeries等"},
+        {"name": "primary_title", "type": "VARCHAR", "description": "主要标题"},
+        {"name": "average_rating", "type": "DOUBLE", "description": "IMDb加权平均评分(1.0-10.0)"},
+        {"name": "num_votes", "type": "INTEGER", "description": "用户投票总数"}
+      ]
+    },
+    {
+      "name": "genres",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "类型标识符(字符串)"},
+        {"name": "display_name", "type": "VARCHAR", "description": "类型显示名"}
+      ]
+    },
+    {
+      "name": "titles_genres",
+      "columns": [
+        {"name": "title_id", "type": "VARCHAR", "pk": true, "description": "作品ID, 关联 titles.id"},
+        {"name": "genre_id", "type": "VARCHAR", "pk": true, "description": "类型ID, 关联 genres.id"}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "titles_genres",
+      "from_field": "title_id",
+      "to": "titles",
+      "to_field": "id"
+    },
+    {
+      "from": "titles_genres",
+      "from_field": "genre_id",
+      "to": "genres",
+      "to_field": "id"
+    }
+  ],
+  "field_mappings": {
+    "类型名": {"table": "genres", "field": "display_name"},
+    "电影标题": {"table": "titles", "field": "primary_title"},
+    "评分": {"table": "titles", "field": "average_rating"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success"
+  }
+}

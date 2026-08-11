@@ -1,0 +1,52 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true},
+        {"name": "title_type", "type": "VARCHAR"},
+        {"name": "primary_title", "type": "VARCHAR"},
+        {"name": "average_rating", "type": "DOUBLE"},
+        {"name": "num_votes", "type": "INTEGER"},
+        {"name": "start_year", "type": "INTEGER"},
+        {"name": "end_year", "type": "INTEGER"}
+      ]
+    },
+    {
+      "name": "episodes",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true},
+        {"name": "parent_id", "type": "VARCHAR", "fk": true},
+        {"name": "season_number", "type": "INTEGER"},
+        {"name": "episode_number", "type": "INTEGER"}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "episodes",
+      "from_field": "parent_id",
+      "to": "titles",
+      "to_field": "id",
+      "note": "episodes.parent_id = titles.id (series)"
+    },
+    {
+      "from": "episodes",
+      "from_field": "id",
+      "to": "titles",
+      "to_field": "id",
+      "note": "episodes.id = titles.id (episode)"
+    }
+  ],
+  "field_mappings": {
+    "电视剧系列": {"table": "titles", "field": "primary_title"},
+    "系列ID": {"table": "titles", "field": "id"},
+    "季号": {"table": "episodes", "field": "season_number"},
+    "剧集评分": {"table": "titles", "field": "average_rating"},
+    "父系列ID": {"table": "episodes", "field": "parent_id"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success"
+  }
+}

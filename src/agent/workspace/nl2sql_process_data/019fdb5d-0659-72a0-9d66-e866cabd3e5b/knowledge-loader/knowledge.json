@@ -1,0 +1,85 @@
+{
+  "user_intent": {
+    "original_question": "1990 年代上映的电影平均评分是多少？",
+    "domain": "imdb",
+    "keywords": ["1990年代", "电影", "平均评分"],
+    "intent_type": "query_avg_rating_by_decade"
+  },
+  "entities": {
+    "time_range": {"decade": "1990s", "start": 1990, "end": 1999},
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "start_year", "operator": "BETWEEN", "value": [1990, 1999]}
+    ],
+    "fields_to_display": ["平均评分"]
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["平均分", "avg rating"],
+      "formula": "AVG(t.average_rating)",
+      "related_tables": ["titles"],
+      "aggregation": "AVG"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "t.title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "年代划分",
+      "condition": "FLOOR(start_year / 10) * 10 = 1990，即 start_year BETWEEN 1990 AND 1999"
+    },
+    {
+      "id": "rule_003",
+      "name": "NULL值处理",
+      "condition": "start_year IS NOT NULL AND average_rating IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "电影": "titles.title_type = 'movie'",
+    "上映年份": "titles.start_year",
+    "平均评分": "titles.average_rating"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "平均评分指标",
+      "content": "平均评分 = AVG(t.average_rating)，用于聚合统计"
+    },
+    {
+      "topic": "年代划分",
+      "content": "年代(decade)计算公式：FLOOR(start_year / 10) * 10；1990年代即 start_year 在 1990-1999 之间"
+    },
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影，titles 表包含9种作品类型需过滤"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.average_rating", "titles.start_year", "titles.title_type"],
+    "filter_conditions": ["t.title_type = 'movie'", "t.start_year BETWEEN 1990 AND 1999", "t.average_rating IS NOT NULL"],
+    "time_range": "1990-1999"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 3
+    }
+  }
+}

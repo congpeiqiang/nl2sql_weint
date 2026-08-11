@@ -1,0 +1,78 @@
+{
+  "user_intent": {
+    "original_question": "查询 average_rating 最高的 10 部电影，显示标题和评分",
+    "domain": "imdb",
+    "keywords": ["average_rating", "电影", "标题", "评分", "top 10"],
+    "intent_type": "query_top_rated_movies"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"}
+    ],
+    "fields_to_display": ["primary_title", "average_rating"],
+    "limit": 10,
+    "order_by": {"field": "average_rating", "direction": "DESC"}
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["average_rating", "评分"],
+      "formula": "titles.average_rating",
+      "related_tables": ["titles"],
+      "aggregation": "none (直接字段)"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_movie",
+      "name": "电影类型过滤",
+      "condition": "titles.title_type = 'movie'"
+    },
+    {
+      "id": "rule_user_constraint",
+      "name": "用户明确要求不附加额外过滤",
+      "condition": "不添加 num_votes 阈值、不添加'经典'等其他限定条件，严格按用户原始需求执行"
+    }
+  ],
+  "field_mappings": {
+    "标题": "titles.primary_title",
+    "评分": "titles.average_rating",
+    "电影": "titles.title_type = 'movie'"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_top_rated",
+      "original_question": "高分电影 Top N（含贝叶斯校正）",
+      "sql": "SELECT t.primary_title, t.average_rating FROM titles t WHERE t.title_type = 'movie' ORDER BY t.average_rating DESC LIMIT 20",
+      "intent_type": "query_top_rated_movies",
+      "similarity_score": 0.6
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 表包含所有作品类型，需通过 title_type='movie' 过滤出电影"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.average_rating 为 IMDb 加权平均分(1.0-10.0)，titles.primary_title 为主要标题"
+    },
+    {
+      "topic": "用户约束",
+      "content": "用户明确要求：不要附加'经典'等其他限定条件，不要添加额外的业务过滤（如 num_votes 阈值），严格按用户原始需求执行"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.average_rating"],
+    "filter_conditions": ["titles.title_type = 'movie'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "strategy": "B"
+  }
+}

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "backgroundColor": "#fff",
+  "title": {
+    "text": "片长超过180分钟的电影 Top 12（按片长降序）",
+    "left": "center",
+    "top": "2%"
+  },
+  "tooltip": {
+    "trigger": "axis",
+    "axisPointer": {
+      "type": "shadow"
+    }
+  },
+  "grid": {
+    "left": 320,
+    "right": 50,
+    "top": 60,
+    "bottom": 50
+  },
+  "xAxis": {
+    "type": "value",
+    "name": "片长（分钟）"
+  },
+  "yAxis": {
+    "type": "category",
+    "data": [
+      "Logistics",
+      "Ambiancé",
+      "Carnets Filmés (Liste Complète)",
+      "Modern Times Forever",
+      "Beijing 2003",
+      "Soldier",
+      "Matrjoschka",
+      "A 2nd generation film",
+      "World Peace & Prayer Day",
+      "h36:",
+      "Five-Year Diary",
+      "Rock Milestones: Metallica - The Halcyon Years"
+    ]
+  },
+  "series": [
+    {
+      "name": "片长（分钟）",
+      "type": "bar",
+      "data": [
+        51420,
+        43200,
+        28643,
+        14400,
+        9000,
+        7200,
+        5700,
+        3077,
+        2400,
+        2160,
+        2160,
+        2007
+      ],
+      "itemStyle": {
+        "color": "#5470c6"
+      },
+      "label": {
+        "show": true,
+        "position": "right",
+        "formatter": "{c}"
+      }
+    }
+  ]
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

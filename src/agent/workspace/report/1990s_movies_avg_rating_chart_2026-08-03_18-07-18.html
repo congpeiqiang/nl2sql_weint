@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1990年代电影平均评分趋势</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <style>
+        body {
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            background: #f5f7fa;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            padding: 30px;
+            max-width: 1100px;
+            width: 100%;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            font-size: 22px;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #888;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+        #chart {
+            width: 100%;
+            height: 500px;
+        }
+        .data-table {
+            margin-top: 30px;
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .data-table th, .data-table td {
+            border: 1px solid #e0e0e0;
+            padding: 10px 16px;
+            text-align: center;
+        }
+        .data-table th {
+            background: #5070dd;
+            color: #fff;
+            font-weight: 600;
+        }
+        .data-table tr:nth-child(even) {
+            background: #f8f9fc;
+        }
+        .highlight {
+            color: #5070dd;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>1990年代电影平均评分趋势</h1>
+        <div class="subtitle">数据来源：IMDb 数据库 | 统计范围：1990-1999 年电影（title_type = 'movie'）</div>
+        <div id="chart"></div>
+
+        <h2 style="text-align:center; color:#333; font-size:18px; margin-top:30px;">详细数据</h2>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>年份</th>
+                    <th>平均评分</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>1990</td><td>5.78</td></tr>
+                <tr><td>1991</td><td>6.15</td></tr>
+                <tr><td>1992</td><td>6.13</td></tr>
+                <tr><td>1993</td><td>6.28</td></tr>
+                <tr><td>1994</td><td>6.15</td></tr>
+                <tr><td>1995</td><td>6.12</td></tr>
+                <tr><td>1996</td><td class="highlight">6.42</td></tr>
+                <tr><td>1997</td><td>6.31</td></tr>
+                <tr><td>1998</td><td>6.13</td></tr>
+                <tr><td>1999</td><td>6.22</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        var chart = echarts.init(document.getElementById('chart'));
+        var option = {
+            backgroundColor: '#fff',
+            title: {
+                text: '1990年代电影平均评分趋势',
+                left: 'center',
+                top: '2%',
+                textStyle: { fontSize: 18, color: '#333' }
+            },
+            tooltip: {
+                trigger: 'axis',
+                formatter: function(params) {
+                    return params[0].name + '年<br/>平均评分：<b>' + params[0].value + '</b>';
+                }
+            },
+            grid: {
+                left: 80,
+                right: 40,
+                top: 60,
+                bottom: 50
+            },
+            xAxis: {
+                type: 'category',
+                name: '年份',
+                data: ['1990', '1991', '1992', '1993', '1994', '1995', '1996', '1997', '1998', '1999'],
+                axisLabel: { fontSize: 12 }
+            },
+            yAxis: {
+                type: 'value',
+                name: '平均评分',
+                min: 5.5,
+                max: 6.6,
+                axisLabel: { fontSize: 12 }
+            },
+            series: [{
+                name: '平均评分',
+                type: 'line',
+                data: [5.78, 6.15, 6.13, 6.28, 6.15, 6.12, 6.42, 6.31, 6.13, 6.22],
+                smooth: true,
+                symbolSize: 8,
+                lineStyle: { width: 3, color: '#5070dd' },
+                itemStyle: { color: '#5070dd' },
+                areaStyle: {
+                    color: {
+                        type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                        colorStops: [
+                            { offset: 0, color: 'rgba(80,112,221,0.3)' },
+                            { offset: 1, color: 'rgba(80,112,221,0.02)' }
+                        ]
+                    }
+                },
+                markPoint: {
+                    data: [
+                        { type: 'max', name: '最高' },
+                        { type: 'min', name: '最低' }
+                    ]
+                }
+            }]
+        };
+        chart.setOption(option);
+        window.addEventListener('resize', function() { chart.resize(); });
+    </script>
+</body>
+</html>

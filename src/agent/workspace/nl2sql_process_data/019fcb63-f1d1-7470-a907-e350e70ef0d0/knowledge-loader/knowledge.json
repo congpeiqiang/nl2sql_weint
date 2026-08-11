@@ -1,0 +1,69 @@
+{
+  "user_intent": {
+    "original_question": "查询1990年代（1990-1999）电影的平均评分",
+    "domain": "movies, ratings",
+    "keywords": ["电影", "平均评分", "1990年代", "1990-1999"],
+    "intent_type": "query_average_rating_by_decade"
+  },
+  "entities": {
+    "time_range": {"start": 1990, "end": 1999},
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "start_year", "operator": "BETWEEN", "value": [1990, 1999]}
+    ],
+    "fields_to_display": ["平均评分"]
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["average rating", "均分"],
+      "formula": "AVG(t.average_rating)",
+      "related_tables": ["titles"]
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "NULL值处理",
+      "condition": "start_year IS NOT NULL, average_rating IS NOT NULL"
+    },
+    {
+      "id": "rule_003",
+      "name": "年代划分",
+      "condition": "FLOOR(start_year / 10) * 10，1990年代即 start_year BETWEEN 1990 AND 1999"
+    }
+  ],
+  "field_mappings": {
+    "电影": "titles (title_type = 'movie')",
+    "平均评分": "titles.average_rating",
+    "年份": "titles.start_year",
+    "评分": "titles.average_rating"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "评分可信度",
+      "content": "投票数 < 1000 的评分偏差大，排名类查询应加 num_votes > 10000。但本题是求平均评分，非排名，可不过滤。"
+    },
+    {
+      "topic": "NULL值处理",
+      "content": "start_year 可能为 NULL，查询时建议 WHERE start_year IS NOT NULL；average_rating 也需确保非 NULL"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.average_rating", "titles.start_year", "titles.title_type"],
+    "filter_conditions": ["title_type = 'movie'", "start_year BETWEEN 1990 AND 1999", "average_rating IS NOT NULL"],
+    "time_range": "1990 to 1999"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2025-01-01T00:00:00"
+  }
+}

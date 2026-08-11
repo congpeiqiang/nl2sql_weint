@@ -1,0 +1,10 @@
+{
+  "datasource": "mysql",
+  "properties": {
+    "host": "mysql-master",
+    "port": 3306,
+    "database": "imdb",
+    "user": "aoi-dev",
+    "password": "aoi8dev.1234"
+  }
+}

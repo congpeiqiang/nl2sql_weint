@@ -1,0 +1,22 @@
+查询计划：找出评分衰退最严重的电视剧系列，计算首季与末季平均评分的下降幅度
+
+1. 构建 season_ratings CTE：
+   - 从 titles s 筛选 title_type='tvSeries'（电视剧系列）
+   - 通过 episodes e 关联：s.id = e.parent_id（系列 → 剧集）
+   - 通过 titles ep 关联：e.id = ep.id（剧集 → 剧集标题）
+   - 过滤 ep.average_rating IS NOT NULL 且 e.season_number IS NOT NULL
+   - 按 s.id, s.primary_title, e.season_number 分组
+   - 计算每季平均评分 season_avg_rating = AVG(ep.average_rating)
+
+2. 构建 series_stats CTE：
+   - 从 season_ratings 按 series_id, series_title 分组
+   - 计算 total_seasons = COUNT(*)
+   - 用 CASE WHEN season_number = MIN(season_number) 取首季评分 first_season_rating
+   - 用 CASE WHEN season_number = MAX(season_number) 取末季评分 last_season_rating
+   - HAVING COUNT(*) >= 3（至少3季，保证有意义）
+
+3. 最终 SELECT：
+   - 输出 series_title, total_seasons, first_season_rating, last_season_rating
+   - 计算下降幅度 decline_rate_pct = (first_season_rating - last_season_rating) / first_season_rating * 100
+   - 按 decline_rate_pct DESC 排序（衰退最严重在前）
+   - 通过 run_sql limit 参数取前若干行

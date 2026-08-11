@@ -1,0 +1,7 @@
+1. 从 titles 表筛选 title_type='movie' 的电影作品
+2. 通过 titles_genres.title_id = titles.id 连接到 titles_genres 关联表
+3. 通过 genres.id = titles_genres.genre_id 连接到 genres 类型表
+4. 按 genres.id, genres.display_name 分组
+5. 统计每组电影数量 COUNT(DISTINCT titles.id) AS movie_count
+6. 按 movie_count DESC 降序排序
+7. 取前5行（通过 run_sql limit 参数控制，SQL 中不写 LIMIT）

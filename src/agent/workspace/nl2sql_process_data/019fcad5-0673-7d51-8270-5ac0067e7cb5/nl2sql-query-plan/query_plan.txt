@@ -1,0 +1,9 @@
+查询计划：1990年代电影按年份统计平均评分
+
+1. 从 titles 表筛选 title_type = 'movie' 的行（只查电影）
+2. 进一步筛选 start_year BETWEEN 1990 AND 1999（限定1990年代）
+3. 排除 start_year IS NULL 的行（确保年份有效）
+4. 排除 average_rating IS NULL 的行（确保评分有效）
+5. 按 start_year 分组
+6. 对每组计算 AVG(average_rating)，并 ROUND 到2位小数
+7. 按 start_year ASC 排序输出结果

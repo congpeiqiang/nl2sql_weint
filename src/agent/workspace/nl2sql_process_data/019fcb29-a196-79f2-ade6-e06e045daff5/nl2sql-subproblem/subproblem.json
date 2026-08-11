@@ -1,0 +1,14 @@
+{
+  "SELECT": "AVG(t.average_rating) AS avg_rating — 计算1990年代电影的平均评分",
+  "FROM": "titles t — 核心作品表",
+  "JOIN": null,
+  "WHERE": [
+    "t.title_type = 'movie' — 只查电影类型",
+    "t.start_year >= 1990 AND t.start_year <= 1999 — 1990年代",
+    "t.average_rating IS NOT NULL — 排除无评分记录"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": null,
+  "LIMIT": null
+}

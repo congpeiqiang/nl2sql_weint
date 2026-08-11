@@ -1,0 +1,72 @@
+{
+  "user_intent": {
+    "original_question": "统计每个类型的电影数量，从多到少排列。",
+    "domain": "imdb",
+    "keywords": ["类型", "电影", "数量", "从多到少"],
+    "intent_type": "count_by_title_type"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["title_type", "count"]
+  },
+  "metrics": [
+    {
+      "name": "电影数量",
+      "aliases": ["作品数量", "数量"],
+      "formula": "COUNT(*)",
+      "related_tables": ["titles"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_type_semantics",
+      "name": "作品类型语义",
+      "condition": "title_type 取值: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    },
+    {
+      "id": "rule_movie_vs_title",
+      "name": "电影 vs 作品",
+      "condition": "title_type='movie' 才是电影；titles 表包含9种作品类型"
+    }
+  ],
+  "field_mappings": {
+    "类型": "titles.title_type",
+    "电影数量": "COUNT(titles.id)"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 表是核心作品表，包含所有电影、短片、电视剧集、电视系列等，约1000万+条记录"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.title_type 可选值: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type"],
+    "filter_conditions": [],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 2,
+      "knowledge": 2
+    }
+  }
+}

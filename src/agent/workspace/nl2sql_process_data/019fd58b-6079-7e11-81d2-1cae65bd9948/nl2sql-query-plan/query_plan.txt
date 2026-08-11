@@ -1,0 +1,33 @@
+查询计划：电视剧系列评分衰退最严重的 Top 10
+
+目标：找出电视剧系列(tvSeries)中，后续季相比第一季评分下降幅度最大的前10个系列。
+衰退幅度 = 第一季平均评分 - 后续季(第2季及以后)平均评分
+
+步骤：
+1. 从 titles 表筛选系列：s.title_type = 'tvSeries'，得到系列表 s
+2. 通过 episodes 表关联系列与剧集：JOIN episodes e ON s.id = e.parent_id
+   - 过滤 e.season_number IS NOT NULL
+3. 通过 episodes.id 关联剧集标题：JOIN titles ep ON e.id = ep.id
+   - 过滤 ep.average_rating IS NOT NULL（剧集必须有评分）
+4. 计算每个系列每季的平均评分：
+   - 按 s.id, s.primary_title, e.season_number 分组
+   - 计算 AVG(ep.average_rating) 作为该季平均评分
+   - 得到 season_ratings CTE
+5. 区分第一季与后续季：
+   - 第一季：season_number = MIN(season_number)（即该系列的最小季号）
+   - 后续季：season_number > MIN(season_number)
+6. 计算每个系列的第一季平均评分和后续季平均评分：
+   - 第一季平均评分 = 第一季所有剧集评分的平均值
+   - 后续季平均评分 = 第2季及以后所有剧集评分的平均值
+7. 计算衰退幅度 = 第一季平均评分 - 后续季平均评分
+8. 过滤：仅保留至少有2季的系列（HAVING 至少存在第一季和后续季）
+9. 按衰退幅度降序排序
+10. 取前10行（通过 run_sql 的 limit 参数控制，SQL中不写LIMIT）
+
+关键JOIN路径：
+- titles(系列) s ←→ episodes e (s.id = e.parent_id)
+- episodes e ←→ titles(剧集) ep (e.id = ep.id)
+
+注意：
+- 排名类查询建议加 num_votes > 10000 过滤（评分可信度）
+- 衰退幅度为正值表示评分下降，负值表示评分上升

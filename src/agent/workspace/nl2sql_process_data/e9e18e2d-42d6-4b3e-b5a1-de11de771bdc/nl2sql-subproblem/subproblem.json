@@ -1,0 +1,17 @@
+{
+  "SELECT": "g.display_name AS genre, t.primary_title AS movie_title, t.average_rating AS rating",
+  "FROM": "titles t JOIN titles_genres tg ON tg.title_id = t.id JOIN genres g ON g.id = tg.genre_id",
+  "JOIN": [
+    {"table": "titles_genres", "on": "tg.title_id = t.id"},
+    {"table": "genres", "on": "g.id = tg.genre_id"}
+  ],
+  "WHERE": [
+    "t.title_type = 'movie'",
+    "t.num_votes > 10000",
+    "t.average_rating IS NOT NULL"
+  ],
+  "GROUP_BY": "g.id, g.display_name, t.id, t.primary_title, t.average_rating",
+  "HAVING": "t.average_rating = MAX(t.average_rating) OVER (PARTITION BY g.id)",
+  "ORDER_BY": "g.display_name ASC",
+  "LIMIT": "无（通过 run_sql limit 参数控制）"
+}

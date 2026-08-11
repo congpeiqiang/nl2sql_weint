@@ -1,0 +1,10 @@
+1. 从 principals 表 pd 筛选导演记录：pd.category_id = 'director'
+2. 通过 pd.title_id = t.id 连接 titles 表 t，并筛选 t.title_type = 'movie'（只统计电影）
+3. 通过 pa.title_id = t.id 连接 principals 表 pa（演员参与者），并筛选 pa.category_id IN ('actor', 'actress')
+4. 通过 pd.name_id = d.id 连接 names 表 d（获取导演名）
+5. 通过 pa.name_id = a.id 连接 names 表 a（获取演员名）
+6. 应用 WHERE 过滤：t.average_rating IS NOT NULL, t.num_votes > 10000（评分可信度）
+7. 按导演和演员分组：GROUP BY d.id, d.primary_name, a.id, a.primary_name
+8. 应用 HAVING 过滤：COUNT(*) >= 3（合作3次以上）AND AVG(t.average_rating) >= 7.5（平均评分>=7.5）
+9. 选择输出列：导演名、演员名、合作次数、平均评分
+10. 按合作次数降序、平均评分降序排序

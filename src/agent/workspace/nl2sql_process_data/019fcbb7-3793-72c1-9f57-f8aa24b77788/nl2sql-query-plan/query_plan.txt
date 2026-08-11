@@ -1,0 +1,10 @@
+查询计划：参演电影数量最多的前10位演员
+
+1. 从 titles 表筛选 title_type = 'movie' 的行（只统计电影，排除电视剧、短片等）
+2. 通过 principals.title_id = titles.id 连接 principals 表（关联演员与作品）
+3. 在 principals 表中筛选 category_id IN ('actor', 'actress')（演员定义规则：必须同时包含男演员和女演员）
+4. 通过 principals.name_id = names.id 连接 names 表（获取演员姓名）
+5. 按 names.id, names.primary_name 分组
+6. 对每组计算 COUNT(DISTINCT principals.title_id) 作为 movie_count（参演电影数量）
+7. 按 movie_count DESC 降序排列
+8. 取前10行（通过 run_sql 的 limit=10 参数控制，SQL中不写LIMIT）

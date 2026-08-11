@@ -1,0 +1,5 @@
+1. 从 titles 表读取数据，仅需 title_type 和 id 字段
+2. 按 title_type 分组（GROUP BY titles.title_type）
+3. 对每组统计作品数量（COUNT(titles.id)）
+4. 按作品数量从多到少排序（ORDER BY 数量 DESC）
+5. 返回 title_type 和对应数量

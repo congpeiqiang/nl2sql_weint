@@ -1,0 +1,10 @@
+查询计划：查询每个类型的电影数量，按数量降序排列
+
+1. 从 titles 表读取数据
+2. 按 title_type（作品类型）字段进行分组
+3. 对每个分组计算电影数量 COUNT(titles.id)
+4. 按电影数量 COUNT(titles.id) 降序排列
+5. 返回 title_type 和对应的电影数量
+
+涉及表：titles（单表查询，无需 JOIN）
+涉及字段：titles.title_type（分组列）、titles.id（计数列）

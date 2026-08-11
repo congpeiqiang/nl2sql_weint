@@ -1,0 +1,19 @@
+{
+  "sql": "WITH ranked AS (\n  SELECT \n    g.display_name AS genre_name,\n    t.primary_title AS movie_title,\n    t.average_rating AS rating,\n    ROW_NUMBER() OVER (PARTITION BY g.id ORDER BY t.average_rating DESC) AS rn\n  FROM titles t\n  JOIN titles_genres tg ON tg.title_id = t.id\n  JOIN genres g ON g.id = tg.genre_id\n  WHERE t.title_type = 'movie'\n    AND t.num_votes > 10000\n    AND t.average_rating IS NOT NULL\n)\nSELECT genre_name, movie_title, rating\nFROM ranked\nWHERE rn = 1\nORDER BY genre_name ASC",
+  "optimized_sql": null,
+  "issues": [
+    {
+      "rule": "no_limit",
+      "severity": "low",
+      "message": "外层 SELECT 无 LIMIT 子句",
+      "suggestion": "该查询为每个类型返回一行（约28行），结果集有界。根据执行规范，通过 run_sql 的 limit 参数控制行数，不在 SQL 中写 LIMIT。无需修改。"
+    },
+    {
+      "rule": "subquery",
+      "severity": "low",
+      "message": "使用 CTE (WITH ranked AS) 包含窗口函数 ROW_NUMBER()",
+      "suggestion": "CTE + ROW_NUMBER() 是'每组取Top 1'的标准实现方式，改写为 JOIN 会显著增加复杂度且不保证性能提升。保留当前写法。"
+    }
+  ],
+  "summary": "共发现 2 个低风险问题，均无需修改。SQL 已满足性能要求。"
+}

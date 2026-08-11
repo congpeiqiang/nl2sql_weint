@@ -1,0 +1,15 @@
+{
+  "SELECT": "start_year AS year, COUNT(*) AS movie_count, 增长率 (通过 LAG 窗口函数计算)",
+  "FROM": "titles t",
+  "JOIN": {},
+  "WHERE": [
+    "t.title_type = 'movie'",
+    "t.start_year BETWEEN 2000 AND 2023",
+    "t.start_year IS NOT NULL"
+  ],
+  "GROUP_BY": "t.start_year",
+  "HAVING": "无",
+  "ORDER_BY": "t.start_year ASC",
+  "LIMIT": "无（通过 run_sql limit 参数控制）",
+  "notes": "增长率 = (当年产量 - 上一年产量) / 上一年产量 * 100，使用 LAG(COUNT(*)) OVER (ORDER BY start_year) 获取上一年产量。第一年（2000年）无上一年数据，增长率为 NULL。"
+}

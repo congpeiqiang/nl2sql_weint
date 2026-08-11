@@ -1,0 +1,97 @@
+{
+  "user_intent": {
+    "original_question": "查询参演电影最多的前 10 位演员",
+    "domain": "imdb",
+    "keywords": ["演员", "参演电影", "最多", "前10"],
+    "intent_type": "query_top_actors_by_movie_count"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "category_id", "operator": "IN", "value": ["actor", "actress"]},
+      {"field": "title_type", "operator": "=", "value": "movie"}
+    ],
+    "fields_to_display": ["演员名", "参演电影数"],
+    "limit": 10,
+    "order_by": "参演电影数 DESC"
+  },
+  "metrics": [
+    {
+      "name": "参演电影数",
+      "aliases": ["作品总数", "movie_count"],
+      "formula": "COUNT(DISTINCT p.title_id)",
+      "related_tables": ["names", "principals", "titles"],
+      "aggregation": "COUNT(DISTINCT)"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_actor",
+      "name": "演员定义规则",
+      "condition": "category_id IN ('actor', 'actress')"
+    },
+    {
+      "id": "rule_movie",
+      "name": "电影类型规则",
+      "condition": "title_type = 'movie'"
+    }
+  ],
+  "field_mappings": {
+    "演员": "names.primary_name",
+    "演员ID": "names.id",
+    "参演电影数": "COUNT(DISTINCT principals.title_id)",
+    "作品类型": "titles.title_type",
+    "职位类别": "principals.category_id"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_001",
+      "original_question": "高产演员分析（含多面手得分），找出参演高分电影最多的演员，同时计算角色多样性",
+      "normalized_question": "找出参演高分电影最多的演员",
+      "sql": "SELECT n.primary_name, COUNT(DISTINCT p.title_id) AS movie_count FROM names n JOIN principals p ON p.name_id = n.id JOIN titles t ON t.id = p.title_id WHERE p.category_id IN ('actor', 'actress') AND t.title_type = 'movie' GROUP BY n.id, n.primary_name ORDER BY movie_count DESC",
+      "intent_type": "query_top_actors",
+      "similarity_score": 0.9
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "演员定义",
+      "content": "查询演员时必须同时包含 category_id IN ('actor', 'actress')，IMDb 按性别区分但业务上演员应包含两者"
+    },
+    {
+      "topic": "电影定义",
+      "content": "title_type = 'movie' 才是电影，titles 表包含电视剧、短片、游戏等9种类型"
+    },
+    {
+      "topic": "多表JOIN路径",
+      "content": "核心路径：titles ←→ principals ←→ names，通过 principals.title_id = titles.id 和 principals.name_id = names.id 关联"
+    },
+    {
+      "topic": "NULL处理",
+      "content": "start_year 可能为 NULL，查询时建议 WHERE start_year IS NOT NULL"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["names", "principals", "titles"],
+    "main_fields": ["names.primary_name", "names.id", "principals.title_id", "principals.name_id", "principals.category_id", "titles.title_type"],
+    "filter_conditions": ["principals.category_id IN ('actor', 'actress')", "titles.title_type = 'movie'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 5,
+      "knowledge": 4
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 5,
+      "knowledge": 4
+    }
+  }
+}

@@ -1,0 +1,21 @@
+查询计划：每个类型中评分最高的电影
+
+目标：查询每个类型（genre）中评分最高的电影，显示类型名、电影标题和评分。
+
+步骤：
+1. 从 titles 表（别名 t）筛选 title_type='movie' 且 num_votes > 10000 且 average_rating IS NOT NULL 的电影记录
+2. 通过 titles_genres 表（别名 tg）连接 titles 和 genres：tg.title_id = t.id
+3. 通过 genres 表（别名 g）获取类型显示名：g.id = tg.genre_id
+4. 使用窗口函数 ROW_NUMBER() OVER (PARTITION BY g.id ORDER BY t.average_rating DESC) 为每个类型内的电影按评分降序编号
+5. 筛选 rn = 1 的记录，即每个类型中评分最高的电影
+6. 输出列：g.display_name AS genre_name, t.primary_title AS movie_title, t.average_rating AS rating
+7. 按类型名排序输出结果
+
+关键连接关系：
+- titles_genres.title_id = titles.id（作品-类型关联）
+- titles_genres.genre_id = genres.id（类型关联）
+
+过滤条件：
+- t.title_type = 'movie'（只查电影）
+- t.num_votes > 10000（评分可信度过滤）
+- t.average_rating IS NOT NULL（排除无评分记录）

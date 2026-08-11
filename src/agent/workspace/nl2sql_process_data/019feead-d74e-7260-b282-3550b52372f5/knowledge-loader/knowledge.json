@@ -1,0 +1,48 @@
+{
+  "user_intent": {
+    "original_question": "统计 IMDb 数据库中每种 title_type 的作品数量",
+    "domain": "imdb",
+    "keywords": ["title_type", "作品数量", "统计"],
+    "intent_type": "count_by_title_type"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["title_type", "作品数量"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_title_type",
+      "name": "作品类型语义",
+      "condition": "title_type 可选值: movie/short/tvSeries/tvEpisode/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    }
+  ],
+  "field_mappings": {
+    "title_type": "titles.title_type",
+    "作品数量": "COUNT(*)"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 表是 IMDb 核心作品表，包含所有电影、短片、电视剧集、电视系列等，约1000万+条记录"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.title_type 可选值: movie/short/tvEpisode/tvSeries/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type"],
+    "filter_conditions": [],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "strategy": "B"
+  }
+}

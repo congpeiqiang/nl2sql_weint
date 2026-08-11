@@ -1,0 +1,91 @@
+{
+  "user_intent": {
+    "original_question": "查询 average_rating 最高的 10 部经典系列电影，显示标题和评分",
+    "domain": "imdb",
+    "keywords": ["average_rating", "经典", "系列", "电影", "标题", "评分"],
+    "intent_type": "query_top_rated_series"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "tvSeries"},
+      {"field": "num_votes", "operator": ">", "value": 10000},
+      {"field": "average_rating", "operator": "IS NOT NULL", "value": null}
+    ],
+    "fields_to_display": ["primary_title", "average_rating"],
+    "sort": {"field": "average_rating", "direction": "DESC"},
+    "limit": 10
+  },
+  "metrics": [
+    {
+      "name": "平均评分",
+      "aliases": ["average_rating", "评分"],
+      "formula": "titles.average_rating",
+      "related_tables": ["titles"],
+      "aggregation": "直接字段"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "作品类型语义",
+      "condition": "title_type='tvSeries' 表示电视剧系列",
+      "note": "经典系列电影应理解为电视剧系列(tvSeries)"
+    },
+    {
+      "id": "rule_002",
+      "name": "评分可信度规则",
+      "condition": "排名类查询应加 num_votes > 10000 过滤",
+      "note": "低投票数影片评分不可靠"
+    },
+    {
+      "id": "rule_003",
+      "name": "NULL值处理",
+      "condition": "average_rating 可能为 NULL，需过滤",
+      "note": "WHERE average_rating IS NOT NULL"
+    }
+  ],
+  "field_mappings": {
+    "标题": {"table": "titles", "field": "primary_title"},
+    "评分": {"table": "titles", "field": "average_rating"},
+    "系列": {"table": "titles", "field": "title_type", "value": "tvSeries"}
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "作品类型",
+      "content": "tvSeries = 电视剧系列，多季多集的电视剧"
+    },
+    {
+      "topic": "评分可信度",
+      "content": "排名类查询应加 num_votes > 10000 过滤"
+    },
+    {
+      "topic": "经典影片",
+      "content": "num_votes >= 50000 为经典影片级别，>= 10000 为较可信"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.average_rating", "titles.title_type", "titles.num_votes"],
+    "filter_conditions": ["titles.title_type = 'tvSeries'", "titles.num_votes > 10000", "titles.average_rating IS NOT NULL"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 3,
+      "field_mappings": 3,
+      "knowledge": 3
+    }
+  }
+}

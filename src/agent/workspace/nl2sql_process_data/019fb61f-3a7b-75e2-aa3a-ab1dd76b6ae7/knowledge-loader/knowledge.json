@@ -1,0 +1,46 @@
+{
+  "user_intent": {
+    "original_question": "数据库中有多少部电视剧系列？",
+    "domain": "imdb",
+    "keywords": ["电视剧系列", "数量", "tvSeries"],
+    "intent_type": "count_tv_series"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [{"field": "title_type", "operator": "=", "value": "tvSeries"}],
+    "fields_to_display": ["count"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_title_type",
+      "name": "作品类型语义",
+      "condition": "title_type = 'tvSeries' 表示电视剧系列（多季多集的电视剧）"
+    }
+  ],
+  "field_mappings": {
+    "电视剧系列": "titles.title_type = 'tvSeries'"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 表是 IMDb 核心作品表，包含所有电影、短片、电视剧集、电视剧系列等，title_type 字段区分作品类型"
+    },
+    {
+      "topic": "字段说明",
+      "content": "titles.title_type 可选值: movie/short/tvEpisode/tvSeries/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.title_type"],
+    "filter_conditions": ["titles.title_type = 'tvSeries'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "strategy": "B"
+  }
+}

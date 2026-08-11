@@ -1,0 +1,23 @@
+{
+  "SELECT": "AVG(average_rating) AS avg_rating - 计算1990年代电影的平均评分",
+  "FROM": "titles - IMDb核心作品表",
+  "JOIN": null,
+  "WHERE": [
+    "title_type = 'movie' - 只查询电影类型作品",
+    "start_year BETWEEN 1990 AND 1999 - 限定1990年代",
+    "average_rating IS NOT NULL - 确保评分数据存在"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": null,
+  "LIMIT": null,
+  "decomposition_notes": {
+    "query_type": "single_table_aggregation",
+    "complexity": "simple",
+    "key_constraints": [
+      "必须过滤title_type为movie",
+      "年份范围1990-1999（包含边界）",
+      "排除NULL评分记录"
+    ]
+  }
+}

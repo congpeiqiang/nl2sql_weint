@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT title_type AS 类型, COUNT(id) AS 电影数量\nFROM titles\nGROUP BY title_type\nORDER BY 电影数量 DESC",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。该查询为单表 GROUP BY 聚合查询，仅返回 9 行（每种 title_type 一行），无需 LIMIT；无 SELECT *、无 JOIN、无子查询、无函数包裹列、无 NOT IN、无 DISTINCT、无 LIKE、无 OR，性能良好。"
+}

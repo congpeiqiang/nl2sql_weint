@@ -1,0 +1,81 @@
+{
+  "user_intent": {
+    "original_question": "找出每个类型中评分最高的电影，显示类型名、电影标题和评分。",
+    "domain": "imdb",
+    "keywords": ["类型", "评分最高", "电影", "类型名", "电影标题", "评分"],
+    "intent_type": "query_top_rated_movie_per_genre"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "title_type", "operator": "=", "value": "movie"},
+      {"field": "num_votes", "operator": ">", "value": 10000, "note": "评分可信度规则推荐"}
+    ],
+    "fields_to_display": ["类型名", "电影标题", "评分"]
+  },
+  "metrics": [
+    {
+      "name": "最高评分",
+      "aliases": ["评分最高", "最高分"],
+      "formula": "MAX(t.average_rating)",
+      "related_tables": ["titles"],
+      "aggregation": "MAX"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "电影类型过滤",
+      "condition": "t.title_type = 'movie'"
+    },
+    {
+      "id": "rule_002",
+      "name": "评分可信度",
+      "condition": "t.num_votes > 10000 AND t.average_rating IS NOT NULL",
+      "note": "排名类查询应加 num_votes > 10000 过滤"
+    }
+  ],
+  "field_mappings": {
+    "类型名": "genres.display_name",
+    "电影标题": "titles.primary_title",
+    "评分": "titles.average_rating"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "titles 通过 titles_genres 关联 genres，多对多关系。titles_genres.title_id = titles.id, titles_genres.genre_id = genres.id"
+    },
+    {
+      "topic": "genre_id 类型",
+      "content": "genres.id 存的是字符串如 'action', 'comedy', 'drama'，不是数字ID"
+    },
+    {
+      "topic": "评分字段",
+      "content": "titles.average_rating 为 IMDb 加权平均评分(1.0-10.0)，num_votes 为投票数"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles", "titles_genres", "genres"],
+    "main_fields": ["titles.primary_title", "titles.average_rating", "genres.display_name"],
+    "filter_conditions": ["t.title_type = 'movie'", "t.num_votes > 10000", "t.average_rating IS NOT NULL"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 2,
+      "field_mappings": 3,
+      "knowledge": 3
+    }
+  }
+}

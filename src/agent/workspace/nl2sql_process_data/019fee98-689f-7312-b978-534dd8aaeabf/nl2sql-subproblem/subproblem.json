@@ -1,0 +1,34 @@
+{
+  "SELECT": "series_title, total_seasons, first_season_rating, last_season_rating, decline_rate_pct",
+  "FROM": "titles s (series) JOIN episodes e ON s.id = e.parent_id JOIN titles ep (episode) ON e.id = ep.id",
+  "JOIN": [
+    {"table": "episodes e", "on": "s.id = e.parent_id", "desc": "系列 → 剧集关联"},
+    {"table": "titles ep", "on": "e.id = ep.id", "desc": "剧集ID → 剧集标题/评分"}
+  ],
+  "WHERE": [
+    "s.title_type = 'tvSeries'",
+    "ep.average_rating IS NOT NULL",
+    "e.season_number IS NOT NULL"
+  ],
+  "GROUP_BY": "s.id, s.primary_title, e.season_number (season_ratings CTE)；s.id, s.primary_title (series_stats CTE)",
+  "HAVING": "COUNT(*) >= 3 (至少3季)",
+  "ORDER_BY": "decline_rate_pct DESC",
+  "LIMIT": "通过 run_sql limit 参数控制（不写SQL LIMIT）",
+  "subproblems": [
+    {
+      "id": "sp1",
+      "clause": "CTE season_ratings",
+      "desc": "计算每个系列每季的平均评分：按 series_id, series_title, season_number 分组，AVG(ep.average_rating) 作为 season_avg_rating"
+    },
+    {
+      "id": "sp2",
+      "clause": "CTE series_stats",
+      "desc": "对每个系列聚合：计算总季数、最大/最小季号，并通过 CASE WHEN 提取首季(season_number=MIN)和末季(season_number=MAX)的平均评分"
+    },
+    {
+      "id": "sp3",
+      "clause": "SELECT final",
+      "desc": "计算下降幅度 decline_rate_pct = (first_season_rating - last_season_rating) / first_season_rating * 100，按下降幅度降序排列"
+    }
+  ]
+}

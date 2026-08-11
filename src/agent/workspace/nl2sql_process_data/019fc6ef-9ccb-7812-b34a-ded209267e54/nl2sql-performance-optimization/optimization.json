@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT t.start_year AS year, AVG(t.average_rating) AS avg_rating\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 1990 AND 1999\n  AND t.average_rating IS NOT NULL\nGROUP BY t.start_year\nORDER BY t.start_year ASC",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。SQL 已使用显式列名（无 SELECT *）、单表查询（无 JOIN 笛卡尔积风险）、无子查询、无函数包裹列、无 NOT IN、无 DISTINCT、无 LIKE 前缀通配符、无 OR 条件。GROUP BY 聚合查询结果行数有限（最多10行），无需额外 LIMIT。"
+}

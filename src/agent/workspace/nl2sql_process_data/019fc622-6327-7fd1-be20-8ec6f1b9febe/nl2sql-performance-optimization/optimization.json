@@ -1,0 +1,6 @@
+{
+  "sql": "-- 子查询1：电视剧系列总数\nSELECT COUNT(*) AS total_series\nFROM titles\nWHERE title_type = 'tvSeries';\n\n-- 子查询2：按类型（genre）统计电视剧系列数量分布\nSELECT g.display_name AS genre, COUNT(DISTINCT t.id) AS series_count\nFROM titles t\nJOIN titles_genres tg ON t.id = tg.title_id\nJOIN genres g ON tg.genre_id = g.id\nWHERE t.title_type = 'tvSeries'\nGROUP BY g.display_name\nORDER BY series_count DESC;\n\n-- 子查询3：按首播年份统计电视剧系列数量趋势\nSELECT t.start_year, COUNT(*) AS series_count\nFROM titles t\nWHERE t.title_type = 'tvSeries' AND t.start_year IS NOT NULL\nGROUP BY t.start_year\nORDER BY t.start_year ASC;",
+  "optimized_sql": null,
+  "issues": [],
+  "summary": "共发现 0 个性能问题。三个查询均为聚合查询（COUNT/GROUP BY），JOIN 均带 ON 条件，无 SELECT *、无笛卡尔积、无函数包裹列、无 NOT IN。COUNT(DISTINCT t.id) 用于避免多类型关联导致的重复计数，语义正确。聚合查询无需额外 LIMIT。"
+}

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "backgroundColor": "#fff",
+  "title": {
+    "text": "各类型作品数量分布",
+    "left": "center"
+  },
+  "tooltip": {
+    "trigger": "axis",
+    "axisPointer": {
+      "type": "shadow"
+    }
+  },
+  "grid": {
+    "left": 120,
+    "right": 50,
+    "top": 60,
+    "bottom": 50
+  },
+  "xAxis": {
+    "type": "value",
+    "name": "数量（对数刻度）",
+    "logBase": 10
+  },
+  "yAxis": {
+    "type": "category",
+    "data": [
+      "tvPilot（试播集）",
+      "tvShort（电视短片）",
+      "videoGame（电子游戏）",
+      "tvSpecial（电视特辑）",
+      "tvMiniSeries（迷你剧）",
+      "tvMovie（电视电影）",
+      "tvSeries（电视剧系列）",
+      "video（录像带/数字发行）",
+      "movie（电影）",
+      "short（短片）",
+      "tvEpisode（剧集）"
+    ]
+  },
+  "series": [
+    {
+      "name": "数量",
+      "type": "bar",
+      "data": [
+        1,
+        7092,
+        39366,
+        48708,
+        59729,
+        96397,
+        232074,
+        243965,
+        469181,
+        889676,
+        8562923
+      ],
+      "label": {
+        "show": true,
+        "position": "right",
+        "formatter": "{c}"
+      },
+      "itemStyle": {
+        "color": "#5470c6"
+      }
+    }
+  ]
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

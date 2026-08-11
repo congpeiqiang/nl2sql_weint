@@ -1,0 +1,10 @@
+查询计划：评分最高的 10 部电视剧系列
+
+1. 从 titles 表查询数据，筛选 title_type = 'tvSeries'（电视剧系列）
+2. 应用评分可信度过滤：num_votes > 10000（确保评分可信）
+3. 排除 NULL 评分：average_rating IS NOT NULL
+4. 选择字段：primary_title（标题）、average_rating（评分）
+5. 按 average_rating DESC 降序排序（评分从高到低）
+6. 取前 10 行（LIMIT 10）
+
+无需 JOIN，单表查询即可完成。
