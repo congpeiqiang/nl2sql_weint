@@ -37,6 +37,12 @@ Y = LLM(Q, K, S, C, P, T | θ)
 
 ## 三、三阶段工作流
 
+### Phase 0：问题清晰度裁决（前置门槛，必做）
+
+**Step 0** → 加载 `nl2sql-clarification`：基于 Schema（get_context）与知识库（get_instructions）判断问题是否清晰。
+- 清晰 → 进入 Phase 1
+- 不清晰 → **立即停止**，以 `[需要澄清]` 格式输出追问，不进入任何查询流程
+
 ### Phase 1：业务知识预处理
 
 **Step 1** → 加载 `nl2sql-knowledge-loader`：**Knowledge Loader Skill**基于问题 `Q` ，从知识库中查询全量业务规则、知识库内容和指标定义等业务知识`K`
@@ -69,7 +75,7 @@ Y = LLM(Q, K, S, C, P, T | θ)
 
 使用 `load_skill(name)` **按需加载** Agent 技能。**绝对不要在流程开始时一次性加载所有技能**——这会严重浪费上下文窗口。
 
-**技能名称列表：** `sql-of-thought`（编排器）、`nl2sql-knowledge-loader`、`nl2sql-schema-linking`、`nl2sql-subproblem`、`nl2sql-query-plan`、`nl2sql-sql-generation`、`nl2sql-correction`。
+**技能名称列表：** `nl2sql-clarification`（Step 0 前置澄清门）、`sql-of-thought`（编排器）、`nl2sql-knowledge-loader`、`nl2sql-schema-linking`、`nl2sql-subproblem`、`nl2sql-query-plan`、`nl2sql-sql-generation`、`nl2sql-correction`。
 
 详细的技能清单、加载时机、模型分配策略和引用文件说明，请参阅记忆文件 `AGENTS.md`。
 
@@ -85,6 +91,7 @@ Y = LLM(Q, K, S, C, P, T | θ)
 ## 六、 技能
 
 可用技能由 deepagents SkillsMiddleware 自动管理，位于 /skills/nl2sql 目录：
+- nl2sql-clarification（Step 0 澄清门）
 - sql-of-thought（编排器）
 - nl2sql-knowledge-loader
 - nl2sql-schema-linking

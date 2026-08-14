@@ -15,12 +15,26 @@ description: "触发：用户提出数据库查询问题；用户希望将自然
 
 ---
 
+## Step 0：澄清检查（前置门槛，必做）
+
+收到用户问题后，**先**加载 `nl2sql-clarification` 技能做清晰度裁决，**再**进入策略决策：
+
+1. `load_skill("nl2sql-clarification")` → 按技能流程执行（get_context + get_instructions → verdict.json）
+2. 读取 `/workspace/nl2sql_process_data/{thread_id}/clarification/verdict.json`：
+   - `clear=true` → 继续下方「策略决策」
+   - `clear=false` → **停止**，按该技能格式输出 `[需要澄清]` 追问，本技能结束，**不得**进入策略决策或调用任何查询工具
+
+---
+
 ## 策略决策（入口）
 
 收到用户问题后，按以下优先级选择策略：
 
 ```
 用户问题
+    │
+    ├─ Step 0: 澄清门(nl2sql-clarification)  → clear=false 则输出 [需要澄清] 停止
+    │   └─ clear=true → 按下方优先级选策略
     │
     ├─ 匹配 Cube 指标? 
     │   → 策略C: Cube通道
