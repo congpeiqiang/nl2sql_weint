@@ -25,17 +25,23 @@ def _detect_provider(model_name: str, base_url: str) -> str:
     return "openai_compat"
 
 
-def create_model():
+def create_model(enable_thinking: bool | None = None):
     """根据 .env 配置自动创建对应模型实例。
 
     支持:
       - DeepSeek: 使用 ChatDeepSeek (langchain_deepseek)
       - Qwen / 其他 OpenAI-compatible: 使用 ChatOpenAI (langchain_openai)
+
+    Args:
+        enable_thinking: 是否开启模型思考（reasoning_content）。
+            - None: 用供应商默认（当前两个模型默认思考开）；
+            - True / False: 显式开启/关闭思考。由 ThinkingToggleMiddleware
+              按前端 configurable.enable_thinking 每次调用传入。
     """
     provider = _detect_provider(settings.LLM_MODEL, settings.LLM_BASE_URL)
     logger.info(
-        "[model] provider=%s, model=%s, base_url=%s",
-        provider, settings.LLM_MODEL, settings.LLM_BASE_URL,
+        "[model] provider=%s, model=%s, base_url=%s, enable_thinking=%s",
+        provider, settings.LLM_MODEL, settings.LLM_BASE_URL, enable_thinking,
     )
 
     common_kwargs = dict(
@@ -50,12 +56,24 @@ def create_model():
     try:
         if provider == "deepseek":
             from langchain_deepseek import ChatDeepSeek
+            # None 或 True → 思考开；False → 思考关（官方 thinking.type 开关，实测生效）
+            thinking_type = "enabled" if enable_thinking is not False else "disabled"
             model = ChatDeepSeek(
                 **common_kwargs,
-                extra_body={"thinking": {"type": "disabled"}},
+                extra_body={"thinking": {"type": thinking_type}},
+            )
+        elif provider == "qwen":
+            # Qwen：用 langchain_qwq.ChatQwen（BaseChatOpenAI 子类），
+            # 在 _convert_chunk_to_generation_chunk 捕获 reasoning_content 到 additional_kwargs，
+            # 供前端渲染"深度思考"折叠块。
+            # enable_thinking：None → 不设 extra_body → Qwen3 默认思考；True/False 显式开/关（实测生效）。
+            from langchain_qwq import ChatQwen
+            model = ChatQwen(
+                **common_kwargs,
+                enable_thinking=enable_thinking,
             )
         else:
-            # Qwen 及其他 OpenAI-compatible 模型
+            # 其他 OpenAI-compatible 模型（doubao 等），无思考捕获
             from langchain_openai import ChatOpenAI
             model = ChatOpenAI(**common_kwargs)
 

@@ -7,7 +7,7 @@ import agent.subagents.check_progress  # noqa: F401
 # 自动同步子智能体 todos 到主智能体 state（零前端改动方案）
 import agent.subagents.sync_launcher  # noqa: F401
 # 透传父 run 的 configurable 到异步子 agent run（前端选库 db_name 才能到达子 agent）
-import agent.middlewares.deepagents_async_config_patch  # noqa: F401
+import agent.middlewares.deepagents_async_config_patch
 
 from deepagents import create_deep_agent, AsyncSubAgent, DeepAgentState
 from deepagents.backends import FilesystemBackend, CompositeBackend, LocalShellBackend
@@ -18,6 +18,7 @@ from agent.tools.mcp_tool import main_tools as mcp_tools
 from agent.settings.setting import settings
 from agent.settings.file_permissions import FILE_PERMISSIONS
 from agent.middlewares.query_keywords import QueryKeywordsMiddleware
+from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
 from agent.middlewares.message_slimmer import MessageSlimmerMiddleware
 from agent.middlewares.current_db_context import CurrentDbContextMiddleware
 from typing import Annotated
@@ -102,6 +103,8 @@ skills_middleware = SkillsMiddleware(
 # 从运行时 context 读取前端传入的查询关键词，注入系统提示词，
 # 使 LLM 委派判断与前端拦截判断使用同一份关键词。
 query_keywords_middleware = QueryKeywordsMiddleware()
+# 前端「开启思考过程」开关 → 每次模型调用按 configurable.enable_thinking 重建模型
+thinking_toggle_middleware = ThinkingToggleMiddleware()
 # 方案 B L1：工具结果进入 checkpoint 前瘦身——超大结果落盘截断（head+tail 预览 + 路径指针）、
 # 完全重复结果去重为小占位。阈值/开关见 MessageSlimmerMiddleware 构造参数。
 message_slimmer = MessageSlimmerMiddleware(backend=composite_backend)
@@ -154,7 +157,7 @@ agent = create_deep_agent(
     tools=mcp_tools,
     subagents=[nl2sql_async],
     memory=["/workspace/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
-    middleware=[skills_middleware, query_keywords_middleware, message_slimmer, db_context_middleware, dynamic_prompt],
+    middleware=[skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, dynamic_prompt],
     backend=composite_backend,
     permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写
     system_prompt=SYSTEM_PROMPT,
