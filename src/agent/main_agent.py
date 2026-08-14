@@ -1,9 +1,4 @@
 """主智能体 — 异步子智能体架构。支持取消长时间运行的查询。"""
-import asyncio
-from typing import Dict, Any
-
-from langchain_core.messages import HumanMessage
-
 """主智能体 - 异步子智能体架构。"""
 from pathlib import Path
 
@@ -167,20 +162,4 @@ agent = create_deep_agent(
 ).with_config({"recursion_limit": 500})
 
 
-# ── 调用包装器 ──────────────────────────────────────────────────
-async def invoke_with_thread_id(state: Dict[str, Any], thread_id: str):
-    """
-    带 thread_id 的调用包装器
-    确保每个会话使用独立的数据存储
-    """
-    # 执行 Agent
-    result = await agent.ainvoke(
-        state,
-        config={"configurable": {"thread_id": thread_id}},
-    )
-
-    return result
 print(f"[MainAgent] ready", flush=True)
-
-# result = invoke_with_thread_id({"messages": HumanMessage("你好")}, "test")
-# print(asyncio.run(result))

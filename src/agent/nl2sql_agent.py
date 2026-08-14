@@ -2,9 +2,6 @@
 nl2sql 子智能体 — AsyncSubAgent 独立 graph。
 配置来源: subagents/configs/nl2sql.yaml。
 """
-from dataclasses import dataclass
-from typing import Any, Dict
-
 import yaml
 from pathlib import Path
 from deepagents import create_deep_agent
@@ -111,10 +108,6 @@ def dynamic_prompt(request: ModelRequest) -> str:
 
     return prompt
 
-@dataclass
-class Context:
-    thread_id: str = ""
-
 # ── 构建 Agent ─────────────────────────────────────────
 agent = create_deep_agent(
     model=deepseek_model,
@@ -131,29 +124,10 @@ agent = create_deep_agent(
     ],
     backend=file_backend,
     permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写（独立 graph，须单独传）
-    context_schema=Context,
     # 注意：不在此处硬编码 imdb——当前数据库由下方 dynamic_prompt 从 configurable
     # 动态注入（「查询通道路由」段），此处的"默认 imdb"会与注入冲突，
     # 导致切库后子 agent 仍按 imdb 执行（2026-08-11 实证）。
     system_prompt=system_prompt + "\n\n## 数据库\n当前数据库以 dynamic_prompt 注入的「查询通道路由」段为准，调用 run_sql / get_db_info 时按注入的 db_name 传参。",
 ).with_config({"recursion_limit": 500})
-
-
-
-# ── 调用包装器 ──────────────────────────────────────────────────
-async def invoke_with_thread_id(state: Dict[str, Any], thread_id: str):
-    """
-    带 thread_id 的调用包装器
-    """
-    # 设置 thread_id
-    skill_data_middleware.set_thread_id(thread_id)
-
-    # 执行 Agent
-    result = await agent.ainvoke(
-        state,
-        config={"configurable": {"thread_id": thread_id}},
-        context=Context(thread_id=thread_id)
-    )
-    return result
 
 print(f"[nl2sql_agent] loaded: {len(resolved_tools)} tools", flush=True)
