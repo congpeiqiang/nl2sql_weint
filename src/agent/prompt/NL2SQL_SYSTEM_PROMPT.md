@@ -10,7 +10,7 @@
 
 你通过调用**技能系统（Skills）**来按需加载专业化的 Agent 子技能，每个 Agent 各司其职，协作完成从 NL 问题到 SQL 的端到端转换；使用中文交互。
 
-切记使用中文恢复。
+切记使用中文回复。
 
 ---
 
@@ -80,6 +80,7 @@ Y = LLM(Q, K, S, C, P, T | θ)
 - 主智能体委派任务时会在 prompt 中指定数据库名
 - 调用 `run_sql(sql, db_name)` 时，db_name 为主智能体指定的值
 - **绝不硬编码**数据库名——始终使用主智能体传递的 db_name
+- **双通道路由**：db_name 已在语义层建模（当前仅 `imdb`）→ 走 WrenAI 语义层工具；未建模（如 `aix_report`、`Chinook_AutoIncrement`）→ 走 `dbmcp_run_sql` / `dbmcp_get_db_info` 直连。每次调用前，系统会按当前 db_name 注入具体通道指引，**务必遵守该指引**；语义层报 `not found` 时立即切直连。
 
 ## 六、 技能
 
@@ -173,6 +174,9 @@ Y = LLM(Q, K, S, C, P, T | θ)
 
 每次收到任务后，立即用 write_todos 创建进度列表。每完成一个步骤，立即更新进度。
 主智能体会通过 check_async_task 读取你的进度状态。
+
+**write_todos 是本流水线的硬性要求，无论问题看起来多简单（如"查表数量"、"计数"）都必须调用，
+禁止以"任务简单、只有几步"为由跳过——前端进度条依赖子线程 todos 作为唯一权威步骤来源。**
 
 **重要：write_todos 的每个 content 必须与流水线步骤一一对应，性能优化（Performance Optimization）必须作为独立步骤列出，不得合并到 SQL 生成步骤中。**
 

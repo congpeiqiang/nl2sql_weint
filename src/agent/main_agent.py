@@ -17,11 +17,14 @@ import agent.middlewares.deepagents_async_config_patch  # noqa: F401
 from deepagents import create_deep_agent, AsyncSubAgent, DeepAgentState
 from deepagents.backends import FilesystemBackend, CompositeBackend, LocalShellBackend
 from deepagents.middleware import SkillsMiddleware
+from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from agent.llms.model import deepseek_model
 from agent.tools.mcp_tool import main_tools as mcp_tools
 from agent.settings.setting import settings
+from agent.settings.file_permissions import FILE_PERMISSIONS
 from agent.middlewares.query_keywords import QueryKeywordsMiddleware
 from agent.middlewares.message_slimmer import MessageSlimmerMiddleware
+from agent.middlewares.current_db_context import CurrentDbContextMiddleware
 from typing import Annotated
 from typing_extensions import NotRequired
 
@@ -56,6 +59,44 @@ def _build_system_prompt() -> str:
 
 SYSTEM_PROMPT = _build_system_prompt()
 
+
+@dynamic_prompt
+def dynamic_prompt(request: ModelRequest) -> str:
+    """从 configurable 读当前数据库名并注入系统提示词。
+
+    主 agent 的 system prompt 是静态文件（MAIN_AGENT_PROMPT.md），不含 db_name。
+    前端切库后 configurable.db_name 是最新的，但主 agent LLM 读不到——委派子 agent 时
+    【数据库名称】会写错（默认 imdb）。本函数把当前库名动态注入，
+    保证 start_async_task 的 description 写对库名（与子 agent 的 dynamic_prompt 同构）。
+    """
+    # 用 .text 属性取纯文本（content 可能是 str 也可能是 block 列表，
+    # 子 agent 是列表故用 content[-1]["text"]，主 agent 是 str 会炸）。
+    prompt = getattr(request.system_message, "text", None) or ""
+    if not prompt:
+        return ""
+    db_name = ""
+    try:
+        from langgraph.config import get_config as _cfg
+        if _cfg is not None:
+            db_name = (_cfg().get("configurable", {}) or {}).get("db_name", "") or ""
+    except Exception:  # noqa: BLE001  读取失败则走默认
+        db_name = ""
+    if db_name:
+        # 前置到提示词最顶部（实证 2026-08-11：追加在末尾时，模型对对话历史/总结里
+        # 自己上轮说过的库名信任度更高，切库后仍按旧库委派——clickhouse→imdb 回归）。
+        # 本段给出最高优先级、可覆盖历史陈旧库名的陈述。
+        db_section = (
+            f"## 当前数据库（configurable 动态注入）— 最高优先级\n"
+            f"当前用户选中的数据库是 `{db_name}`。\n"
+            "无论对话历史或总结中如何描述数据库，一律以本段为准；"
+            "历史中提到的其他库名已过时，忽略。\n"
+            "委派 nl2sql 时，start_async_task 的 description 中【数据库名称】必须写 "
+            f"`{db_name}`，禁止使用其他库名或默认值（尤其禁止写 imdb）。\n\n"
+        )
+        prompt = db_section + prompt
+    return prompt
+
+
 file_backend = FilesystemBackend(root_dir=base_dir, virtual_mode=True)
 shell_backend = LocalShellBackend(root_dir=Path(base_dir) / "workspace", inherit_env=True, virtual_mode=True)
 composite_backend = CompositeBackend(default=shell_backend, routes={"/": file_backend})
@@ -69,6 +110,9 @@ query_keywords_middleware = QueryKeywordsMiddleware()
 # 方案 B L1：工具结果进入 checkpoint 前瘦身——超大结果落盘截断（head+tail 预览 + 路径指针）、
 # 完全重复结果去重为小占位。阈值/开关见 MessageSlimmerMiddleware 构造参数。
 message_slimmer = MessageSlimmerMiddleware(backend=composite_backend)
+# 把当前库名（configurable.db_name）注入最新用户消息，作为当轮最高优先级信号，
+# 防止 LLM 被对话历史/总结里过时的库名误导（切库后仍按旧库委派）。
+db_context_middleware = CurrentDbContextMiddleware()
 
 nl2sql_async = AsyncSubAgent(
     name="nl2sql",
@@ -115,8 +159,9 @@ agent = create_deep_agent(
     tools=mcp_tools,
     subagents=[nl2sql_async],
     memory=["/workspace/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
-    middleware=[skills_middleware, query_keywords_middleware, message_slimmer],
+    middleware=[skills_middleware, query_keywords_middleware, message_slimmer, db_context_middleware, dynamic_prompt],
     backend=composite_backend,
+    permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写
     system_prompt=SYSTEM_PROMPT,
     state_schema=MainAgentState,
 ).with_config({"recursion_limit": 500})

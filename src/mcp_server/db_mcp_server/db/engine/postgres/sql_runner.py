@@ -3,7 +3,7 @@
 from typing import Optional
 import pandas as pd
 
-from db.sql_runner import SqlRunner, RunSqlToolArgs, ToolContext
+from mcp_server.db_mcp_server.db.sql_runner import SqlRunner, RunSqlToolArgs, ToolContext
 # fmt: off  MC80OmFIVnBZMlhrdUp2bG43bmx2TG82ZVVkR05nPT06ZmIwMDhiMmE=
 
 

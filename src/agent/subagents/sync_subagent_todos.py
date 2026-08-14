@@ -169,8 +169,12 @@ async def _async_sync_loop(
     query_headers_written = False  # 是否已写入 query_headers 到 state
     active_queries_written = False  # 是否已写入 active_queries=true 到 state
     active_queries_cleared = False  # 是否已写入 active_queries=false 到 state
+    async_tasks_written = False  # 是否已写入 async_tasks 终止态（主线程 in-flight 时会多次被拒，需重试）
+    completion_write_retries = 0  # async_tasks 写入失败重试次数
+    completion_started_at: Optional[float] = None  # 进入完成分支的时间点（重试上限判定起点）
     POST_COMPLETE_MAX_CYCLES = 20           # 完成后继续监控 10s (20 × 0.5s) 让耗时稳定
     STALE_RUN_TIMEOUT = 300                 # 子 run 运行时长上限：超过视为卡死，强制结束（兜底）
+    COMPLETE_WRITE_MAX_SECONDS = 300        # 完成态写入重试上限：主线程持续 in-flight 时放弃（防僵尸线程）
 
     # 主智能体步骤耗时追踪（保留原逻辑，仅用于日志/展示，不写回 state）
     prev_main_statuses: dict = {}   # {content: status} 上一次各步骤状态
@@ -336,11 +340,18 @@ async def _async_sync_loop(
                         len(current_main_todos),
                     )
 
-            # ── 4. 子智能体完成后：写最终步骤 + async_tasks 单 key + 结束标记 ──
+            # ── 4. 子智能体完成后：写最终步骤 + async_tasks + active_queries=false ──
+            # 注意：主线程在 in-flight run（前一个任务的自动续跑/用户消息处理）期间，
+            # update_state 会被 LangGraph 拒绝（"has in-flight runs"）。async_tasks 终止态
+            # 一旦写不进 state，前端自动续跑就永远看不到该任务（丢失 bug）。因此
+            # async_tasks / active_queries=false 必须**重试到成功**，而不是一次性 try/except。
             else:
+                if completion_started_at is None:
+                    completion_started_at = time.monotonic()
+
+                # 一次性快照最终步骤 + 写最终 completed steps（best-effort，不重试）
                 if not has_notified_completion:
                     has_notified_completion = True
-                    # 快照子智能体最终步骤（含耗时）
                     final_sub_todos = await _extract_subagent_todos(
                         client, sub_thread_id
                     )
@@ -348,7 +359,6 @@ async def _async_sync_loop(
                         "[sync] 快照最终步骤: %d 项",
                         len(final_sub_todos) if final_sub_todos else 0,
                     )
-                    # 写最终 completed steps 到 subagent_steps_map[task_id]
                     task_prefix = sub_thread_id[:8]
                     if final_sub_todos:
                         completed_steps = [
@@ -376,41 +386,69 @@ async def _async_sync_loop(
                         except Exception as e:
                             _logger.warning("[sync] 写入最终 steps 失败: %s", e)
 
-                    # 写 async_tasks 单 key（基于传入 task 字典 + run_status，无读-改-写竞态）
+                # 写 async_tasks 单 key（基于传入 task 字典 + run_status，无读-改-写竞态）。
+                # 失败持续重试，直到主线程 in-flight run 结束写入成功，或超上限放弃。
+                if not async_tasks_written:
                     try:
                         base = dict(task or {})
                         base["task_id"] = sub_thread_id
                         base["agent_name"] = agent_name
                         base["status"] = run_status  # "success" / "error"
-                        import time as _time2
-                        now_str = _time2.strftime(
-                            "%Y-%m-%dT%H:%M:%SZ", _time2.gmtime()
+                        now_str = time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                         )
                         base["last_checked_at"] = now_str
                         base["last_updated_at"] = now_str
                         await asyncio.to_thread(_sync_update_state, main_thread_id, {"async_tasks": {sub_thread_id: base}})
+                        async_tasks_written = True
                         _logger.info(
-                            "[sync] 写 async_tasks[%s] 状态=%s", sub_thread_id[:8], run_status
+                            "[sync] 写 async_tasks[%s] 状态=%s (重试 %d 次)",
+                            sub_thread_id[:8], run_status, completion_write_retries,
                         )
                     except Exception as e:
-                        _logger.warning("[sync] 更新 async_tasks 失败: %s", e)
+                        completion_write_retries += 1
+                        # 限频告警：首次与每第 10 次失败记 WARNING，避免主线程长时间
+                        # in-flight 时高频重试刷屏（成功时成功日志会带总重试次数）
+                        if (
+                            completion_write_retries == 1
+                            or completion_write_retries % 10 == 0
+                        ):
+                            _logger.warning(
+                                "[sync] 写 async_tasks[%s] 失败(第%d次,将重试): %s",
+                                sub_thread_id[:8],
+                                completion_write_retries,
+                                str(e)[:100],
+                            )
+                        # 主线程忙时退避 2s，避免高频打 API；等待 in-flight run 结束
+                        await asyncio.sleep(2)
 
-                    # 清除本任务运行标记（固定宽限后退出，不等主线程 todos）
+                # 清除本任务运行标记（同样可能被 in-flight 拦截，跟随重试）
+                if not active_queries_cleared:
                     try:
                         await asyncio.to_thread(_sync_update_state, main_thread_id, {"active_queries": {sub_thread_id: False}})
                         active_queries_cleared = True
                         _logger.info("[sync] 写 active_queries[%s]=false", sub_thread_id[:8])
                     except Exception as e:
-                        _logger.warning("[sync] 写 active_queries=false 失败: %s", e)
+                        _logger.warning(
+                            "[sync] 写 active_queries[%s]=false 失败: %s",
+                            sub_thread_id[:8], str(e)[:100],
+                        )
 
-                    _logger.info("[sync] 子智能体完成，进入固定宽限期")
-
-                # 后续周期：固定宽限计数后退出（不再依赖主线程 todos 完成，
-                # 因为并发时那是全局条件，会被其他任务拖住）
-                post_complete_cycles += 1
-                if post_complete_cycles >= POST_COMPLETE_MAX_CYCLES:
-                    _logger.info(
-                        "[sync] 退出: cycles=%d", post_complete_cycles
+                # async_tasks + active_queries=false 都落地后，进入固定宽限期再退出
+                if async_tasks_written and active_queries_cleared:
+                    post_complete_cycles += 1
+                    if post_complete_cycles >= POST_COMPLETE_MAX_CYCLES:
+                        _logger.info(
+                            "[sync] 退出: cycles=%d", post_complete_cycles
+                        )
+                        break
+                elif (time.monotonic() - completion_started_at) > COMPLETE_WRITE_MAX_SECONDS:
+                    # 兜底：主线程长时间 in-flight（如长查询）时放弃重试，避免僵尸线程。
+                    # 前端会因 active_queries 仍 true 持续轮询，但 async_tasks 缺失时仍不自动续跑；
+                    # 这是极端场景的降级（至少不占线程）。
+                    _logger.error(
+                        "[sync] 完成写入超过 %ds 仍未成功(主线程持续 in-flight?)，放弃: %s",
+                        COMPLETE_WRITE_MAX_SECONDS, sub_thread_id[:8],
                     )
                     break
 

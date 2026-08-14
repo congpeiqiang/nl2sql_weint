@@ -22,13 +22,31 @@ _PATCHED = False
 _EXCLUDED_KEYS = ("thread_id", "checkpoint_id", "checkpoint_ns")
 
 
+def _is_internal_key(key: str) -> bool:
+    """判断是否为 langgraph 运行时内部注入键。
+
+    真实运行时 get_config().configurable 会混入大量 __pregel_* 运行时对象
+    （__pregel_node_finished 是函数、__pregel_runtime/read/call 是 Runtime/partial 等），
+    全部不可 JSON 序列化——原样注入 client.runs.create 会报
+    "Type is not JSON serializable: function"。故只透传用户自定义键
+    （db_name / query_keywords 等），丢弃 __ 前缀与 langgraph_ 前缀的内部键。
+    """
+    if key in _EXCLUDED_KEYS:
+        return True
+    if key.startswith("__"):
+        return True
+    if key.startswith("langgraph_"):
+        return True
+    return False
+
+
 def _current_configurable() -> dict:
-    """读取当前 run（主 agent）的 configurable，过滤掉线程状态键。"""
+    """读取当前 run（主 agent）的 configurable，过滤运行时内部键。"""
     try:
         from langgraph.config import get_config as _lg_get_config
         cfg = _lg_get_config()
         configurable = cfg.get("configurable", {}) or {}
-        return {k: v for k, v in configurable.items() if k not in _EXCLUDED_KEYS}
+        return {k: v for k, v in configurable.items() if not _is_internal_key(k)}
     except Exception:
         return {}
 

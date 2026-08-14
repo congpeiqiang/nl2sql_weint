@@ -10,6 +10,15 @@ import sys
 import json
 from pathlib import Path
 
+# ── 文件日志（自动轮转、落盘固定路径）─────────────────────────
+# 日志目录固定在项目根下 logs/，无论从哪个工作目录启动都解析到同一位置。
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_FILE = LOG_DIR / "agent-server.log"
+# 轮转：每天 0 点轮转一个文件，保留最近 7 个历史文件 + 当前文件
+LOG_WHEN = "midnight"
+LOG_INTERVAL = 1
+LOG_BACKUP_COUNT = 7
+
 def setup_environment():
     """Setup required environment variables"""
     # Add src to Python path
@@ -115,12 +124,17 @@ def main():
     # 就绪门控：验证关键依赖
     preflight_check()
 
+    # 文件日志目录：确保存在（uvicorn log_config 的 FileHandler 需要）
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
     # Print server information
     print("\n" + "="*60)
     print("📍 Server URL: http://localhost:2026")
     print("📚 API Documentation: http://localhost:2026/docs")
     print("🎨 Studio UI: http://localhost:2026/ui")
     print("💚 Health Check: http://localhost:2026/ok")
+    print(f"📜 File Log: {LOG_FILE}")
+    print(f"   (每天轮转，保留最近 {LOG_BACKUP_COUNT} 个历史文件)")
     print("="*60)
     
     try:
@@ -147,11 +161,21 @@ def main():
                         "formatter": "default",
                         "class": "logging.StreamHandler",
                         "stream": "ext://sys.stdout",
+                    },
+                    "file": {
+                        "formatter": "default",
+                        "class": "logging.handlers.TimedRotatingFileHandler",
+                        "filename": str(LOG_FILE),
+                        "when": LOG_WHEN,
+                        "interval": LOG_INTERVAL,
+                        "backupCount": LOG_BACKUP_COUNT,
+                        "encoding": "utf-8",
+                        "delay": True,
                     }
                 },
                 "root": {
                     "level": "INFO",
-                    "handlers": ["default"],
+                    "handlers": ["default", "file"],
                 },
                 "loggers": {
                     "uvicorn": {"level": "INFO"},

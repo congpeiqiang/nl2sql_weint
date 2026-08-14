@@ -61,9 +61,15 @@ class Settings(BaseSettings):
     LANGSMITH_API_KEY: str = os.getenv("LANGSMITH_API_KEY", "")
     LANGSMITH_PROJECT: str = os.getenv("LANGSMITH_PROJECT", "default")
 
-    # Wren 项目地址
-    WREN_PROJECT_PATH: str = os.getenv("WREN_PROJECT_PATH", None)
-    WREN_BIN_PATH: str = os.getenv("WREN_BIN_PATH", None)
+    # Wren 项目地址（缺省用空串而非 None，避免 pydantic str 字段收到 None 直接崩；
+    # 语义层 default 项目未配时走显式 wren_project，见 semantic_db._scan_legacy）
+    WREN_PROJECT_PATH: str = os.getenv("WREN_PROJECT_PATH", "")
+    WREN_BIN_PATH: str = os.getenv("WREN_BIN_PATH", "")
+
+    # db_mcp_server 直连通道（子智能体第二路 MCP：dbmcp_run_sql，按 db_name 路由）
+    NL2SQL_DBMCP_ENABLED: bool = os.getenv("NL2SQL_DBMCP_ENABLED", "1").lower() not in (
+        "0", "false", "no", "off"
+    )
 
     # 图表引擎选择（semiotic / echarts，二选一）
     CHART_ENGINE: str = os.getenv("CHART_ENGINE", "semiotic")

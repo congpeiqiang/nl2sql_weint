@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "databases": [
+    {
+      "name": "aix_report",
+      "db_type": "mysql",
+      "host": "mysql-master",
+      "port": 3306,
+      "database": "aix_report",
+      "user": "aoi-dev",
+      "password": "enc:Fp3AF4tsR+2JRu4/reWB7ywJ6usai2a4WKN2cOy39E/ocXq1WRNnVQ==",
+      "extra_config": {},
+      "password_configured": false
+    },
+    {
+      "name": "Chinook_AutoIncrement",
+      "db_type": "mysql",
+      "host": "mysql-master",
+      "port": 3306,
+      "database": "Chinook_AutoIncrement",
+      "user": "aoi-dev",
+      "password": "enc:fbe73cKaQHK/E+fg1nLz9pxPAkGB11vLLcvhKdJ5nslW5S5+HSZVGQ==",
+      "extra_config": {},
+      "password_configured": true
+    },
+    {
+      "name": "imdb",
+      "db_type": "mysql",
+      "host": "mysql-master",
+      "port": 3306,
+      "database": "imdb",
+      "user": "aoi-dev",
+      "password": "enc:Hkeaf3HjYw6vjiXdsQnSp6zs9fgusy/7x9jpw4mbu4OEeX0aN6+xqA==",
+      "extra_config": {},
+      "password_configured": true,
+      "wren_project": "D:\\code_work_space\\llm\\nl2sql\\src\\agent\\workspace\\imdb_project"
+    },
+    {
+      "name": "clickhouse-aix",
+      "db_type": "clickhouse",
+      "host": "clickhouse",
+      "port": 8123,
+      "database": "aix",
+      "user": "weint",
+      "password": "enc:LKo+wrrNmPvpOLkrhiAE7nflrUWNltgSvM80Wgjqczjt63tt",
+      "extra_config": {},
+      "wren_project": "D:\\code_work_space\\llm\\nl2sql\\src\\agent\\workspace\\aix_project",
+      "password_configured": true
+    }
+  ]
+}

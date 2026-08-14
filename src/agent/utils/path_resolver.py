@@ -6,6 +6,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 from agent.settings.setting import settings
+from agent.utils.semantic_db import get_detector
 
 # 模块顶部导入 langgraph.config（而非每次工具调用动态 import）：
 # 动态导入会触发整个 langgraph 包加载（实测首次 ~2.4s），拖慢每次工具调用。
@@ -535,10 +536,15 @@ def _sanitize_semiotic_result(result: Any, is_chart: bool) -> Any:
 
 
 def _inject_db_name(tool_name: str, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
-    """将前端选择的 db_name 从 LangGraph configurable 注入到 run_sql 工具调用中。"""
-    # 子 agent 工具带 MCP 前缀（wrenai_run_sql / dbmcp_run_sql 等），
-    # 用子串匹配而非精确相等，保证注入对所有 run_sql 变体生效。
-    if "run_sql" not in tool_name:
+    """将前端选择的 db_name 从 LangGraph configurable 注入到 dbmcp 直连工具调用中。"""
+    # 仅 dbmcp 直连工具需要 db_name（按 db_name 路由到对应库的 runner）。
+    # wrenai 语义层工具已绑定专属 server（工具名带库名前缀 wrenai_<库名>_），
+    # 不注入 db_name——避免多余参数/语义歧义；图表等工具同样跳过。
+    if not tool_name.startswith("dbmcp_"):
+        return args, kwargs
+    # 覆盖 run_sql（执行查询）与 get_db_info（表清单，"有多少表"走它）——
+    # 若 LLM 省略 db_name，需从 configurable 注入，否则会落到默认库（imdb）。
+    if "run_sql" not in tool_name and "get_db_info" not in tool_name:
         return args, kwargs
 
     # 检查参数中是否已有 db_name
@@ -559,6 +565,20 @@ def _inject_db_name(tool_name: str, args: tuple, kwargs: dict) -> tuple[tuple, d
                 else:
                     kwargs = {**kwargs, "db_name": db_name}
     except Exception:
+        pass
+
+    # ── 语义层路由辅助（D2 硬需求）：记录通道选择，供排障 ──
+    # 规则：已建模库应走 wrenai_<库名>_run_sql；未建模库应走 dbmcp_run_sql 直连。
+    # wrenai 工具因 server 绑定项目不再到达本函数；这里只告警 dbmcp 收到已建模库
+    # （LLM 选择直连语义层库，通常应改用 wrenai 工具）。不做强制拦截
+    # （LLM 可能有意走直连做 DDL/DML），只打日志暴露路由偏差。
+    try:
+        if kwargs.get("db_name") and get_detector().is_modeled(kwargs["db_name"]):
+            _log.warning(
+                "[DB_ROUTE] dbmcp_run_sql 收到已建模库 db_name=%s（语义层库建议 wrenai_<库名>_run_sql）",
+                kwargs["db_name"],
+            )
+    except Exception:  # noqa: BLE001  semantic 检测失败不影响注入
         pass
 
     return args, kwargs
@@ -685,6 +705,9 @@ def _pack_semiotic_props(kwargs: dict) -> dict:
 # 值可调：run_sql 走 WrenAI 数据库，容忍真实长查询（300s）；
 # 文件类工具 1 分钟足够；其余默认 120s。None / 0 表示不超时。
 _TOOL_TIMEOUTS = {
+    # 注：wrenai_run_sql / run_sql 两个精确 key 是单库时期遗留。
+    # 多库 server 化后语义层工具名为 wrenai_<库名>_run_sql，由
+    # _tool_timeout_for 的 startswith("wrenai_") 前缀判断覆盖（300s）。
     "wrenai_run_sql": 300,
     "run_sql": 300,
     "read_file": 60,
@@ -702,6 +725,9 @@ _TOOL_TIMEOUT_MSG = "工具调用超时（{timeout}s）。可能原因：SQL 复
 
 def _tool_timeout_for(name: str) -> int | None:
     """按工具名取超时秒数；None/0 表示不超时。"""
+    # 语义层 run_sql 变体（wrenai_<库名>_run_sql）容忍真实长查询 300s
+    if name.startswith("wrenai_") and "run_sql" in name:
+        return 300
     t = _TOOL_TIMEOUTS.get(name, _TOOL_TIMEOUTS.get("default"))
     return t if t and t > 0 else None
 
@@ -749,7 +775,11 @@ def wrap_tool(tool: Any) -> Any:
             kwargs.pop("run_manager", None)
             new_args, new_kwargs = _resolve_args(args, kwargs)
             new_args, new_kwargs = _inject_db_name(tool.name, new_args, new_kwargs)
-            new_kwargs = _pack_chart_props(new_kwargs)
+            # 仅图表工具打包 props / 注入 outputType。切勿对 DB 工具（dbmcp_* / wrenai_*）
+            # 注入 outputType——会被 args_schema 的 extra=forbid 校验拒绝
+            # （"Unexpected keyword argument: outputType='option'"），导致子 agent 所有查询工具失效。
+            if is_chart:
+                new_kwargs = _pack_chart_props(new_kwargs)
             timeout = _tool_timeout_for(tool.name)
             try:
                 if timeout is not None:
@@ -785,7 +815,9 @@ def wrap_tool(tool: Any) -> Any:
             _log.info(f"[_arun] {tool.name} called with args={args}")
             new_args, new_kwargs = _resolve_args(args, kwargs)
             new_args, new_kwargs = _inject_db_name(tool.name, new_args, new_kwargs)
-            new_kwargs = _pack_chart_props(new_kwargs)
+            # 仅图表工具注入 outputType（与同步路径一致），DB 工具不注入。
+            if is_chart:
+                new_kwargs = _pack_chart_props(new_kwargs)
             _log.warning(
                 f"[_arun] {tool.name} FINAL: component={new_kwargs.get('component')}, "
                 f"props_keys={list(new_kwargs.get('props', {}).keys()) if isinstance(new_kwargs.get('props'), dict) else 'N/A'}, "

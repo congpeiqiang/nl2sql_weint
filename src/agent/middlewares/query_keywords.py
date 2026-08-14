@@ -19,8 +19,11 @@ _logger = logging.getLogger(__name__)
 ContextT = TypeVar("ContextT")
 ResponseT = TypeVar("ResponseT")
 
-# MAIN_AGENT_PROMPT.md 中「数据查询触发关键词」行的标记，用于定位并替换
-_KEYWORDS_MARKER = "**触发关键词**:"
+# MAIN_AGENT_PROMPT.md 中「数据查询触发关键词」行的标记，用于定位并替换。
+# 注意：必须带【数据查询】限定，只匹配数据查询段的触发词行——
+# 文档处理/报告生成/图表可视化段的 `**触发关键词**:`（无限定）不能被替换，
+# 否则用户设置查询关键词会覆盖其他三类意图的触发词，破坏意图识别。
+_KEYWORDS_MARKER = "**触发关键词**【数据查询】:"
 # 默认关键词（前端未传时兜底，与 MAIN_AGENT_PROMPT.md 保持一致）
 _DEFAULT_KEYWORDS = "查询、统计、分析、多少、列表、汇总、排名、占比、趋势"
 
@@ -39,18 +42,31 @@ class QueryKeywordsMiddleware(AgentMiddleware):
     # ── 工具方法 ──────────────────────────────────────────────
 
     def _resolve_keywords(self, request: ModelRequest[ContextT]) -> str:
-        """从运行时 config 读取前端传入的查询关键词，缺失时回退默认。"""
+        """从运行时 config 读取前端传入的查询关键词，缺失时回退默认。
+
+        注：langchain 官方明确 Runtime 不含 config——request.runtime.config 恒为空
+        dict，读不到 configurable（实证 2026-08-11：前端传了 query_keywords 仍注入默认）。
+        必须走 langgraph.config.get_config()（与 main_agent.dynamic_prompt 同一路径）。
+        """
+        configurable = {}
         try:
-            runtime = getattr(request, "runtime", None)
-            config = getattr(runtime, "config", None) or {}
-            configurable = config.get("configurable") or {}
-            kw = configurable.get("query_keywords")
-            if isinstance(kw, (list, tuple)) and kw:
-                return "、".join(str(k) for k in kw if str(k).strip())
-            if isinstance(kw, str) and kw.strip():
-                return kw
-        except Exception as e:
-            _logger.debug("[QueryKeywords] 读取 configurable 失败: %s", e)
+            from langgraph.config import get_config as _cfg
+            if _cfg is not None:
+                configurable = (_cfg().get("configurable", {}) or {})
+        except Exception:  # noqa: BLE001
+            pass
+        if not configurable:
+            try:
+                runtime = getattr(request, "runtime", None)
+                config = getattr(runtime, "config", None) or {}
+                configurable = config.get("configurable") or {}
+            except Exception:  # noqa: BLE001
+                configurable = {}
+        kw = configurable.get("query_keywords")
+        if isinstance(kw, (list, tuple)) and kw:
+            return "、".join(str(k) for k in kw if str(k).strip())
+        if isinstance(kw, str) and kw.strip():
+            return kw
         return self.default_keywords
 
     def _inject_keywords(

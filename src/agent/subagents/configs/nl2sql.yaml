@@ -28,8 +28,8 @@ tools:
 #  - repairChartConfig # 自动修复常见配置错误
 #  - proposeChartVariants # 基于当前配置生成多种变体方案
 
-#  - run_sql             # 执行 SQL 查询（直连数据库）
-#  - get_db_info         # 获取数据库信息
+  # db_mcp_server 直连工具（未建模库走直连：dbmcp_get_db_info / dbmcp_run_sql）
+  - get_db_info          # 获取指定数据库的表清单（直连，用于未建模库的 schema 发现）
 
   # WrenAI MCP 工具（通过 wren serve mcp 加载）
   - run_sql             # 通过 Wren 语义层执行 SQL 查询（默认 limit=1000，最大 10000）

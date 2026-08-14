@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import asyncio
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from contextlib import redirect_stdout, redirect_stderr
 import io
@@ -26,6 +27,10 @@ from agent.utils.path_resolver import wrap_tool
 from agent.settings.setting import settings
 
 _logger = logging.getLogger(__name__)
+
+# 仓库根目录（src/agent/tools/mcp_tool.py → parents[3] 即仓库根）
+# 用于 db_mcp_server 子进程的 PYTHONPATH，保证子进程能 import mcp_server 包
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # ── 全局状态 ────────────────────────────────────────────────────
 _main_tools: Optional[List] = None  # 主智能体工具 (mcp-server-chart)
@@ -132,22 +137,63 @@ def _get_main_server_config() -> Dict[str, Any]:
 
 # ── 3. 获取子智能体配置 ──────────────────────────────────
 def _get_sub_server_config() -> Dict[str, Any]:
-    """获取子智能体的 MCP 服务器配置（wrenai）"""
-    return {
-        "wrenai": {
+    """获取子智能体的 MCP 服务器配置。
+
+    两路通道（LLM 按工具描述选择）：
+    - ``wrenai_<库名>``：语义层——每个已建模库（db_config 配了 wren_project，
+      或默认 WREN_PROJECT_PATH 项目里建模的库）一个专属 server，工具前缀
+      ``wrenai_<库名>_``（如 ``wrenai_imdb_run_sql``）。
+    - ``dbmcp``：db_mcp_server 直连（按 db_name 路由到对应库的 runner），
+      工具前缀 ``dbmcp_``。由 .env 的 ``NL2SQL_DBMCP_ENABLED`` 控制（默认开）。
+
+    注意：server 在进程启动时按 db_config 构建（工具单例缓存），前端新增/修改
+    wren_project 后需重启后端生效。
+    """
+    from agent.utils.semantic_db import get_detector, wrenai_server_name
+
+    detector = get_detector()
+    servers: Dict[str, Any] = {}
+    for db_name in sorted(detector.discover()):
+        project = detector.project_path_for(db_name)
+        if not project:
+            continue
+        server_name = wrenai_server_name(db_name)
+        # 冲突兜底：sanitize 后撞名（极罕见）时告警跳过，避免 tool 前缀歧义
+        if server_name in servers:
+            _logger.warning("[mcp] wrenai server 名冲突: %r 跳过 %r", server_name, db_name)
+            continue
+        servers[server_name] = {
             "transport": "stdio",
             "command": settings.WREN_BIN_PATH,
             "args": [
                 "serve", "mcp",
-                "--project", settings.WREN_PROJECT_PATH
+                "--project", project
             ],
             "env": {
                 **_UTF8_ENV,
                 "WREN_LOG_LEVEL": "ERROR",
                 "PYTHONUNBUFFERED": "1",
             }
-        },
-    }
+        }
+
+    if settings.NL2SQL_DBMCP_ENABLED:
+        servers["dbmcp"] = {
+            "transport": "stdio",
+            "command": sys.executable,
+            "args": [
+                "-m", "mcp_server.db_mcp_server.db.db_server",
+                "--transport", "stdio",
+            ],
+            "env": {
+                **_UTF8_ENV,
+                # 保证子进程能 import mcp_server 包（父进程 src 不一定在 PYTHONPATH）
+                "PYTHONPATH": os.pathsep.join(
+                    filter(None, [str(_REPO_ROOT / "src"), os.environ.get("PYTHONPATH", "")])
+                ),
+            },
+        }
+
+    return servers
 
 
 # ── 4. 加载主智能体工具 ──────────────────────────────────

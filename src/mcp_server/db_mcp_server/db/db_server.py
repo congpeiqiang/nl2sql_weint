@@ -30,9 +30,35 @@ from mcp_server.db_mcp_server.db.config import McpSqlConfig
 from mcp_server.db_mcp_server.db.multi_sql import split_sql_statements, combine_multi_results, df_to_result as _h_df_to_result
 
 
+def _apply_default_limit(stmt: str, limit: int) -> str:
+    """给 SELECT/WITH 语句追加 LIMIT（服务端默认行数上限）。
+
+    与语义层 run_sql 契约一致：SQL 已含 LIMIT 时跳过；非 SELECT 语句不动。
+    """
+    if not limit or limit <= 0:
+        return stmt
+    s = stmt.strip()
+    if not s:
+        return s
+    upper = s.upper()
+    if upper.startswith(("SELECT", "WITH")) and "LIMIT" not in upper:
+        return f"{s} LIMIT {int(limit)}"
+    return s
+
+
+# 各 db_type 获取表清单的 SQL（postgres 需要 information_schema 查询）。
+_TABLE_LIST_SQL: Dict[str, str] = {
+    "mysql": "SHOW TABLES",
+    "clickhouse": "SHOW TABLES",
+    "sqlite": "SELECT name AS name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    "postgres": "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+}
+
 # Mapping of database type names to their runner classes.
 _RUNNER_REGISTRY: Dict[str, str] = {
     "mysql": "mcp_server.db_mcp_server.db.engine.mysql.sql_runner.MySQLRunner",
+    "clickhouse": "mcp_server.db_mcp_server.db.engine.clickhouse.sql_runner.ClickHouseRunner",
+    "postgres": "mcp_server.db_mcp_server.db.engine.postgres.sql_runner.PostgresRunner",
     "sqlite": "mcp_server.db_mcp_server.db.engine.sqlite.sql_runner.SqliteRunner",
 }
 
@@ -83,8 +109,12 @@ class NL2SQLMcpSqlServer:
 
     def _register_tools(self) -> None:
         @self.mcp.tool()
-        async def run_sql(sql: str, db_name: str = "") -> Dict[str, Any]:
-            """执行一条或多条 SQL 语句（以分号 `;` 分隔）。
+        async def run_sql(sql: str, db_name: str = "", limit: int = 1000) -> Dict[str, Any]:
+            """【直连通道】直接连接指定的数据库执行 SQL。
+
+            与语义层工具（wrenai_run_sql）不同，本工具不经过语义层，
+            直接连接 db_name 指向的数据库执行 SQL——适用于未在语义层建模的库，
+            或需要直接 SQL 访问（DDL/DML/多语句）的场景。
 
             支持场景：
             - 单条 SELECT / INSERT / UPDATE / DELETE
@@ -93,6 +123,9 @@ class NL2SQLMcpSqlServer:
 
             Args:
                 sql: SQL 语句，多条语句以分号 `;` 分隔
+                db_name: 数据库名（前端「数据库」下拉框选中的配置名，必须已配置）
+                limit: SELECT 语句的默认返回行数上限（与语义层 run_sql 契约一致，
+                    服务端自动给 SELECT 追加 LIMIT；SQL 已含 LIMIT 时不重复追加）。
 
             Returns:
                 包含 columns、rows、row_count 的字典。
@@ -103,6 +136,7 @@ class NL2SQLMcpSqlServer:
 
             all_results: list = []
             for stmt in statements:
+                stmt = _apply_default_limit(stmt, limit)
                 args = RunSqlToolArgs(sql=stmt)
                 df = await runner.run_sql(args, self._context)
                 all_results.append((stmt, df))
@@ -110,12 +144,30 @@ class NL2SQLMcpSqlServer:
             return combine_multi_results(all_results)
 
         @self.mcp.tool()
-        def get_db_info() -> Dict[str, Any]:
-            """Return information about the currently configured database."""
-            return {
-                "db_type": self._config.db_type,
-                "config_keys": list(self._config.config.keys()),
+        async def get_db_info(db_name: str = "") -> Dict[str, Any]:
+            """返回指定数据库的连接信息与表清单（子 agent 建查询用）。
+
+            Args:
+                db_name: 前端选中的数据库名（db_config 中的 name）
+
+            Returns:
+                db_name、db_type 与 tables（表名列表）。表清单查询失败时
+                附 tables_error 字段，不抛异常。
+            """
+            runner = self._get_runner(db_name)
+            cfg = McpSqlConfig.from_env(db_name)
+            info: Dict[str, Any] = {
+                "db_name": db_name,
+                "db_type": cfg.db_type,
+                "tables": [],
             }
+            try:
+                list_sql = _TABLE_LIST_SQL.get(cfg.db_type, "SHOW TABLES")
+                df = await runner.run_sql(RunSqlToolArgs(sql=list_sql), self._context)
+                info["tables"] = [str(v) for v in df.iloc[:, 0].tolist()]
+            except Exception as e:  # noqa: BLE001
+                info["tables_error"] = f"{type(e).__name__}: {e}"
+            return info
 
     @property
     def http_app(self):
@@ -174,16 +226,19 @@ def main(transport: str, host: str, port: int) -> None:
     server = NL2SQLMcpSqlServer()
 
     if transport == "stdio":
-        click.echo("🚀 Starting NL2SQL MCP SQL server (stdio)")
+        # stdio 模式下 stdout 是 JSONRPC 通道，横幅必须走 stderr，否则会破坏协议帧
+        click.echo("[NL2SQL-dbmcp] starting SQL server (stdio)", err=True)
         server.run(transport="stdio")
     elif transport == "sse":
         click.echo(
-            f"🚀 Starting NL2SQL MCP SQL server (SSE) on http://{host}:{port}/sse"
+            f"[NL2SQL-dbmcp] starting SQL server (SSE) on http://{host}:{port}/sse",
+            err=True,
         )
         server.run(transport="sse", host=host, port=port)
     else:
         click.echo(
-            f"🚀 Starting NL2SQL MCP SQL server (HTTP) on http://{host}:{port}/mcp"
+            f"[NL2SQL-dbmcp] starting SQL server (HTTP) on http://{host}:{port}/mcp",
+            err=True,
         )
         server.run(transport="http", host=host, port=port)
 

@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from db.sql_runner import SqlRunner, RunSqlToolArgs, ToolContext
+from mcp_server.db_mcp_server.db.sql_runner import SqlRunner, RunSqlToolArgs, ToolContext
 # type: ignore  MC80OmFIVnBZMlhrdUp2bG43bmx2TG82VjJWTlNnPT06YTBhZGJkZjA=
 
 

@@ -23,6 +23,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from dotenv import load_dotenv
+
+# 必须先加载 .env 再读密钥/路径，否则密钥取决于导入顺序（settings 是否已 import），
+# 导致不同进程用不同密钥加密同一文件。
+load_dotenv()
+
 _logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
@@ -52,6 +58,7 @@ class DBConfig:
     user: str = ""
     password: str = ""       # 加密落盘，读时解密
     extra_config: dict = field(default_factory=dict)  # 额外 KV（如 sslmode）
+    wren_project: str = ""   # 关联的 Wren 项目绝对路径；空=未配置（该库走 dbmcp 直连）
 
     @classmethod
     def from_mapping(cls, data: dict) -> "DBConfig":
@@ -65,6 +72,7 @@ class DBConfig:
             user=str(data.get("user", "")),
             password=str(data.get("password", "")),
             extra_config=dict(data.get("extra_config", {}) or {}),
+            wren_project=str(data.get("wren_project", "")),
         )
 
     def to_mapping(self, masked: bool = False) -> dict:
@@ -214,6 +222,30 @@ class DbConfigStore:
             _logger.info("[db_config] 删除数据库 '%s'", db_name)
             return True
 
+    # ── 密钥一致性 ─────────────────────────────────────
+    def _ensure_consistent(self) -> None:
+        """检测存储是否用旧密钥加密（DB_CONFIG_SECRET 变更 / 历史 dev 回退密钥）。
+
+        加密值在当前密钥下无法解密（InvalidTag）时，该文件的密码已不可恢复；
+        从 .env 重建（.env 的 DB_N_* 是权威源，明文密码可重新加密写入）。
+        """
+        with _LOCK:
+            raw = self._read_raw()
+            for item in raw.get("databases", []):
+                pwd = item.get("password", "")
+                if not pwd or not pwd.startswith("enc:"):
+                    continue
+                try:
+                    self._cipher.decrypt(pwd)
+                except Exception:  # noqa: BLE001  InvalidTag / ValueError
+                    _logger.warning(
+                        "[db_config] 检测到加密密钥变更，已加密密码不可解密；"
+                        "从 .env 重建存储（前端新录入的配置需重新配置）"
+                    )
+                    self._write_raw({"version": 1, "databases": []})
+                    self.migrate_from_env()
+                    return
+
     # ── .env 迁移 ───────────────────────────────────────
     def migrate_from_env(self) -> int:
         """把 .env 的 DB_N_* 导入 store（幂等：已存在的 name 跳过）。"""
@@ -255,6 +287,10 @@ def get_store() -> DbConfigStore:
     global _default_store
     if _default_store is None:
         _default_store = DbConfigStore()
+        try:
+            _default_store._ensure_consistent()
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("[db_config] 密钥一致性检查跳过: %s", e)
         try:
             _default_store.migrate_from_env()
         except Exception as e:  # noqa: BLE001
