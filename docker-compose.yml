@@ -1,0 +1,76 @@
+# NL2SQL 生产部署 — Docker Compose
+#
+# 架构：nginx:80 → frontend:3000 + langgraph-api:2026 → 宿主机 PostgreSQL:5432
+#
+# 部署前提：
+#   1. 宿主机 PostgreSQL 已创建 nl2sql_checkpoint 库（见 docs/langfuse平台/Langfuse连接说明.md）
+#   2. 前端仓库 harness-deep-agents-ui 已克隆到同级目录
+#   3. .env.prod 已配置实际密钥
+#
+# 启动：docker compose up -d --build
+
+services:
+  # ── 后端：LangGraph Server + custom_app.py + MCP ──
+  langgraph-api:
+    build: .
+    ports:
+      - "2026:2026"
+    env_file:
+      - .env.prod
+    environment:
+      DATABASE_URI: ":memory:"
+      # 通过 Docker 网关 172.17.0.1 访问宿主机 PostgreSQL
+      CHECKPOINT_DB_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@172.17.0.1:5432/nl2sql_checkpoint
+      WREN_BIN_PATH: wren
+      LANGGRAPH_API_URL: http://langgraph-api:2026
+    volumes:
+      # workspace 持久化：语义库 / checkpoint SQLite（开发回退）/ 知识库
+      - workspace:/app/src/agent/workspace
+    # 内存限制（服务器 3.4GB，Langfuse 已占 ~2GB）
+    deploy:
+      resources:
+        limits:
+          memory: 1200m
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:2026/ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # ── 前端：Next.js ──
+  frontend:
+    build:
+      context: ../harness-deep-agents-ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    depends_on:
+      - langgraph-api
+    restart: unless-stopped
+
+  # ── 反向代理：统一入口 + SSE 支持 ──
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    depends_on:
+      - frontend
+      - langgraph-api
+    restart: unless-stopped
+
+volumes:
+  workspace:

@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     # 语义层 default 项目未配时走显式 wren_project，见 semantic_db._scan_legacy）
     WREN_PROJECT_PATH: str = os.getenv("WREN_PROJECT_PATH", "")
     WREN_BIN_PATH: str = os.getenv("WREN_BIN_PATH", "")
+    # Wren MCP server 记忆检索后端：grep（token-overlap，毫秒级）或 lancedb
+    # （sentence-transformers + LanceDB 向量检索，首次 3-10s）。默认 grep，
+    # 知识库规模扩大后可切 lancedb。
+    WREN_MEMORY_BACKEND: str = os.getenv("WREN_MEMORY_BACKEND", "grep")
 
     # db_mcp_server 直连通道（子智能体第二路 MCP：dbmcp_run_sql，按 db_name 路由）
     NL2SQL_DBMCP_ENABLED: bool = os.getenv("NL2SQL_DBMCP_ENABLED", "1").lower() not in (
@@ -75,6 +79,14 @@ class Settings(BaseSettings):
     CHART_ENGINE: str = os.getenv("CHART_ENGINE", "semiotic")
 
     CHECKPOINT_DB_PATH: str = os.getenv("CHECKPOINT_DB_PATH", "")
+    # PostgreSQL checkpoint URI（Docker 生产环境使用；为空则回退 SQLite）
+    CHECKPOINT_DB_URI: str = os.getenv("CHECKPOINT_DB_URI", "")
+
+    # ── 工作区配置 ──────────────────────────────────────────
+    WORKSPACE_REGISTRY_PATH: str = os.getenv("WORKSPACE_REGISTRY_PATH", "")
+    WORKSPACE_PATH: str = os.getenv("WORKSPACE_PATH", "")
+    # 共享资源目录（memory/、skills/ 的父目录），默认由 WorkspaceManager 推导
+    SHARED_RESOURCES_PATH: str = os.getenv("SHARED_RESOURCES_PATH", "")
 
     class Config:
         case_sensitive = True

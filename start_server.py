@@ -71,7 +71,9 @@ def setup_environment():
     if store_config:
         env_updates["LANGGRAPH_STORE"] = json.dumps(store_config)
 
-    os.environ.update(env_updates)
+    # 仅设置默认值，不覆盖 Docker / 外部已传入的环境变量
+    for k, v in env_updates.items():
+        os.environ.setdefault(k, v)
     
     # Load .env file if exists
     env_file = Path(__file__).parent / ".env"
@@ -90,12 +92,8 @@ def preflight_check():
     # ── 检查 MCP 工具 ──
     try:
         from agent.tools.mcp_tool import tools, _mcp_server_results, MCPToolsLoadError
-    except MCPToolsLoadError as e:
-        print(f"\n{'='*60}", flush=True)
-        print(f"🚫 就绪门控: 服务启动被阻止", flush=True)
-        print(f"{'='*60}", flush=True)
-        print(f"{e}", flush=True)
-        print(f"{'='*60}\n", flush=True)
+    except ImportError as e:
+        print(f"\n🚫 预检失败: MCP 工具模块导入失败（缺少依赖）: {e}", flush=True)
         sys.exit(1)
     except Exception as e:
         print(f"\n🚫 预检失败: MCP 工具模块加载异常: {e}", flush=True)
@@ -110,6 +108,18 @@ def preflight_check():
         icon = "✅" if status == "ok" else "❌"
         label = "正常" if status == "ok" else status
         print(f"  {icon} MCP [{name}]: {label}", flush=True)
+
+    # ── 检查 Langfuse 连通性（总开关关闭则跳过；告警不阻断启动）──
+    try:
+        from agent.trace.langfuse_client import auth_check, langfuse_enabled
+        if not langfuse_enabled():
+            print("  ⏭ Langfuse: LANGFUSE_ENABLE 未开启，跳过埋点预检", flush=True)
+        elif auth_check():
+            print("  ✅ Langfuse: 云端连通", flush=True)
+        else:
+            print("  ⚠️ Langfuse: auth_check 失败（仍启动，trace 可能不落库）", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️ Langfuse: 预检异常（仍启动）: {e}", flush=True)
 
     print(f"✅ 预检通过: {len(tools)} 个 MCP 工具就绪\n", flush=True)
 
