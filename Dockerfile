@@ -20,10 +20,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 复制依赖描述文件，利用 Docker 缓存层
 COPY pyproject.toml uv.lock ./
 
+# Docker 不需要 memory extra（WREN_MEMORY_BACKEND=grep），去掉可省 1.3GB（PyTorch+CUDA）
+RUN sed -i 's/wrenai\[clickhouse,memory,postgres\]/wrenai[clickhouse,postgres]/' pyproject.toml
+
 # 用 pip 安装 uv（避免 ghcr.io 国内慢），再用 uv sync 安装依赖
+# --no-frozen 因为 pyproject.toml 被修改（去掉 memory extra），lock 文件不匹配
 RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/ && \
-    uv sync --no-dev --no-install-project --extra-index-url https://pypi.org/simple/ \
-    || uv sync --no-dev --no-install-project
+    uv sync --no-dev --no-install-project --no-frozen --extra-index-url https://pypi.org/simple/ \
+    || uv sync --no-dev --no-install-project --no-frozen
 
 # ── Stage 2: 运行时 ──
 FROM python:3.13-slim
