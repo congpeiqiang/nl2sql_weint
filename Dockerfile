@@ -1,5 +1,14 @@
+# ── 阿里云 Debian 镜像源（python:3.13-slim 基于 Debian Trixie）──
+ARG DEBIAN_MIRROR="mirrors.aliyun.com"
+
 # ── Stage 1: 构建依赖 ──
 FROM python:3.13-slim AS builder
+ARG DEBIAN_MIRROR
+
+# 替换 apt 源为阿里云镜像（加速国内下载）
+RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list 2>/dev/null; \
+    true
 
 WORKDIR /app
 
@@ -18,6 +27,12 @@ RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/ && 
 
 # ── Stage 2: 运行时 ──
 FROM python:3.13-slim
+ARG DEBIAN_MIRROR
+
+# 替换 apt 源为阿里云镜像
+RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list 2>/dev/null; \
+    true
 
 # 系统依赖：mysqlclient 运行时 + curl（健康检查）+ xz-utils（解压 Node.js）
 RUN apt-get update && apt-get install -y --no-install-recommends \
