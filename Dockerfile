@@ -1,9 +1,6 @@
 # ── Stage 1: 构建依赖 ──
 FROM python:3.13-slim AS builder
 
-# 安装 uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
 WORKDIR /app
 
 # 系统依赖：mysqlclient 编译需要 gcc + libmariadb-dev
@@ -11,24 +8,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libmariadb-dev pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-# 先复制依赖描述文件，利用 Docker 缓存层
+# 复制依赖描述文件，利用 Docker 缓存层
 COPY pyproject.toml uv.lock ./
 
-# 同步依赖（--frozen 严格按 lock 文件；如果 lock 未含新依赖则去掉 --frozen）
-# 额外索引兜底：langgraph-checkpoint-postgres 等可能在私有镜像中缺失
-RUN uv sync --frozen --no-dev --no-install-project \
-    --extra-index-url https://pypi.org/simple/ \
-    || uv sync --no-dev --no-install-project --extra-index-url https://pypi.org/simple/
+# 用 pip 安装 uv（避免 ghcr.io 国内慢），再用 uv sync 安装依赖
+RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/ && \
+    uv sync --no-dev --no-install-project --extra-index-url https://pypi.org/simple/ \
+    || uv sync --no-dev --no-install-project
 
 # ── Stage 2: 运行时 ──
 FROM python:3.13-slim
 
-# 系统依赖：mysqlclient 运行时 + Node.js 20（chart MCP 需要 npx）+ curl（健康检查）
+# 系统依赖：mysqlclient 运行时 + curl（健康检查）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libmariadb3 curl && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
+
+# Node.js 20（chart MCP 需要 npx）—— 用 npmmirror 加速
+RUN curl -fsSL https://npmmirror.com/mirrors/node/v20.18.0/node-v20.18.0-linux-x64.tar.xz \
+    | tar -xJ -C /usr/local --strip-components=1
 
 WORKDIR /app
 
