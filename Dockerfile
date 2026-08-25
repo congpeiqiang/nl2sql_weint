@@ -19,9 +19,9 @@ RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/ && 
 # ── Stage 2: 运行时 ──
 FROM python:3.13-slim
 
-# 系统依赖：mysqlclient 运行时 + curl（健康检查）
+# 系统依赖：mysqlclient 运行时 + curl（健康检查）+ xz-utils（解压 Node.js）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libmariadb3 curl && \
+    libmariadb3 curl xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
 # Node.js 20（chart MCP 需要 npx）—— 用 npmmirror 加速
