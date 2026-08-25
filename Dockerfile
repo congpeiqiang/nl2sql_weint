@@ -24,10 +24,10 @@ COPY pyproject.toml uv.lock ./
 RUN sed -i 's/wrenai\[clickhouse,memory,postgres\]/wrenai[clickhouse,postgres]/' pyproject.toml
 
 # 用 pip 安装 uv（避免 ghcr.io 国内慢），再用 uv sync 安装依赖
-# --no-frozen 因为 pyproject.toml 被修改（去掉 memory extra），lock 文件不匹配
+# 不加 --frozen（pyproject.toml 被 sed 修改，需要重新解析）
 RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/ && \
-    uv sync --no-dev --no-install-project --no-frozen --extra-index-url https://pypi.org/simple/ \
-    || uv sync --no-dev --no-install-project --no-frozen
+    uv sync --no-dev --no-install-project --extra-index-url https://pypi.org/simple/ \
+    || uv sync --no-dev --no-install-project
 
 # ── Stage 2: 运行时 ──
 FROM python:3.13-slim
