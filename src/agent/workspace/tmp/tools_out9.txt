@@ -1,2 +1,0 @@
-type: str
-preview: 图表生成失败，请检查数据格式。

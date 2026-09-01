@@ -1,5 +1,0 @@
-is_chart: True
-ainvoke type: list
-ainvoke preview: [{'type': 'text', 'text': '<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" baseProfile="full" viewBox="0 0 400 300">\n<rect wi
-manual sanitize type: str
-manual sanitize preview: <iframe src="data:text/html;base64,PCFET0NUWVBFIGh0bWw+PGh0bWwgbGFuZz0iemgtQ04iPjxoZWFkPjxtZXRhIGNoYXJzZXQ9IlVURi04Ij48L2hlYWQ+PGJvZHkgc3R5bGU9Im1hcmdpbjowO2Rpc3BsYXk6ZmxleDtqdXN0aWZ5LWNvbnRlbnQ6Y2Vud

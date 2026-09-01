@@ -1,6 +1,0 @@
-{
-  "tables": ["Album", "Artist"],
-  "album_columns": ["AlbumId", "Title", "ArtistId"],
-  "artist_columns": ["ArtistId", "Name"],
-  "join_key": "ArtistId"
-}

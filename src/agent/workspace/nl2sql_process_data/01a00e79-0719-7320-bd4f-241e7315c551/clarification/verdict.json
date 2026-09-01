@@ -1,8 +1,0 @@
-{
-  "clear": true,
-  "reason": "OK",
-  "original_question": "找出合作 3 次以上的导演-演员组合，且他们合作电影的平均评分 >= 7.5。需要统计每个导演-演员组合的合作次数，计算他们合作的所有电影的平均评分的平均值，筛选合作次数 > 3 且平均评分 >= 7.5 的组合。",
-  "db_name": "imdb",
-  "issues": [],
-  "assumption": "合作次数按任务末尾明确给出的筛选条件 '> 3'（严格大于 3，即 >= 4 次）执行；'合作电影' 限定为 title_type='movie'；演员包含 actor 与 actress 两类（业务规则二）；平均评分为该组合合作电影的 average_rating 的算术平均（AVG，忽略 NULL）；导演取 category_id='director'。"
-}

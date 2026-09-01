@@ -1,8 +1,0 @@
-程序化查询计划（删除 Album 表 albumid 最大的一条记录）：
-
-1. 确认记录：SELECT albumid, title, artistid FROM album ORDER BY albumid DESC（limit=1 通过 run_sql 参数控制，SQL 不写 LIMIT）
-   —— 找到 albumid 最大的那条记录，人工核对确认
-2. 记录最大 albumid 值（记为 MAX_ID）
-3. 执行删除：DELETE FROM album WHERE albumid = MAX_ID
-   —— 仅删除该唯一记录，确保只删一条
-4. 验证（可选）：SELECT COUNT(*) FROM album 对比删除前后行数，或重新查询该 albumid 确认已不存在

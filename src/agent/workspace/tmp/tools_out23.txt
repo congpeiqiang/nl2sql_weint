@@ -1,2 +1,0 @@
-ainvoke type: list
-ainvoke preview: [{'type': 'text', 'text': '<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" baseProfile="full" viewBox="0 0 400 300">\n<rect wi

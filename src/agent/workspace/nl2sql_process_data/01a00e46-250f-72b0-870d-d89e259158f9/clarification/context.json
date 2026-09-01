@@ -1,6 +1,0 @@
-{
-  "question": "查询评分最低的电影",
-  "db_name": "imdb",
-  "get_context_result": "命中 titles 模型：average_rating (DOUBLE, IMDb加权平均评分1.0-10.0), num_votes (INTEGER), title_type (movie/short/tvEpisode/tvSeries等), primary_title, start_year 等列。评分与投票数已从 ratings 表合并到 titles 表。",
-  "get_instructions_result": "业务规则要点：①电影=title_type='movie'；②排名类查询推荐加 num_votes > 10000 可信度过滤；③average_rating 需要 IS NOT NULL 过滤；④NULL 值处理：start_year 可能为 NULL。"
-}

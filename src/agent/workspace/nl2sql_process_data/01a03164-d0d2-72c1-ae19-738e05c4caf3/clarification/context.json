@@ -1,4 +1,0 @@
-{
-  "note": "get_context 调用超时（120s），视为基础设施故障不阻塞查询；已用 get_instructions + list_models 获取业务规则与模型清单。",
-  "models": ["names", "principals", "titles", "titles_genres", "genres", "categories"]
-}

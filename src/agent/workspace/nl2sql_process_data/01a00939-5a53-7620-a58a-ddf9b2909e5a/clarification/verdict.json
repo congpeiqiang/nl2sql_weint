@@ -1,9 +1,0 @@
-{
-  "clear": true,
-  "reason": "OK",
-  "original_question": "查询昨天的数据（当前日期按系统时间，查询对应\"昨天\"日期范围内的所有相关业务数据，例如订单/发票等，请根据数据库实际情况判断哪些表有时间字段并给出查询结果）",
-  "db_name": "Chinook_Aliyun",
-  "issues": [],
-  "assumption": "数据库 Chinook_Aliyun 未在语义层建模且无专属知识库，按基础设施故障处理跳过语义检索（clear=true）。\"昨天\"= 数据库系统时间 CURRENT_DATE - 1 天；\"相关业务数据\"= 所有含日期/时间字段的业务表（重点为 invoice 发票/订单），按表分别查询昨天日期范围内的记录。",
-  "note": "Chinook_Aliyun 无 wren_project，wrenai 语义层工具不可用，使用 dbmcp 直连通道"
-}

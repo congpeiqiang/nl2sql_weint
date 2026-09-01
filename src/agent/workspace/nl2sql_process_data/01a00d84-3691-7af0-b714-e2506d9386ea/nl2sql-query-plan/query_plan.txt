@@ -1,9 +1,0 @@
-查询计划：统计各设备调温次数并展示调温次数最高的设备
-
-1. 数据源：单表 aix_crystal_record_data（无 JOIN，MDL 中无 relationships）
-2. 过滤：WHERE content = '调温'（content 为 VARCHAR，值取字面量 '调温'）
-3. 分组：GROUP BY device_code（设备编码为分组维度）
-4. 聚合：COUNT(*) 计算每组记录数，即该设备的调温次数，别名 调温次数
-5. 排序：按调温次数 COUNT(*) DESC 降序（并列时按 device_code ASC 保证结果确定性）
-6. 取最高：SQL 不写 LIMIT，通过 run_sql 的 limit 参数取前 1 行 → 即调温次数最高的设备
-7. 输出列：device_code（设备编码）、调温次数

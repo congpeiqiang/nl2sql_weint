@@ -1,4 +1,0 @@
-_arun closure cells: 3
-  cell[0]: type=bool, preview=True
-  cell[1]: type=method, preview=<bound method StructuredTool._arun of StructuredTool(name='generate_echarts', description='Generate 
-  cell[2]: type=StructuredTool, preview=name='generate_echarts' description='Generate visual charts using Apache ECharts with echarts option

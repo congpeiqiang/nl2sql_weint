@@ -1,7 +1,0 @@
-查询计划：统计 Chinook_Aliyun 数据库（PostgreSQL）的表数量并列出全部表名称
-
-1. 查询 PostgreSQL 系统目录 information_schema.tables
-2. 过滤 table_schema = 'public'，仅统计用户业务表（排除系统 schema）
-3. 用 COUNT(*) 统计表总数（子查询1：表数量）
-4. 用 table_name 列出所有表名称，按 table_name ASC 排序（子查询2：表名称清单）
-5. 两条查询分别执行，返回表数量与表名称清单

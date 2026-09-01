@@ -1,8 +1,0 @@
-查询计划：获取 album 表总行数
-
-1. 数据源：Chinook_Aliyun（PostgreSQL，直连通道 dbmcp_run_sql）
-2. 目标表：album（单表，无需 JOIN）
-3. 全表扫描统计行数：SELECT COUNT(*) FROM album
-4. 无 WHERE / GROUP BY / HAVING / ORDER BY / LIMIT 子句
-5. 返回单行单列数值结果
-6. 只读操作，不涉及任何 DML/DDL

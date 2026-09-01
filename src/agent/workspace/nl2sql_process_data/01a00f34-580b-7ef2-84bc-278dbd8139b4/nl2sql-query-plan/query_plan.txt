@@ -1,9 +1,0 @@
-查询计划：统计 artist 表记录总数
-=====================================
-目标：返回 artist 表的行数（艺术家总数），单行单列结果。
-
-步骤：
-1. 从 artist 表（public.artist）读取全部行；该表仅 2 列（artistid 主键、name），无筛选条件，全表扫描即可
-2. 对全表执行 COUNT(*) 聚合，统计记录总数
-3. 输出单值结果，列别名 artist_count
-4. 无需 JOIN / WHERE / GROUP BY / ORDER BY / LIMIT（聚合返回 1 行；LIMIT 由 run_sql 工具参数控制）

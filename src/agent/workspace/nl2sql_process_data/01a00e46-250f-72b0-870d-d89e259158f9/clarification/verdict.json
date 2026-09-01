@@ -1,8 +1,0 @@
-{
-  "clear": true,
-  "reason": "OK",
-  "original_question": "查询评分最低的电影",
-  "db_name": "imdb",
-  "issues": [],
-  "assumption": "电影=title_type='movie'；评分=titles.average_rating（排除NULL）；最低=按average_rating升序取第一条；按业务规则「排名类查询应加 num_votes > 10000 过滤」加入评分可信度过滤。"
-}
