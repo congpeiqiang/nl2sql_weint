@@ -90,6 +90,38 @@ class LangfuseMetadataMiddleware:
 
     # ── 元数据组装 ──────────────────────────────────────────
 
+    @staticmethod
+    def _extract_question_summary(body: dict, max_len: int = 40) -> str:
+        """从 run 请求体的 input.messages 提取最后一条用户消息作为 trace 名摘要。"""
+        inp = body.get("input")
+        if not isinstance(inp, dict):
+            return ""
+        messages = inp.get("messages") or []
+        if not isinstance(messages, list):
+            return ""
+        # 从后往前找最后一条 human 消息
+        for msg in reversed(messages):
+            text = ""
+            if isinstance(msg, dict):
+                mtype = msg.get("type", "") or msg.get("role", "")
+                if mtype not in ("human", "user"):
+                    continue
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    text = content.strip()
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block.get("text", "").strip()
+                            if text:
+                                break
+            elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
+                if msg[0] in ("human", "user"):
+                    text = str(msg[1]).strip()
+            if text and not text.startswith("[系统"):
+                return text[:max_len]
+        return ""
+
     def _inject(self, body: dict, tid: str) -> dict:
         """把 langfuse 元数据写进 body['config']['metadata']，无变化则返回原对象。"""
         if not isinstance(body, dict):
@@ -111,7 +143,8 @@ class LangfuseMetadataMiddleware:
         if not merged.get("langfuse_session_id"):
             merged["langfuse_session_id"] = tid
         if not merged.get("langfuse_trace_name"):
-            merged["langfuse_trace_name"] = f"query:{tid}"
+            # 低基数稳定名（官方 best-practices：name 不含动态值，用户查询放 metadata/input）
+            merged["langfuse_trace_name"] = "chat-turn"
         if "langfuse_tags" not in merged:
             merged["langfuse_tags"] = ["nl2sql"]
         elif isinstance(merged["langfuse_tags"], list) and "nl2sql" not in merged["langfuse_tags"]:
@@ -137,6 +170,11 @@ class LangfuseMetadataMiddleware:
         db_name = configurable.get("db_name", "")
         if db_name and "db_name" not in merged:
             merged["db_name"] = db_name
+        # 用户查询原文（供 Langfuse UI metadata 过滤 + evaluator 变量引用）
+        if "user_question" not in merged:
+            q = self._extract_question_summary(body, max_len=200)
+            if q:
+                merged["user_question"] = q
 
         # ── M5 灰度：当前进程的 prompt label/版本 + release（A→B 切换可见分组）──
         if "prompt" not in merged:

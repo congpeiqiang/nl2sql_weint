@@ -1,2 +1,0 @@
-statement: >
-  SELECT * FROM example LIMIT 100

@@ -56,8 +56,8 @@ def _test_connection(cfg: DBConfig) -> tuple[bool, str]:
             )
             client.query("SELECT 1")
         elif cfg.db_type == "postgres":
-            import psycopg2
-            conn = psycopg2.connect(
+            import psycopg
+            conn = psycopg.connect(
                 host=cfg.host, port=cfg.port, user=cfg.user,
                 password=cfg.password, dbname=cfg.database,
                 connect_timeout=3,

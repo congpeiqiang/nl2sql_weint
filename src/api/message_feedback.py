@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 
 import httpx
 from starlette.requests import Request
@@ -191,29 +192,69 @@ def _schedule_snapshot_backfill(thread_id: str, message_id: str) -> None:
     loop.create_task(_backfill())
 
 
-def _find_session_trace_id(thread_id: str) -> str:
-    """按 Langfuse sessionId=thread_id 查该会话的主 trace id（AGENT 根取最新）。
+def _find_session_trace_id(thread_id: str, message_id: str = "") -> str:
+    """定位用户反馈应挂载的 Langfuse trace id。
 
-    M3 用户反馈写分目标：主 trace（chat_agent root，多次 run 取最新一次）——
-    v4 平台 events_only 下 legacy `trace.list` 读不到事件新表，改走
-    v2/observations（sessionId filter + root），见 langfuse_v4_reads。
+    M3 起用户反馈写分：反馈针对的是**具体某条回答**（message_id），必须落在
+    产生它的那次 chat-turn trace 上——否则同一会话里对不同问题的反馈会全部
+    归到最后一次查询的 trace（实测 01a03e3c 全落 7a03f9，Q1~Q3 trace 没分）。
+
+    解析顺序：
+      1. message→trace：升序扫 chat_agent 根 output，第一个含 message_id 的
+         = 创建该消息的 trace（find_message_trace_id，精确归属）；
+      2. 无 message_id / 未命中：回退「会话最新主 trace」（历史行为，跨进程/
+         重启兜底）。
     失败/无 trace 返回空串（调用方跳过打分，不影响本地反馈落库）。
     """
     try:
-        from agent.trace.langfuse_v4_reads import find_session_main_trace_id
+        from agent.trace.langfuse_v4_reads import (
+            find_message_trace_id,
+            find_session_main_trace_id,
+        )
 
+        if message_id:
+            tid = find_message_trace_id(thread_id, message_id)
+            if tid:
+                return tid
         return find_session_main_trace_id(thread_id)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[feedback] 查 Langfuse session trace 失败: %s", e)
+        _logger.warning("[feedback] 查 Langfuse trace 失败: %s", e)
     return ""
 
 
-def _schedule_langfuse_score(thread_id: str, rating: str, note: str) -> None:
+def _find_trace_with_retry(thread_id: str, message_id: str, attempts: int = 3) -> str:
+    """定位反馈应挂载的 Langfuse trace，带重试。
+
+    2026-08-27 实测：反馈打分/撤销的 trace 定位走 v4 observations 接口（message
+    路由取 io 字段，载荷大），经代理间歇性超时——单次失败会让「取消点赞」的撤销
+    哨兵分被静默丢弃（Langfuse 永远停留在旧状态）。加重试（线性退避）+ 失败
+    WARNING 日志，保证打分/撤销不被瞬时网络抖动吞掉。
+    """
+    for i in range(attempts):
+        tid = _find_session_trace_id(thread_id, message_id)
+        if tid:
+            return tid
+        if i < attempts - 1:
+            time.sleep(0.4 * (i + 1))
+    _logger.warning(
+        "[feedback] %d 次重试仍未定位 Langfuse trace（thread=%s msg=%s），跳过写分/撤销",
+        attempts, thread_id[:12], message_id[:12],
+    )
+    return ""
+
+
+def _schedule_langfuse_score(thread_id: str, message_id: str, rating: str, note: str) -> None:
     """把用户反馈同步写进 Langfuse Score（user-feedback：好评 1 / 差评 0）。
 
     M3 §3.3：反馈以本地 store 为准（前端回显/导出），Langfuse 打分是旁路——
-    后台线程尽力而为，先按 session_id 找主 trace，create_score 入队异步刷新。
-    失败仅告警，不影响反馈保存接口的毫秒级返回。
+    后台线程尽力而为，先按 message_id 定位产生该消息的 trace（精确归属），
+    create_score 入队异步刷新。失败仅告警，不影响反馈保存接口的毫秒级返回。
+
+    M-feedback（2026-08-26）：调用方保证只对「首次写入或评分变化」打分。
+    2026-08-27 补丁：**note 变化也打分**——用户点赞后再补的评论必须反映到
+    Langfuse（否则 Scores 界面永远显示旧的默认文案）。v4 无 score 更新/删除
+    API，多次打分靠「最新一条即当前状态」约定收口（feedback_gate._dedupe_scores
+    按 trace 取最新，撤销用 value<0 哨兵，见 langfuse_v4_reads.USER_FEEDBACK_REVOKED）。
     """
     def _run() -> None:
         try:
@@ -221,15 +262,26 @@ def _schedule_langfuse_score(thread_id: str, rating: str, note: str) -> None:
 
             if not langfuse_enabled():
                 return
-            trace_id = _find_session_trace_id(thread_id)
+            trace_id = _find_trace_with_retry(thread_id, message_id)
             if not trace_id:
-                _logger.debug(
-                    "[feedback] 未找到 thread %s 的 Langfuse trace，跳过 user-feedback 打分",
-                    thread_id,
-                )
-                return
+                return  # 已由 _find_trace_with_retry 记 WARNING
             value = 1.0 if rating == "positive" else 0.0
-            comment = note or ("👍 有帮助" if rating == "positive" else "👎 有问题")
+            # comment 只用用户真实评语（note）；无评语留空——不伪造「有帮助/有问题」文案，
+            # 否则 Scores 界面会把系统生成的文本当成用户评论。评分语义由 value 表达。
+            comment = note
+            # 优化①：反馈类型（query/chat）判定 + 本地回填。打分线程已定位 trace_id，
+            # 直接复用（免二次 find_message_trace_id）。类型写入 score metadata 供
+            # feedback_gate 按类型过滤、collect_badcase/看板按类型归组。
+            from agent.feedback.feedback_type import classify_feedback_type
+
+            rec = store.get(thread_id, message_id)
+            ftype = classify_feedback_type(
+                thread_id, message_id,
+                sql_snapshot=(rec.sql if rec else ""),
+                trace_id=trace_id,
+            )
+            if ftype:
+                store.set_feedback_type(thread_id, message_id, ftype)
             from agent.trace.langfuse_client import create_score
 
             create_score(
@@ -237,9 +289,31 @@ def _schedule_langfuse_score(thread_id: str, rating: str, note: str) -> None:
                 value=value,
                 trace_id=trace_id,
                 comment=comment,
-                metadata={"message_feedback": "local-store-backed"},
+                metadata={
+                    "message_feedback": "local-store-backed",
+                    "message_id": message_id,
+                    "feedback_type": ftype,
+                },
             )
-            _logger.info("[feedback] Langfuse user-feedback=%.1f trace=%s", value, trace_id[:12])
+            # Langfuse Dashboard 维度（信噪比）：另写一档 CATEGORICAL 分类分
+            # feedback_type（query/chat），看板用 scores-categorical 视图按值分组
+            # 数 query/chat → 信噪比。unknown 不写（本地页单独归组）；受本函数开头
+            # 的 LANGFUSE_ENABLE 总开关约束（关掉即不落任何分）。
+            if ftype in ("query", "chat"):
+                create_score(
+                    name="feedback_type",
+                    value=ftype,
+                    trace_id=trace_id,
+                    data_type="CATEGORICAL",
+                    metadata={
+                        "message_feedback": "local-store-backed",
+                        "message_id": message_id,
+                    },
+                )
+            _logger.info(
+                "[feedback] Langfuse user-feedback=%.1f trace=%s msg=%s type=%s",
+                value, trace_id[:12], message_id[:12], ftype or "?",
+            )
         except Exception as e:  # noqa: BLE001
             _logger.warning("[feedback] Langfuse user-feedback 打分失败: %s", e)
 
@@ -249,7 +323,7 @@ def _schedule_langfuse_score(thread_id: str, rating: str, note: str) -> None:
         _logger.debug("[feedback] 启动打分线程失败: %s", e)
 
 
-def _schedule_langfuse_revoke(thread_id: str) -> None:
+def _schedule_langfuse_revoke(thread_id: str, message_id: str) -> None:
     """撤销反馈后，在 Langfuse 写一条「已撤销」哨兵 user-feedback score。
 
     v4 events 表没有 score 删除 API（legacy DELETE 只删 legacy 表，实测删不到
@@ -265,18 +339,31 @@ def _schedule_langfuse_revoke(thread_id: str) -> None:
 
             if not langfuse_enabled():
                 return
-            trace_id = _find_session_trace_id(thread_id)
+            trace_id = _find_trace_with_retry(thread_id, message_id)
             if not trace_id:
-                _logger.debug(
-                    "[feedback] 未找到 thread %s 的 Langfuse trace，跳过撤销哨兵", thread_id,
-                )
-                return
+                return  # 已由 _find_trace_with_retry 记 WARNING
             create_score(
                 name="user-feedback",
                 value=USER_FEEDBACK_REVOKED,
                 trace_id=trace_id,
                 comment="已撤销",
-                metadata={"message_feedback": "revoked"},
+                metadata={
+                    "message_feedback": "revoked",
+                    "message_id": message_id,
+                },
+            )
+            # 撤销同步落一档 feedback_type="revoked" 哨兵，看板/widget 可过滤
+            # value!='revoked'（软删除语义，v4 无删分 API）。注意：query/chat 旧行
+            # 仍在，看板计数对「撤销后重算」是近似值——权威口径见本地 /feedback 页。
+            create_score(
+                name="feedback_type",
+                value="revoked",
+                trace_id=trace_id,
+                data_type="CATEGORICAL",
+                metadata={
+                    "message_feedback": "revoked",
+                    "message_id": message_id,
+                },
             )
             _logger.info("[feedback] Langfuse user-feedback 已撤销 trace=%s", trace_id[:12])
         except Exception as e:  # noqa: BLE001
@@ -301,6 +388,7 @@ async def put_feedback(request: Request):
     # 这里先以空串落库，保证反馈写入 <几十毫秒 返回，前端批注交互不再被卡住。
     is_first_write = if_version is None
     try:
+        prev = store.get(thread_id, message_id)
         rec = store.upsert(
             thread_id,
             message_id,
@@ -318,8 +406,29 @@ async def put_feedback(request: Request):
         return json_response({"error": f"保存失败: {e}"}, status=500)
     if is_first_write:
         _schedule_snapshot_backfill(thread_id, message_id)
-    # M3：转发 Langfuse user-feedback score（后台旁路，不阻塞返回）
-    _schedule_langfuse_score(thread_id, rating, note)
+    # 优化① 快路径：SQL 快照非空 → 直接标 query（零成本，慢路径由打分线程兜底）
+    if rec.sql and rec.sql.strip():
+        store.set_feedback_type(thread_id, message_id, "query")
+    # 优化③ 入队：所有评分都进待标注队列（幂等）。纯点赞人工可「有效→直接入
+    # Good Set」，差评走标注流程。question/sql 在快照补齐前可能为空，标注详情
+    # 端会惰性补齐（见 api/feedback_annotation.py）。
+    if rating:
+        store.enqueue_annotation(
+            thread_id, message_id,
+            rating=rating, note=note,
+            question=rec.question, sql=rec.sql,
+            feedback_type=rec.feedback_type or "",
+            db_name=str((rec.context or {}).get("db_name", "") or ""),
+        )
+    # M3：转发 Langfuse user-feedback score（后台旁路，不阻塞返回）。
+    # M-feedback（2026-08-26）：仅「首次写入」或「评分变化」时打分。
+    # 2026-08-27：补 note 变化也打分——点赞后再补的评论要反映到 Langfuse
+    # Scores。v4 无 score 更新/删除 API，多次打分靠「最新一条即当前状态」
+    # 约定收口（feedback_gate._dedupe_scores 已按 trace 取最新，见其 docstring）。
+    rating_changed = prev is not None and prev.rating != rating
+    note_changed = prev is not None and prev.note != note
+    if is_first_write or rating_changed or note_changed:
+        _schedule_langfuse_score(thread_id, message_id, rating, note)
     return json_response({"ok": True, "feedback": rec.to_mapping()})
 
 
@@ -337,8 +446,13 @@ async def delete_feedback(request: Request):
         return json_response({"error": str(e)}, status=409)
     if not ok:
         return json_response({"error": "反馈不存在"}, status=404)
+    # 优化③：反馈撤销后，该消息非终态标注回滚为 rejected（不打扰已确认工作）
+    try:
+        store.revoke_annotations_for_message(thread_id, message_id)
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[feedback] 撤销标注回滚失败: %s", e)
     # M8：Langfuse 侧无 score 删除 API，撤销用哨兵分表达（软删除，见 _schedule_langfuse_revoke）
-    _schedule_langfuse_revoke(thread_id)
+    _schedule_langfuse_revoke(thread_id, message_id)
     return json_response({"ok": True})
 
 

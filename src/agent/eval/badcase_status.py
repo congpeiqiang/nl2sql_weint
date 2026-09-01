@@ -38,9 +38,9 @@ _logger = logging.getLogger("badcase_status")
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 try:
-    from dotenv import load_dotenv
-    load_dotenv(_PROJECT_ROOT / ".env", override=False)
-except ImportError:
+    from agent.settings.env_loader import load_env
+    load_env()
+except Exception:  # noqa: BLE001 独立脚本容错：env 加载失败不阻塞 list/mark
     pass
 
 VALID_STATUSES = ("pending", "reviewed", "fixed", "invalid")
@@ -109,6 +109,8 @@ def register(
         "collected_at": collected_at or datetime.now(timezone.utc).date().isoformat(),
         "updated_at": _now_iso(),
         "note": "",
+        "bad_type": "",
+        "gold_sql": "",
     }
     save_status(data)
     return True
@@ -138,6 +140,8 @@ def register_batch(items: list[dict]) -> int:
             "collected_at": it.get("collected_at") or today,
             "updated_at": now,
             "note": "",
+            "bad_type": it.get("bad_type", "") or "",
+            "gold_sql": it.get("gold_sql", "") or "",
         }
         new_count += 1
     if new_count:
@@ -195,6 +199,8 @@ def mark(trace_id: str, status: str, note: str = "") -> bool:
             "collected_at": "",
             "updated_at": _now_iso(),
             "note": note,
+            "bad_type": "",
+            "gold_sql": "",
         }
     else:
         prev = data[resolved].get("status", "pending")
@@ -203,6 +209,59 @@ def mark(trace_id: str, status: str, note: str = "") -> bool:
         if note:
             data[resolved]["note"] = note
         _logger.info("  %s: %s → %s", resolved[:16], prev, status)
+    save_status(data)
+    return True
+
+
+def annotate(
+    trace_id: str,
+    bad_type: str,
+    gold_sql: str = "",
+    note: str = "",
+    question: str = "",
+    db_name: str = "",
+) -> bool:
+    """标注页确认一条 badcase：状态置 reviewed（人工确认有效，进回归集）+ bad_type。
+
+    与 mark 的区别：mark 只改状态；annotate 额外写入错误类型与人工金标 SQL，
+    供 run_experiment 按 bad_type 分组、与 gold_sql exact-match 回归。
+    """
+    from agent.eval.bad_types import BAD_TYPE_KEYS, is_valid_bad_type
+
+    if bad_type and not is_valid_bad_type(bad_type):
+        _logger.error("无效 bad_type=%s（可选: %s）", bad_type, ", ".join(BAD_TYPE_KEYS))
+        return False
+    data = load_status()
+    try:
+        resolved = _resolve_trace_id(data, trace_id)
+    except ValueError as e:
+        _logger.error("%s", e)
+        return False
+    if resolved not in data:
+        data[resolved] = {
+            "status": "reviewed",
+            "question": question[:200] if question else "",
+            "db_name": db_name,
+            "reasons": ["user_feedback=0", "manual_annotation"],
+            "collected_at": datetime.now(timezone.utc).date().isoformat(),
+            "updated_at": _now_iso(),
+            "note": note,
+            "bad_type": bad_type,
+            "gold_sql": gold_sql,
+        }
+    else:
+        entry = data[resolved]
+        prev = entry.get("status", "pending")
+        entry["status"] = "reviewed"  # 人工确认有效，进回归集
+        entry["updated_at"] = _now_iso()
+        entry["bad_type"] = bad_type
+        if gold_sql:
+            entry["gold_sql"] = gold_sql
+        if note:
+            entry["note"] = note
+        if question and not entry.get("question"):
+            entry["question"] = question[:200]
+        _logger.info("  %s: %s → reviewed（bad_type=%s）", resolved[:16], prev, bad_type or "?")
     save_status(data)
     return True
 
@@ -253,6 +312,20 @@ def _cmd_summary(args) -> int:
         print(f"  {s:10s}  {c:4d}  {bar[:20]}  {tag}")
     open_count = sum(counts.get(s, 0) for s in DEFAULT_INCLUDE)
     print(f"\n  回归集规模: {open_count}/{total}")
+
+    # 优化③：按错误类型分布（人工标注后生效，未标注显示 N/A）
+    by_type: dict[str, int] = {}
+    for entry in data.values():
+        bt = entry.get("bad_type", "")
+        if bt:
+            by_type[bt] = by_type.get(bt, 0) + 1
+    if by_type:
+        print("\n  错误类型分布:")
+        from agent.eval.bad_types import BAD_TYPE_LABELS
+
+        for bt, c in sorted(by_type.items(), key=lambda kv: -kv[1]):
+            label = BAD_TYPE_LABELS.get(bt, bt)
+            print(f"    {label:12s} ({bt})  {c}")
     return 0
 
 

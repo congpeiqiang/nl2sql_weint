@@ -40,3 +40,7 @@ nl2sql-correction
 ## 输出
 
 - 纠正后的 SQL
+
+## 只读铁律
+
+纠正后的 SQL 仍必须是 `SELECT`（含 `WITH ... SELECT`）只读查询；**严禁**产生 INSERT/UPDATE/DELETE/REPLACE/MERGE 等 DML 或 DROP/ALTER/CREATE/TRUNCATE/RENAME 等 DDL。若失败 SQL 本身是非 SELECT（如用户意图写操作），**报告并拒绝**，不要纠正后执行。

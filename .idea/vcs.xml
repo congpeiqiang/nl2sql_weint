@@ -2,11 +2,5 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/src/agent/workspace/Chinook_Aliyun_semantic" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/src/agent/workspace/aix_project" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/src/agent/workspace/imdb_project" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/src/agent/workspace/xx" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/src/agent/workspace/xxx" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/src/agent/workspace/xxxx" vcs="Git" />
   </component>
 </project>

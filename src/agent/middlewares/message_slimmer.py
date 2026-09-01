@@ -7,7 +7,7 @@
 
 两个动作都在工具结果进入 state/checkpoint 之前改写（wrap_tool_call / awrap_tool_call）：
 
-1. **截断超大 tool 结果**：文本超过阈值（默认 16000 字符）的 ToolMessage，
+1. **截断超大 tool 结果**：文本超过阈值（默认 8000 字符，环境变量 `LARGE_RESULT_TRUNCATE_CHARS` 可调）的 ToolMessage，
    把完整内容落盘到 `large_tool_results/<tool_call_id>`，消息内只保留
    head+tail 预览 + 路径指针（复用 deepagents 的 `_offload_tool_message_content`）。
    覆盖 read_file / execute 等 deepagents 主动驱逐豁免的工具——那些正是本系统膨胀源。
@@ -19,12 +19,14 @@
 安全设计：
 - 全程 fail-open：任何异常只记日志并返回原始结果，绝不阻断 agent 循环。
 - 不触碰 AI/Human 消息（AI 消息瘦身属 L2，暂缓）。
-- 阈值/开关由构造参数控制，可在 main_agent.py 调大或置 None 关闭。
+- 阈值由环境变量 `LARGE_RESULT_TRUNCATE_CHARS` 控制（main_agent.py 不再传死值）；
+  构造参数传显式 int 可覆盖，传 None 关闭截断（只去重）。
 """
 from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from langchain.agents.middleware import AgentMiddleware
@@ -45,10 +47,13 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# 默认截断阈值（字符数）。16000 字符 ≈ 4k token，足以覆盖 73KB read_file、
-# 超长 execute 输出等真实膨胀源；8.8KB 的 SKILL.md 读取与 14KB 的 write_todos
-# 结果都低于该阈值，不会被截断（重复场景交给去重处理）。
-_DEFAULT_MAX_CHARS_BEFORE_TRUNCATE = 16_000
+# 默认截断阈值（字符数）。可用环境变量 LARGE_RESULT_TRUNCATE_CHARS 覆盖
+# （main_agent / langfuse_span 读同一变量，保证「落盘阈值」与「span output 截断阈值」对齐）。
+# 默认 8000 字符（此前 main_agent.py 显式传 8_000 的实际运行值）；
+# 8.8KB 的 SKILL.md 读取与 14KB 的 write_todos 结果高于该阈值会被截断（重复场景交给去重处理）。
+_DEFAULT_MAX_CHARS_BEFORE_TRUNCATE = int(
+    os.environ.get("LARGE_RESULT_TRUNCATE_CHARS", "8000")
+)
 
 # 去重占位文本。tool_call_id 保持原值，这里引用首次出现的那条。
 _DEDUP_STUB = (
@@ -117,14 +122,12 @@ class MessageSlimmerMiddleware(AgentMiddleware):
         self._backend = backend
         self._max_chars_before_truncate = max_chars_before_truncate
 
-        # 超大工具结果落盘目录前缀。
-        # CompositeBackend 的路由 {"/": file_backend} 会匹配所有以 "/" 开头的路径，
-        # 导致 "/large_tool_results" 落到 file_backend（src/agent/large_tool_results/）。
-        # 改为不以 "/" 开头的相对路径，CompositeBackend 不匹配任何路由，
-        # fallback 到 default（shell_backend），落盘到 workspace/large_tool_results/。
-        # 非 CompositeBackend 时保持原来 "/large_tool_results" 绝对路径。
+        # 超大工具结果落盘目录前缀。统一用 "/workspace/large_tool_results"：
+        # 命中 CompositeBackend 的 "/workspace/" 路由 → workspace_data_backend
+        # （前端选择的工作区），与 SummarizationMiddleware 溢出落盘、langfuse_span
+        # vfs 指针同路径口径。非 CompositeBackend 时保持原来 "/large_tool_results"。
         if isinstance(backend, CompositeBackend):
-            self._large_tool_results_prefix = "large_tool_results"
+            self._large_tool_results_prefix = "/workspace/large_tool_results"
         else:
             self._large_tool_results_prefix = "/large_tool_results"
 

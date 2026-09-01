@@ -28,3 +28,15 @@ docs/
 .idea/
 .vscode/
 *.swp
+docker/
+
+# 调试探针文件（不进入镜像）
+*thread_state2.json
+*tmpthread_state2.json
+msgs_probe.json
+page_probe.html
+*.bin
+*.log
+
+# 生产配置由 compose env_file 注入，镜像内不需要
+.env.prod

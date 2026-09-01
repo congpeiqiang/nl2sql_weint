@@ -35,13 +35,18 @@ _DEFAULT_FILES = {
 
 
 def _load_env() -> None:
-    """加载项目根 .env（幂等；langfuse 密钥/开关都在这）。"""
-    try:
-        from dotenv import load_dotenv
+    """加载项目根 env（幂等；langfuse 密钥/开关都在这）。
 
-        load_dotenv(_PROJECT_ROOT / ".env", override=False)
-    except Exception:  # noqa: BLE001
-        pass
+    生产部署在容器（env_file: .env.prod 注入）；宿主机/本机手动跑时统一由
+    agent.settings.env_loader 叠加 .env.prod 的 LANGFUSE_*（生产项目凭据）。
+    """
+    try:
+        from agent.settings.env_loader import load_env
+        load_env()
+    except Exception as e:  # 捕获异常对象 e
+        import logging
+        # 打印出具体的错误类型和原因，这是排查问题的关键
+        logging.error(f"Failed to load .env.prod file. Error: {e}", exc_info=True)
 
 
 def _get_client():

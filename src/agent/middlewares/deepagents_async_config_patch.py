@@ -66,6 +66,53 @@ def _current_parent_thread_id() -> str:
         return ""
 
 
+def _current_user_question() -> str:
+    """读取当前 run 的 user_question（HTTP 中间件注入的 metadata，≤200 字符）。
+
+    LANGFUSE_ENABLE=false 时中间件不注入 → 返回空（M-T5 注册表 question 兜底为空，
+    不影响 trace 路由，仅用于日志/评估展示）。
+    """
+    try:
+        from langgraph.config import get_config as _lg_get_config
+        cfg = _lg_get_config()
+        return str((cfg.get("metadata", {}) or {}).get("user_question", "") or "")
+    except Exception:
+        return ""
+
+
+def _current_otel_trace_id() -> str:
+    """读取当前 agent run 的 Langfuse trace_id（M-T2 方案 B）。
+
+    deepagents 异步工作线程丢失 OTel context（已验证），无法用
+    opentelemetry.trace.get_current_span() 获取。改用 CallbackHandler
+    单例的 last_trace_id 属性——on_chain_start 时写入，跨线程可读。
+
+    并发场景下 last_trace_id 可能被其他请求覆盖（竞态窗口极小：
+    工具调用在 on_chain_start 之后立即触发），生产环境若并发高可改
+    为 per-run 存储（如 run_id → trace_id dict）。
+    """
+    # 优先：OTel context 可用时直接读（主 agent 线程同步调用场景）
+    try:
+        from opentelemetry import trace as otel_trace
+        current_span = otel_trace.get_current_span()
+        ctx = current_span.get_span_context() if current_span else None
+        if ctx and ctx.is_valid:
+            return format(ctx.trace_id, "032x")
+    except Exception:
+        pass
+    # 兜底：从 CallbackHandler 单例读 last_trace_id（跨线程可访问）
+    try:
+        from agent.trace.langfuse_client import get_langfuse_handler
+        handler = get_langfuse_handler()
+        if handler is not None:
+            tid = getattr(handler, "last_trace_id", None)
+            if tid:
+                return str(tid)
+    except Exception:
+        pass
+    return ""
+
+
 def _build_langfuse_metadata() -> dict:
     """构建子 run 的 Langfuse 元数据（M2：session_id=thread_id 兜底分组）。
 
@@ -77,7 +124,8 @@ def _build_langfuse_metadata() -> dict:
     metadata: dict = {}
     if parent_tid:
         metadata["langfuse_session_id"] = parent_tid
-        metadata["langfuse_trace_name"] = f"nl2sql-agent:{parent_tid}"
+        # 低基数稳定名（官方 best-practices：name 不含动态值）
+        metadata["langfuse_trace_name"] = "nl2sql-agent"
         metadata["langfuse_tags"] = ["nl2sql"]
     try:
         from agent.workspace_manager import get_workspace_manager
@@ -97,6 +145,22 @@ def _build_langfuse_metadata() -> dict:
     return metadata
 
 
+def _current_root_obs_id(trace_id: str) -> str:
+    """从 _ROOT_OBS_MAP 读取当前 trace 的 root observation ID（M-T3b 补充）。
+
+    必须在 orig_create 之前调用：runs.create 同步执行时，子 agent 的
+    on_chain_start 会覆盖 _ROOT_OBS_MAP（主/子 agent 共享 trace_id），
+    导致后续读取拿到子 agent 的 obs_id 而非主 agent 的。
+    """
+    if not trace_id:
+        return ""
+    try:
+        from agent.trace.langfuse_client import get_root_observation_id
+        return get_root_observation_id(trace_id)
+    except Exception:
+        return ""
+
+
 def _wrap_runs_create(orig_create):
     """包装 client.runs.create：未显式传 config 时注入当前 configurable + Langfuse 元数据。"""
     import functools
@@ -108,6 +172,57 @@ def _wrap_runs_create(orig_create):
             if configurable:
                 cfg = {"configurable": configurable}
                 meta = _build_langfuse_metadata()
+                # M-T2：抓主线程 OTel trace_id → 注入 metadata → 子线程的 skill span
+                # 用 trace_context=TraceContext(trace_id=...) 嵌套到主 trace 下
+                #
+                # ⚠ 关键时序：必须在 orig_create 之前捕获！
+                # runs.create 可能同步执行子 agent → 子 agent 的 on_chain_start
+                # 会覆盖 handler.last_trace_id 和 _ROOT_OBS_MAP（因为 M-T3 让
+                # 主/子 agent 共享 trace_id），导致后续读取拿到错误值。
+                parent_trace_id = _current_otel_trace_id()
+                parent_obs_id = ""
+                if parent_trace_id:
+                    meta["langfuse_parent_trace_id"] = parent_trace_id
+                    parent_obs_id = _current_root_obs_id(parent_trace_id)
+                    if parent_obs_id:
+                        meta["langfuse_parent_obs_id"] = parent_obs_id
+                    _logger.info(
+                        "[db_config] M-T2/T3b: injected parent_trace_id=%s "
+                        "parent_obs_id=%s",
+                        parent_trace_id[:16], parent_obs_id[:16] if parent_obs_id else "(none)",
+                    )
+                # M-T5：派发异步子任务时登记 task_id → 所属查询的 trace 上下文，
+                # 供 auto-continue 按任务路由回原 trace（连问场景归属修正）。
+                # task_id = 子任务的独立 LangGraph thread_id（kwargs["thread_id"]）；
+                # update_async_task 重派发带 multitask_strategy="interrupt"，跳过，
+                # 保护原绑定不被覆盖。
+                _task_id = str(kwargs.get("thread_id") or "")
+                _is_redispatch = bool(kwargs.get("multitask_strategy"))
+                if _task_id and not _is_redispatch:
+                    _desc = ""
+                    try:
+                        _input = kwargs.get("input") or {}
+                        _msgs = _input.get("messages") or []
+                        if _msgs:
+                            _desc = str(_msgs[0].get("content", "") or "")[:500]
+                    except Exception:
+                        pass
+                    try:
+                        from agent.trace.langfuse_client import register_task_trace_context
+                        register_task_trace_context(
+                            task_id=_task_id,
+                            main_thread_id=_current_parent_thread_id(),
+                            trace_id=parent_trace_id,
+                            root_obs_id=parent_obs_id,
+                            question=_current_user_question(),
+                            description=_desc,
+                        )
+                        if not _desc:
+                            _logger.warning(
+                                "[langfuse_m5] 派发 task=%s 描述为空", _task_id[:12]
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        _logger.debug("[langfuse_m5] 登记 task 失败: %s", e)
                 if meta:
                     cfg["metadata"] = meta
                 kwargs = dict(kwargs)

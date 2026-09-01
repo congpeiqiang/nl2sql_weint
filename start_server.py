@@ -21,6 +21,14 @@ LOG_BACKUP_COUNT = 7
 
 def setup_environment():
     """Setup required environment variables"""
+    # 固定 CWD 为仓库根：inmem 版型的线程/run 注册表落盘路径
+    # (.langgraph_api/.langgraph_ops.pckl) 是相对 CWD 的，换目录启动会拿到一份
+    # 全新的注册表 → 重启后旧线程在注册表里查不到，前端复用旧 threadId 就 404。
+    # 统一 CWD 让注册表永远落在同一位置，跨重启保留（配合前端"线程失效自动开新会话"）。
+    script_dir = Path(__file__).resolve().parent
+    if os.getcwd() != str(script_dir):
+        os.chdir(script_dir)
+
     # Add src to Python path
 
     src_path = Path(__file__).parent / "src"
@@ -52,7 +60,6 @@ def setup_environment():
         "ALLOW_PRIVATE_NETWORK": "true",
         "LANGGRAPH_UI_BUNDLER": "true",
         "LANGGRAPH_RUNTIME_EDITION": "inmem",
-        "LANGSMITH_LANGGRAPH_API_VARIANT": "local_dev",
         "LANGGRAPH_DISABLE_FILE_PERSISTENCE": "false",
         "LANGGRAPH_ALLOW_BLOCKING": "true",
         "LANGGRAPH_API_URL": "http://localhost:2026",
@@ -84,6 +91,14 @@ def setup_environment():
             print(f"✅ Loaded environment from .env")
         except ImportError:
             print("⚠️  python-dotenv not installed, skipping .env file")
+
+    # DEPLOY_ENV 显式化：打印当前环境 + prod 下校验 checkpoint 后端，
+    # 避免排查时靠 CHECKPOINT_DB_URI 的值猜环境。
+    deploy_env = os.environ.get("DEPLOY_ENV", "dev")
+    if deploy_env == "prod":
+        if not os.environ.get("CHECKPOINT_DB_URI", "").startswith("postgresql://"):
+            print("⚠️ DEPLOY_ENV=prod 但 CHECKPOINT_DB_URI 未指向 PostgreSQL，请检查 docker-compose / 环境配置")
+    print(f"🌍 Deploy env: {deploy_env}")
 
 def preflight_check():
     """就绪门控：在启动服务前验证关键依赖是否就绪。"""

@@ -12,9 +12,14 @@ from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 from pathlib import Path
 
-# 从项目根目录加载 .env（无论从哪里运行）
-_env_path = Path(__file__).resolve().parents[3] / ".env"
-load_dotenv(_env_path, override=True)
+# 从项目根目录按 DEPLOY_ENV 选择环境文件（无论从哪里运行）。
+# DEPLOY_ENV 来自「启动前已注入的进程环境」（docker-compose environment: DEPLOY_ENV=prod
+# / 手动 export），绝不能从要选择的文件里读回（先有鸡先有蛋）；未设默认 dev。
+# override=False：已注入的进程环境恒优先，杜绝 prod 值被文件里的 dev 值覆盖——
+# 旧实现 override=True 读 .env 依赖 .dockerignore 排除 .env 兜底，属结构隐患。
+_deploy_env = os.getenv("DEPLOY_ENV", "dev")
+_env_path = Path(__file__).resolve().parents[3] / (".env.prod" if _deploy_env == "prod" else ".env")
+load_dotenv(_env_path, override=False)
 logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
@@ -75,8 +80,8 @@ class Settings(BaseSettings):
         "0", "false", "no", "off"
     )
 
-    # 图表引擎选择（semiotic / echarts，二选一）
-    CHART_ENGINE: str = os.getenv("CHART_ENGINE", "semiotic")
+    # 图表引擎（仅支持 echarts）
+    CHART_ENGINE: str = os.getenv("CHART_ENGINE", "echarts")
 
     CHECKPOINT_DB_PATH: str = os.getenv("CHECKPOINT_DB_PATH", "")
     # PostgreSQL checkpoint URI（Docker 生产环境使用；为空则回退 SQLite）
@@ -87,10 +92,15 @@ class Settings(BaseSettings):
     WORKSPACE_PATH: str = os.getenv("WORKSPACE_PATH", "")
     # 共享资源目录（memory/、skills/ 的父目录），默认由 WorkspaceManager 推导
     SHARED_RESOURCES_PATH: str = os.getenv("SHARED_RESOURCES_PATH", "")
+    # 外部基础目录（项目外）：shared + 默认工作区统一放这里（代码根退出 VFS），
+    # 首次运行自动从仓库 src/agent/{shared,workspace} 拷贝种子；为空则回退仓库内
+    AGENT_DATA_ROOT: str = os.getenv("AGENT_DATA_ROOT", "")
 
     class Config:
         case_sensitive = True
-        env_file = ".env"
+        # 与模块顶部 load_dotenv 同源（prod → .env.prod，dev → .env）；绝对路径避免
+        # 依赖 CWD。pydantic-settings 以进程 env 优先，env_file 仅补缺。
+        env_file = str(_env_path)
         extra = "ignore"  # 允许 .env 中的 DB_N_* 等未定义字段
 
     def validate_configuration(self) -> List[str]:

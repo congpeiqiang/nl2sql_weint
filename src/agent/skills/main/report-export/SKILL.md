@@ -53,6 +53,9 @@ description: >
 |-----|-----|-----|
 | {v1} | {v2} | {v3} |
 
+## 生成SQL
+{生成的SQL}
+
 ## 关键发现
 - {发现1}
 - {发现2}
@@ -69,6 +72,9 @@ description: >
 ## 分析结果
 {分析内容}
 
+## 生成SQL
+{生成的SQL}
+
 ## 结论与建议
 {结论}
 ```
@@ -83,6 +89,9 @@ description: >
 
 ## 图表说明
 {图表类型和解读}
+
+## 生成SQL
+{生成的SQL}
 
 ## 详细数据
 | 维度 | 指标 |
@@ -122,12 +131,22 @@ description: >
 
 ### Step 3: 写入文件
 
-使用 `write_file` 工具将 Markdown 内容写入文件系统。
+**首选：使用 `build_report` 工具程序化装配报告**——它会自动从当前对话提取最近一次
+`check_async_task` 成功的数据结果（数据表 + SQL + 洞察）与 `generate_echarts` 生成的
+交互式图表（内嵌 iframe），自动加「精确到时分秒」的时间戳文件名并落盘到
+`/workspace/report/`。模型只需提供报告标题与解读文本，无需手工搬运表格/iframe：
+
+```
+build_report(report_name="各类型电影数量分布", analysis="各类型电影中，喜剧类数量最多……")
+```
+
+**若需完全自定义报告内容**，再退回 `write_file` 工具将 Markdown 内容写入文件系统。
 
 **文件命名规则：**
 - 文件名：`{report-name}_{YYYY-MM-DD_HH-mm-ss}.md`
-  - 通过 `python -c "from datetime import datetime; print(datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))"` 获取时间戳
-  - 示例：`各类型电影数量分布_2026-07-30_13-56-27.md`
+  - 在文件路径里直接写 `{ts}` 占位符，系统会自动展开为当前本地时间（精确到时分秒），
+    同一文件名的 {ts} 在同一任务内固定不变，写完即可 read 校验
+  - 示例：`/workspace/report/各类型电影数量分布_{ts}.md` → `各类型电影数量分布_2026-07-30_13-56-27.md`
 - 存放路径：`/workspace/report/` 目录下
 - 如果用户指定了文件名，优先使用用户指定的名称
 
@@ -142,7 +161,7 @@ description: >
 
 ### 报告结构
 
-```markdown
+​```markdown
 # 报告标题
 
 > 生成时间：{timestamp}
@@ -223,63 +242,3 @@ description: >
 3. **包含元信息** — 生成时间、数据来源、SQL 语句等
 4. **中英文兼容** — 报告语言与用户提问语言保持一致
 5. **文件路径告知** — 始终告知用户文件存放的完整路径
-
-## 图表标签截断解决方案
-
-### 问题
-水平柱状图（BarChart, orientation="horizontal"）的 Y 轴标签（表名）如果过长，会被容器裁剪。
-
-### 根本原因
-Semiotic 的 `margin.left` 默认值较小（约 70px），而长表名（如 `names_knownfortitles`）需要 150px+ 才能完整显示。
-
-### 推荐方案：动态边距计算
-
-渲染水平柱状图前，按以下公式计算 `margin.left`：
-
-```
-最长标签字符数 × 7.5 + 20 = margin.left
-```
-
-**经验值对照表：**
-
-| 最长标签长度 | margin.left | 画布宽度 |
-|:---:|:---:|:---:|
-| ≤ 10 字符 | 100 | 600 |
-| 11~15 字符 | 150 | 700 |
-| 16~20 字符 | 200 | 800 |
-| 21~25 字符 | 250 | 900 |
-| > 25 字符 | 300 | 1000 |
-
-### 执行规范
-
-每次渲染水平柱状图时，**必须**：
-
-1. 遍历数据，找出 `categoryAccessor` 对应的最长字符串
-2. 按上表选择对应的 `margin.left` 和 `width`
-3. 在 props 中显式设置 `margin.left` 和 `width`
-
-### 示例
-
-```javascript
-// 数据中 categoryAccessor="name"，最长 name 为 "names_knownfortitles"（19字符）
-// → margin.left=200, width=800
-
-renderChart({
-  component: "BarChart",
-  props: {
-    data: [...],
-    categoryAccessor: "name",
-    valueAccessor: "value",
-    orientation: "horizontal",
-    margin: { left: 200, bottom: 40 },
-    width: 800,
-    height: 450
-  }
-})
-```
-
-### 备选方案
-
-如果动态边距仍不够（标签 > 30 字符），考虑：
-- **缩写标签**：在数据预处理阶段将长名映射为缩写，图表中显示缩写
-- **改用垂直柱状图**：标签在 X 轴，通过旋转角度显示（`xAxisRotate` 属性）

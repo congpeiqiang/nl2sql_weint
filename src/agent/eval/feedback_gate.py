@@ -45,9 +45,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]  # src/agent/eval/feedback_g
 
 
 def _load_env() -> None:
-    from dotenv import load_dotenv
+    """独立脚本运行先加载项目 env（start_server 由入口加载；此处兜底）。
 
-    load_dotenv(_PROJECT_ROOT / ".env")
+    生产部署在容器（env_file: .env.prod 注入）；宿主机/本机手动跑时统一由
+    agent.settings.env_loader 叠加 .env.prod 的 LANGFUSE_*（生产项目凭据）。
+    """
+    from agent.settings.env_loader import load_env
+
+    load_env()
 
 
 def _reconfigure_stdout() -> None:
@@ -124,6 +129,23 @@ def _dedupe_scores(rows: list[dict]) -> list[dict]:
         if prev is None or _ts_key(r) > _ts_key(prev):
             best[tid] = r
     return [r for r in best.values() if not is_revoked(r.get("value"))]
+
+
+def _filter_chat(rows: list[dict]) -> tuple[list[dict], int]:
+    """剔除闲聊类反馈（优化①：metadata.feedback_type == 'chat'）。
+
+    返回 (保留行, 剔除数)。'' / 缺失（存量、未判定）按 query 处理——不缩样，
+    与 collect_badcase 的采集口径一致（类型未知的反馈仍视为可行动信号）。
+    """
+    kept: list[dict] = []
+    n_chat = 0
+    for r in rows:
+        ftype = str((r.get("metadata") or {}).get("feedback_type", "") or "")
+        if ftype == "chat":
+            n_chat += 1
+        else:
+            kept.append(r)
+    return kept, n_chat
 
 
 def _trace_group_dict(md: dict) -> tuple[str, str]:
@@ -229,6 +251,8 @@ def main() -> None:
     ap.add_argument("--min-rated", type=int, default=5, help="每组最少有效反馈数才门禁（默认 5）")
     ap.add_argument("--report-only", action="store_true", help="只看报表不门禁（exit 恒 0）")
     ap.add_argument("--fail-insufficient", action="store_true", help="数据不足时按失败处理（exit 2）")
+    ap.add_argument("--include-chat", action="store_true",
+                    help="把闲聊/无关对话反馈也计入好评率（默认只统计查询类）")
     args = ap.parse_args()
 
     since = datetime.now(timezone.utc) - timedelta(days=args.days)
@@ -238,6 +262,9 @@ def main() -> None:
     _logger.info("[feedback_gate] 原始 score %d 条", len(rows))
     deduped = _dedupe_scores(rows)
     _logger.info("[feedback_gate] 去重后（按 trace 取最新）%d 条", len(deduped))
+    if not args.include_chat:
+        deduped, n_chat = _filter_chat(deduped)
+        _logger.info("[feedback_gate] 剔除闲聊类反馈 %d 条（--include-chat 可计入）", n_chat)
     groups, unknown = _resolve_groups(deduped)
     _logger.info("[feedback_gate] 分组: %s", {k: len(v) for k, v in groups.items()})
     if unknown:

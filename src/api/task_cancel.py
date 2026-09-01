@@ -97,17 +97,25 @@ def _ensure_sync_watcher(main_thread_id: str, task_id: str, task_entry: dict):
 
 
 async def _mark_main_cancelled(
-    base: str, main_thread_id: str, task_id: str, entry: dict
+    base: str,
+    main_thread_id: str,
+    task_id: str,
+    entry: dict,
+    status_override: str = "cancelled",
 ) -> None:
-    """回写主线程 async_tasks[task_id] → cancelled（重试 + watcher 保活）。
+    """回写主线程 async_tasks[task_id] → 终态（重试 + watcher 保活）。
 
     主线程可能 in-flight（用户正在对话）→ update_state 被拒；重试几次，
     最终兜底由 sync watcher 负责（P1-7 保留 cancelled）。
+
+    status_override 默认 "cancelled"（用户主动取消）；当子 run 已自然终态
+    （success/error）而 async_tasks 还 running 时，回写 run 的实际终态，
+    让前端进度条不再永久转圈（见 cancel_task 幂等分支）。
     """
     updated = dict(entry)
     updated["task_id"] = task_id
     updated["thread_id"] = task_id
-    updated["status"] = "cancelled"
+    updated["status"] = status_override
     updated.pop("awaiting_approval", None)
     updated["last_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -177,10 +185,29 @@ async def cancel_task(request: Request):
         run_status = latest.get("status") if latest else None
         pending_approval = bool(entry.get("awaiting_approval"))
 
-        # 已终态且无待审批 → 任务自然结束，不可取消
+        # 已终态且无待审批 → 任务已结束，幂等返回成功
+        # （sync watcher 可能把 cancelled 覆盖为 interrupted 等其他终态，
+        #  前端重试 cancel 时不应报错——用户的目的是让任务停下来，已停就行）
         if run_status in _TERMINAL_STATUSES and not pending_approval:
+            # ⚠ 若 async_tasks 仍显示 running（重启后 sync watcher 未拉起 /
+            # 僵尸 run 恢复），必须回写实际终态，否则前端进度条永久 running、
+            # 点停止无效（2026-08-29 会话 01a04b54 实测复现）。
+            if entry.get("status") not in _TERMINAL_STATUSES:
+                await _mark_main_cancelled(
+                    base,
+                    main_thread_id,
+                    task_id,
+                    entry,
+                    status_override=run_status or "cancelled",
+                )
             return json_response(
-                {"ok": False, "error": f"任务已结束（{run_status}）"}, status=409
+                {
+                    "ok": True,
+                    "task_id": task_id,
+                    "main_thread_id": main_thread_id,
+                    # run 已终态时优先返回实际终态（entry 可能还是旧的 running）
+                    "status": run_status or entry.get("status") or "cancelled",
+                }
             )
 
         # 3. 取消子 run（真正 running 才 cancel；停在审批闸门时是 no-op）

@@ -22,6 +22,7 @@ import api.db_config  # noqa: E402
 import api.langfuse_metadata  # noqa: E402
 import api.message_feedback  # noqa: E402
 import api.model_config  # noqa: E402
+import api.report_file  # noqa: E402
 import api.sql_approval  # noqa: E402
 import api.task_cancel  # noqa: E402
 import api.thread_compact  # noqa: E402
@@ -31,12 +32,16 @@ import api.thread_search  # noqa: E402
 import api.workspace  # noqa: E402
 import api.wren_semantic  # noqa: E402
 import api.trace_routes  # noqa: E402
+import api.feedback_stats  # noqa: E402
+import api.feedback_annotation  # noqa: E402
+import api.experiment  # noqa: E402
 
 ROUTES: list[BaseRoute] = [
     *api.db_config.routes,
     *api.message_feedback.routes,
     *api.auto_title.routes,
     *api.model_config.routes,
+    *api.report_file.routes,
     *api.sql_approval.routes,
     *api.task_cancel.routes,
     *api.thread_compact.routes,
@@ -46,6 +51,9 @@ ROUTES: list[BaseRoute] = [
     *api.workspace.routes,
     *api.wren_semantic.routes,
     *api.trace_routes.routes,
+    *api.feedback_stats.routes,
+    *api.feedback_annotation.routes,
+    *api.experiment.routes,
     # 后期新增：import api.<name> + 展开 *api.<name>.routes
 ]
 

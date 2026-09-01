@@ -18,14 +18,22 @@ services:
     env_file:
       - .env.prod
     environment:
+      # 显式部署环境标志：后端各 loader（setting.py / env_loader.py）据此选择
+      # .env.prod（prod）还是 .env（dev）。必须由这里预注入，不能从文件读回。
+      DEPLOY_ENV: prod
       DATABASE_URI: ":memory:"
       # 通过 Docker 网关 172.17.0.1 访问宿主机 PostgreSQL
       CHECKPOINT_DB_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@172.17.0.1:5432/nl2sql_checkpoint
       WREN_BIN_PATH: wren
       LANGGRAPH_API_URL: http://langgraph-api:2026
+      # 容器内 UTF-8 locale：否则 ls/cat 对中文文件名/内容显示 octal 转义（$'\345...'）
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     volumes:
-      # workspace 持久化：语义库 / checkpoint SQLite（开发回退）/ 知识库
-      - workspace:/app/src/agent/workspace
+      # 外部数据根（AGENT_DATA_ROOT=/app/data）：shared + workspace 统一持久化。
+      # 首次启动 WorkspaceManager 自动从镜像内 src/agent/{shared,workspace} 拷贝种子。
+      # 存量升级：把旧 workspace 卷内容拷入 /app/data/workspace（见部署手册 §6）。
+      - agent_data:/app/data
     # 内存限制（服务器 3.4GB，Langfuse 已占 ~2GB）
     deploy:
       resources:
@@ -73,4 +81,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  workspace:
+  agent_data:

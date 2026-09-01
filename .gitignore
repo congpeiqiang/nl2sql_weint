@@ -19,6 +19,14 @@ src/agent/workspace/checkpoint/
 # 忽略 SQLite 数据库大文件
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+# 运行时 DB 及 WAL/SHM 伴生文件（shared/feedback、shared/trace 运行时产物）
+*.db
+*.db-shm
+*.db-wal
 
 # 运行时数据库配置（含加密密码，不入库）
 db_config.json

@@ -36,11 +36,43 @@ def _strip_extended_prefix(p: str) -> str:
     return p
 
 
+# ── {ts} 时间戳占位符 ──────────────────────────────────────────────
+# 报告/文件命名需要精确到时分秒时，模型不再跑 shell 取时间，直接在路径里写
+# {ts}，落盘前展开为当前本地时间（%Y-%m-%d_%H-%M-%S）。
+#
+# 按「去掉 {ts} 后的基础路径」缓存时间戳：同一基础路径（如同一份报告的
+# 文件名）首次展开后固定该值，后续 write/read 用 {ts} 引同一基础路径时
+# 解析到同一文件——避免写完 1 秒后 read 因时间戳变了而找不到文件。
+import threading
+from datetime import datetime as _dt
+
+_TS_CACHE: dict[str, str] = {}
+_TS_CAP = 200
+_TS_LOCK = threading.Lock()
+
+
+def _expand_timestamp(vpath: str) -> str:
+    """把路径中的 {ts} 占位符替换为真实本地时间（秒级）。"""
+    if "{ts}" not in vpath:
+        return vpath
+    base = vpath.replace("{ts}", "")
+    with _TS_LOCK:
+        ts = _TS_CACHE.get(base)
+    if ts is None:
+        ts = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
+        with _TS_LOCK:
+            if len(_TS_CACHE) >= _TS_CAP:
+                _TS_CACHE.pop(next(iter(_TS_CACHE)))  # FIFO 驱逐
+            _TS_CACHE[base] = ts
+    return vpath.replace("{ts}", ts)
+
+
 def _resolve_path_fixed(self: FilesystemBackend, key: str) -> Path:
     if not self.virtual_mode:
         return _ORIGINAL_RESOLVE(self, key)
 
     vpath = key if key.startswith("/") else "/" + key
+    vpath = _expand_timestamp(vpath)
     if ".." in vpath or vpath.startswith("~"):
         raise ValueError("Path traversal not allowed")
 

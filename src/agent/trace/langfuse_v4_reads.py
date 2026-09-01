@@ -107,6 +107,22 @@ def _subject_trace_id(score) -> str:
     return ""
 
 
+def _score_metadata(score) -> dict:
+    """v3 score 的 metadata（fields=details 时返回）。失败/缺失 → {}。
+
+    写端 create_score(metadata={...}) 落在这里；读端据此拿 message_id /
+    feedback_type 等旁路元数据（v4 events 表，legacy 字段路径不同）。
+    """
+    md = getattr(score, "metadata", None)
+    if isinstance(md, dict):
+        return md
+    if isinstance(md, str) and md.strip():
+        d = _parse_str_dict(md)
+        if d:
+            return d
+    return {}
+
+
 def _iter_cursor(fetch_fn, limit_each: int = 100):
     """通用 v4 游标分页迭代。fetch_fn(cursor) 返回 (batch, next_cursor|None)。"""
     cursor = None
@@ -166,6 +182,65 @@ def find_session_main_trace_id(thread_id: str) -> str:
         return ""
     except Exception as e:  # noqa: BLE001
         _logger.warning("[langfuse_v4] 查 session %s 主 trace 失败: %s", thread_id[:12], e)
+        return ""
+
+
+def find_message_trace_id(thread_id: str, message_id: str) -> str:
+    """定位「产生该消息」的 chat-turn trace（用户反馈归属用）。
+
+    用户反馈针对的是某条具体回答（message_id = LangGraph 消息 id，形如
+    lc_run--... 或 UUID）。该消息只出现在「创建它的那次 run」的 root
+    observation output 的 {messages:[...]} 里；更晚的 run 输出/输入也会把
+    它带在对话历史里。故按 start_time **升序**扫 chat_agent 根，
+    第一个 output 含 message_id 的 = 创建它的 trace。
+
+    注意不能取「最新」——find_session_main_trace_id 那种取最新根的做法
+    会把同一会话里不同问题的反馈全归到最后一次查询的 trace 上
+    （2026-08-26 实测：3 条反馈全落 Q4 的 7a03f9...，而 Q1~Q3 各自 trace 没分）。
+    失败/未命中返回空串（调用方回退 find_session_main_trace_id）。
+    """
+    if not message_id:
+        return ""
+    try:
+        from agent.trace.langfuse_client import get_client
+
+        client = get_client()
+        resp = client.api.observations.get_many(
+            fields="core,basic,io",
+            limit=200,
+            filter=_session_root_obs_filter(thread_id),
+        )
+        roots = [
+            o for o in (resp.data or [])
+            if getattr(o, "type", "") == "AGENT"
+            and (getattr(o, "name", "") or "") == "chat_agent"
+            and getattr(o, "is_root_observation", False)
+        ]
+        roots.sort(
+            key=lambda o: (
+                getattr(o, "start_time", None)
+                or datetime.min.replace(tzinfo=timezone.utc)
+            )
+        )
+        for o in roots:
+            out = getattr(o, "output", None)
+            if out is None:
+                continue
+            if isinstance(out, bytes):
+                try:
+                    out = out.decode("utf-8", errors="replace")
+                except Exception:  # noqa: BLE001
+                    continue
+            elif not isinstance(out, str):
+                try:
+                    out = json.dumps(out, ensure_ascii=False, default=str)
+                except Exception:  # noqa: BLE001
+                    continue
+            if message_id in out:
+                return getattr(o, "trace_id", "") or ""
+        return ""
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[langfuse_v4] message→trace 解析失败 %s: %s", thread_id[:12], e)
         return ""
 
 
@@ -238,6 +313,7 @@ def get_trace_scores(trace_id: str) -> list[dict]:
                     "timestamp": getattr(s, "timestamp", None),
                     "source": str(getattr(s, "source", "") or ""),
                     "trace_id": _subject_trace_id(s),
+                    "metadata": _score_metadata(s),
                 }
             )
     except Exception as e:  # noqa: BLE001
@@ -246,11 +322,15 @@ def get_trace_scores(trace_id: str) -> list[dict]:
 
 
 def session_root_traces(session_id: str) -> list[dict]:
-    """该会话全部 root observation（filter sessionId + root）。
+    """该会话全部独立 trace（filter sessionId + root，按 trace_id 去重）。
 
     一个 v4「会话」是多条扁平独立 trace（chat_agent 主 / nl2sql_agent 子 /
     skill 工具各一条），跨 trace 打分归属要逐个 trace 汇总。返回：
     [{trace_id, name, type, start_time}]。
+
+    注意：auto-continue（M-T3d）会复用原 trace，同一 trace 下会有多条 root
+    observation（原 run + 多次续跑）。这里按 trace_id 去重保留最早 root，
+    避免调用方把同一 trace 当多条处理。
     """
     try:
         from agent.trace.langfuse_client import get_client
@@ -261,19 +341,27 @@ def session_root_traces(session_id: str) -> list[dict]:
             limit=200,
             filter=_session_root_obs_filter(session_id),
         )
-        out: list[dict] = []
+        seen: dict[str, dict] = {}
         for o in (resp.data or []):
             tid = getattr(o, "trace_id", "") or ""
             if not tid:
                 continue
-            out.append(
-                {
-                    "trace_id": tid,
-                    "name": getattr(o, "name", "") or "",
-                    "type": getattr(o, "type", "") or "",
-                    "start_time": getattr(o, "start_time", None),
-                }
-            )
+            row = {
+                "trace_id": tid,
+                "name": getattr(o, "name", "") or "",
+                "type": getattr(o, "type", "") or "",
+                "start_time": getattr(o, "start_time", None),
+            }
+            if tid in seen:
+                cur = seen[tid].get("start_time")
+                new = row.get("start_time")
+                if cur is None or (new is not None and new < cur):
+                    seen[tid] = row
+                continue
+            seen[tid] = row
+        out = list(seen.values())
+        # 升序：session_question 优先看最早 run（原始提问），不被续跑通知抢占
+        out.sort(key=lambda r: str(r.get("start_time") or ""))
         return out
     except Exception as e:  # noqa: BLE001
         _logger.warning("[langfuse_v4] 列 session %s roots 失败: %s", session_id[:12], e)
@@ -331,6 +419,32 @@ def session_scores_map(session_id: str) -> dict[str, float]:
     return out
 
 
+def trace_root_inputs(trace_id: str) -> list[str]:
+    """某 trace 全部 root observation 的 input，按 start_time 升序（最早=原始 run）。
+
+    auto-continue（M-T3d）复用原 trace 时会有多条 root：最早一条是用户原始提问
+    的 run，后续是续跑系统通知。get_trace_input 只取 API 返回的第一条（顺序不定，
+    常是最近一条）→ 会取到续跑通知而非原始问题。此函数逐条返回全部 root input，
+    供 session_question 按时间序逐个提取。
+    """
+    try:
+        from agent.trace.langfuse_client import get_client
+
+        client = get_client()
+        resp = client.api.observations.get_many(
+            fields="core,basic,io", limit=50, filter=_root_obs_filter(trace_id),
+        )
+        roots = [
+            o for o in (resp.data or [])
+            if getattr(o, "is_root_observation", False)
+        ]
+        roots.sort(key=lambda o: str(getattr(o, "start_time", "") or ""))
+        return [getattr(o, "input", "") or "" for o in roots]
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[langfuse_v4] 取 trace %s root inputs 失败: %s", trace_id[:12], e)
+        return []
+
+
 def session_question(session_id: str) -> str:
     """从该会话任一 agent trace 的 input 提取用户问题（取第一个非系统 human）。
 
@@ -342,9 +456,10 @@ def session_question(session_id: str) -> str:
         for t in session_root_traces(session_id):
             if t["type"] != "AGENT":
                 continue
-            q = extract_question_from_input(get_trace_input(t["trace_id"]))
-            if q:
-                return q
+            for inp in trace_root_inputs(t["trace_id"]):
+                q = extract_question_from_input(inp)
+                if q:
+                    return q
     except Exception as e:  # noqa: BLE001
         _logger.warning("[langfuse_v4] 提取 session %s 问题失败: %s", session_id[:12], e)
     return ""
@@ -387,11 +502,43 @@ def list_scores(
                     "comment": (getattr(s, "comment", None) or "") or "",
                     "timestamp": getattr(s, "timestamp", None),
                     "source": str(getattr(s, "source", "") or ""),
+                    "metadata": _score_metadata(s),
                 }
             )
     except Exception as e:  # noqa: BLE001
         _logger.warning("[langfuse_v4] 拉 score %s 失败: %s", name, e)
     return rows
+
+
+def list_trace_observation_names(trace_id: str) -> list[str]:
+    """列某 trace 全部 observation 的 name（反馈类型判定用，见 feedback_type.py）。
+
+    失败返回 []（调用方按无信号处理）。
+    """
+    names: list[str] = []
+    try:
+        from agent.trace.langfuse_client import get_client
+
+        client = get_client()
+        flt = _obs_filter(
+            {"type": "string", "column": "traceId", "operator": "=", "value": trace_id}
+        )
+
+        def _page(cursor):
+            resp = client.api.observations.get_many(
+                fields="basic", limit=100, cursor=cursor, filter=flt,
+            )
+            meta = getattr(resp, "meta", None) or getattr(resp, "metadata", None)
+            nxt = getattr(meta, "next_cursor", None) if meta is not None else None
+            return list(resp.data or []), nxt
+
+        for o in _iter_cursor(_page):
+            n = getattr(o, "name", "") or ""
+            if n:
+                names.append(n)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[langfuse_v4] 列 trace %s observation 名失败: %s", trace_id[:12], e)
+    return names
 
 
 # ── 用户会话主 trace 列表（collect_badcase 用）──────────────

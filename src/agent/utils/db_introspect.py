@@ -316,7 +316,7 @@ def _introspect_postgres(cfg: Any) -> IntrospectResult:
     from sqlalchemy import create_engine, inspect
 
     url = (
-        f"postgresql+psycopg2://{cfg.user}:{cfg.password}"
+        f"postgresql+psycopg://{cfg.user}:{cfg.password}"
         f"@{cfg.host}:{cfg.port or 5432}/{cfg.database or ''}"
     )
     engine = create_engine(url)

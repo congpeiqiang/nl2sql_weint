@@ -32,16 +32,17 @@ class PostgresRunner(SqlRunner):
             database: Database name
             user: Database user
             password: Database password
-            **kwargs: Additional psycopg2 connection parameters (sslmode, connect_timeout, etc.)
+            **kwargs: Additional psycopg3 connection parameters (sslmode, connect_timeout, etc.)
         """
         try:
-            import psycopg2
-            import psycopg2.extras
+            import psycopg
+            from psycopg.rows import dict_row
 
-            self.psycopg2 = psycopg2
+            self.psycopg = psycopg
+            self._dict_row = dict_row
         except Exception as e:
             raise ImportError(
-                "psycopg2 package is required. Install with: pip install 'vanna[postgres]'"
+                "psycopg3 (psycopg) package is required. Install with: pip install 'vanna[postgres]'"
             ) from e
 # type: ignore  MS80OmFIVnBZMlhrdUp2bG43bmx2TG82ZVVkR05nPT06ZmIwMDhiMmE=
 
@@ -53,7 +54,7 @@ class PostgresRunner(SqlRunner):
             self.connection_params = {
                 "host": host,
                 "port": port,
-                "database": database,
+                "dbname": database,
                 "user": user,
                 "password": password,
                 **kwargs,
@@ -74,15 +75,15 @@ class PostgresRunner(SqlRunner):
             DataFrame with query results
 
         Raises:
-            psycopg2.Error: If query execution fails
+            psycopg3.Error: If query execution fails
         """
         # Connect to the database using either connection string or parameters
         if self.connection_string:
-            conn = self.psycopg2.connect(self.connection_string)
+            conn = self.psycopg.connect(self.connection_string)
         else:
-            conn = self.psycopg2.connect(**self.connection_params)
+            conn = self.psycopg.connect(**self.connection_params)
 
-        cursor = conn.cursor(cursor_factory=self.psycopg2.extras.RealDictCursor)
+        cursor = conn.cursor(row_factory=self._dict_row)
 # noqa  Mi80OmFIVnBZMlhrdUp2bG43bmx2TG82ZVVkR05nPT06ZmIwMDhiMmE=
 
         try:

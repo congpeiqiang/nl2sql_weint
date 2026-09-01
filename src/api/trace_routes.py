@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-from pathlib import Path
 from typing import Optional
 
 from starlette.requests import Request
@@ -27,22 +25,22 @@ from agent.workspace_manager import get_workspace_manager
 
 _logger = logging.getLogger(__name__)
 
-# ── 单例 EventStore（延迟初始化，按工作区创建） ──────────────
+# ── 单例 EventStore（延迟初始化，trace 全局共享） ──────────────
 _store: Optional[EventStore] = None
-_store_workspace: Optional[str] = None
 
 
 def _get_store() -> EventStore:
-    """获取当前工作区的 EventStore 实例。"""
-    global _store, _store_workspace
-    wm = get_workspace_manager()
-    ws = str(wm.active_workspace)
+    """获取全局共享的 EventStore 实例（不随工作区切换）。
 
-    if _store is None or _store_workspace != ws:
-        db_path = os.path.join(ws, "traces.sqlite")
+    2026-08-27 决策：traces.sqlite 全局共享，切换工作区不丢历史 trace。
+    """
+    global _store
+    wm = get_workspace_manager()
+    db_path = str(wm.shared_trace_db)
+
+    if _store is None:
         _store = EventStore(db_path)
         _store.open()
-        _store_workspace = ws
         _logger.info("[trace_api] store opened: %s", db_path)
 
     return _store

@@ -5,7 +5,7 @@
   ],
   "_buildId": "id_MC81OmFIVnBZMlhrdUp2bG43bmx2TG82VDJacGJ3PT06NWI0OTVlNWQ=",
   "graphs": {
-    "chat_agent": {
+    "main_agent": {
       "path": "./src/agent/main_agent.py:agent"
     },
     "nl2sql_agent": {

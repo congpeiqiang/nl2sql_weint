@@ -32,18 +32,14 @@ from api._common import json_response
 
 _logger = logging.getLogger(__name__)
 
-# 索引文件与 checkpoints.sqlite 同目录（.env CHECKPOINT_DB_PATH / WorkspaceManager）。
+# 索引文件与 checkpoints.sqlite 同目录（全局共享 checkpoint 目录）。
+# 2026-08-27 决策：checkpoint/fts 全局共享，不随工作区切换。
 def _index_db_path() -> str:
-    from agent.settings.setting import settings
-
-    base = getattr(settings, "CHECKPOINT_DB_PATH", "") or ""
-    if base:
-        return os.path.join(base, "fts.sqlite")
-    # 由 WorkspaceManager 动态解析
     from agent.workspace_manager import get_workspace_manager
+
     wm = get_workspace_manager()
-    wm.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    return str(wm.checkpoint_dir / "fts.sqlite")
+    wm.shared_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    return str(wm.shared_checkpoint_dir / "fts.sqlite")
 
 
 def _base_url() -> str:

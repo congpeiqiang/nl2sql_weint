@@ -21,10 +21,14 @@ _logger = logging.getLogger(__name__)
 
 
 def _validate_workspace_path(path: str) -> Path:
-    """验证工作区目录路径。"""
+    """校验工作区路径。
+
+    不存在时放行（注册时由 register_workspace 自动创建目录）；
+    已存在但非目录（是文件）时拒绝，避免把文件当工作区目录。
+    """
     p = Path(path).resolve()
-    if not p.is_dir():
-        raise ValueError(f"目录不存在: {path}")
+    if p.exists() and not p.is_dir():
+        raise ValueError(f"路径已存在但不是目录: {path}")
     return p
 
 
@@ -86,6 +90,8 @@ async def activate_workspace(request: Request):
         return json_response(result)
     except KeyError as e:
         return json_response({"error": str(e)}, status=404)
+    except ValueError as e:
+        return json_response({"error": str(e)}, status=400)
 
 
 async def unregister_workspace(request: Request):
@@ -115,8 +121,9 @@ async def get_active_workspace(request: Request):
         {
             "active": wm.active_name,
             "path": str(wm.active_workspace),
-            "checkpoint_dir": str(wm.checkpoint_dir),
-            "feedback_dir": str(wm.feedback_dir),
+            # checkpoint/trace/fts/feedback 全局共享，返回共享路径（不随工作区切换）
+            "checkpoint_dir": str(wm.shared_checkpoint_dir),
+            "feedback_dir": str(wm.shared_feedback_dir),
             "report_dir": str(wm.report_dir),
             "semantic_dir": str(wm.semantic_dir),
         }

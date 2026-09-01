@@ -53,6 +53,8 @@ generate_echarts: width=1000, height=500, outputType=option, echartsOption={back
 | `scatter` | 散点图 |
 | `area` | 面积图（line + areaStyle） |
 
+> ⚠️ **强约束：bar / line / scatter 必须同时配置 `xAxis` 与 `yAxis`**，否则图表校验失败报 "Invalid ECharts option"（系统会自动补缺省轴，但最好一次生成正确）。柱状/折线：`xAxis:{type:'category', data:[类目]}` + `yAxis:{type:'value'}`；散点：`xAxis:{type:'value'}` + `yAxis:{type:'value'}`。pie 不需要坐标轴。
+
 **水平柱状图（标签过长时）：**
 ```javascript
 // 通过 grid.left 控制左边距，避免长标签被裁剪
@@ -62,6 +64,8 @@ generate_echarts: width=1000, height=500, outputType=option, echartsOption={back
 **图表输出格式：** `outputType="option"` 返回 ECharts 配置 JSON，系统自动包装为交互式 HTML 图表渲染在会话中，并保存为 `.html` 文件到 `/workspace/report/` 目录。
 
 **报告必须内嵌图表（可交互）：**
+
+> ✅ **优先用 `build_report` 工具装配报告**——它会自动把 generate_echarts 返回的 iframe 内嵌进报告附录，无需手工粘贴。
 
 生成图表后，使用 `report-export` 技能导出报告时，附录（`## 5. 附录`）**必须把工具返回的可交互 iframe 原样内嵌进报告**，禁止只写文字描述（如"已渲染为交互式 HTML 图表"）。附录必须包含：
 

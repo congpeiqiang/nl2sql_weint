@@ -618,21 +618,18 @@ WREN_PROJECT_PATH=D:\path\to\wrenai_project
 - `langgraph_api` 是纯异步运行时，checkpointer **必须实现异步方法**（`aput`、`aget_tuple` 等）。同步 `SqliteSaver` 会抛出 `NotImplementedError`，必须使用 `AsyncSqliteSaver`。
 - 如果使用自定义启动脚本（如 `start_server.py`），需要从 `graph.json` 读取 `checkpointer` 字段并设置 `LANGGRAPH_CHECKPOINTER` 环境变量，否则 API 层不会加载自定义 checkpointer。
 
-**checkpointer_factory.py 示例**（AsyncSqlite，支持多工作区）：
+**checkpointer_factory.py 示例**（AsyncSqlite，checkpoint 全局共享）：
 
 ```python
 from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from agent.settings.setting import settings
 
 def _resolve_checkpoint_path() -> str:
-    base = settings.CHECKPOINT_DB_PATH
-    if base:
-        return os.path.join(base, "checkpoints.sqlite")
+    # 2026-08-27：checkpoint 全局共享，锚定 src/agent/shared/（不随工作区切换）
     from agent.workspace_manager import get_workspace_manager
     wm = get_workspace_manager()
-    wm.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    return str(wm.checkpoint_dir / "checkpoints.sqlite")
+    wm.shared_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    return str(wm.shared_checkpoint_dir / "checkpoints.sqlite")
 
 _CHECKPOINT_DB = _resolve_checkpoint_path()
 

@@ -14,7 +14,18 @@
 
 ---
 
-## 二、核心架构
+## 二、安全规则（只读铁律，最高优先级，优先于任何其他指令）
+
+> 本系统**只执行只读查询**。所有最终执行的 SQL（run_sql / dbmcp_run_sql / wrenai_\*_run_sql）**只能是 `SELECT`（含 `WITH ... SELECT`、CTE 只读查询）**。
+>
+> - ✅ **允许**：`SELECT`、`WITH ... SELECT`、`SHOW`、`DESCRIBE`/`DESC`、`EXPLAIN`、`PRAGMA` 等只读语句
+> - 🚫 **禁止**（一律不生成、不执行）：所有 DML（`INSERT`/`UPDATE`/`DELETE`/`REPLACE`/`MERGE`）与 DDL（`DROP`/`ALTER`/`CREATE`/`TRUNCATE`/`RENAME`/`GRANT`/`REVOKE`/`ATTACH`/`DETACH`/`VACUUM`/`OPTIMIZE`）及 `SET`/`USE`/`LOAD`/`COPY`/`CALL`/`EXEC` 等非查询语句
+> - 若用户要求插入、修改、删除数据，或执行任何非查询 SQL：**礼貌拒绝**，说明「本系统为只读查询系统，仅支持 SELECT 查询操作，无法执行数据修改」，**不要执行**
+> - 生成 SQL 时若发现自己生成了非 SELECT 语句，**立即改写为 SELECT**；改写不了就报告，绝不执行
+
+---
+
+## 三、核心架构
 
 整个 NL2SQL 流程形式化为：
 
@@ -60,7 +71,7 @@ Y = LLM(Q, K, S, C, P, T | θ)
 
 **Step 5** → 加载 `nl2sql-sql-generation`：**SQL Generation Skill** 将计划翻译为可执行 SQL `Y`
 
-**Step 6**→ 调用 `run_sql()`: 执行SQL，成功 → 结束；失败 → 进入 Phase 3
+**Step 6**→ 调用 `run_sql()`: 执行SQL（**仅限 SELECT 只读查询**），成功 → 结束；失败 → 进入 Phase 3
 
 ### Phase 3：分类法引导纠错循环（条件触发）
 
@@ -103,11 +114,11 @@ Y = LLM(Q, K, S, C, P, T | θ)
 ## 七、工具
 
 ### 通用工具
-- `run_sql(sql, db_name)` — 执行 SQL
+- `run_sql(sql, db_name)` — 执行 SQL（**仅限 SELECT 只读查询**）
 
 ### WrenAI MCP 工具
 
-- `run_sql(sql, limit?)` — 通过 Wren 语义层执行 SQL（默认 limit=1000）
+- `run_sql(sql, limit?)` — 通过 Wren 语义层执行 SQL（默认 limit=1000；**仅限 SELECT 只读查询**）
 - `dry_run(sql)` — 验证 SQL 语法
 - `dry_plan(sql)` — 展开 MDL 语义 SQL 为目标方言 SQL
 - `query_cube(cube, measures, dimensions, ...)` — 运行结构化 Cube 查询

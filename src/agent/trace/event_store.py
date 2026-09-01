@@ -1,7 +1,7 @@
 """EventStore — SQLite 事件持久化存储。
 
-每个 workspace 独立一个 traces.sqlite，与 checkpoint/feedback 隔离模式一致。
-提供建表、CRUD、谱系管理功能。
+traces.sqlite 全局共享（默认工作区），与 checkpoint/feedback/fts 隔离模式一致，
+不随工作区切换（2026-08-27 决策）。提供建表、CRUD、谱系管理功能。
 """
 from __future__ import annotations
 

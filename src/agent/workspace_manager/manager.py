@@ -2,15 +2,20 @@
 
 设计：
 - 每个工作区是一个独立目录，包含 checkpoint/feedback/db_config/语义库/报告/中间数据。
-- memory/、skills/、model_config.json 全局共享，位于后端项目的 `src/agent/shared/`。
-- 默认工作区 = `src/agent/workspace/`（零配置回退，兼容现有部署）。
+- memory/、skills/、model_config.json 全局共享，位于共享资源根（`_SHARED_RESOURCES_DIR`）。
+- **外部基础目录（2026-08-28）**：`.env` 配置 `AGENT_DATA_ROOT`（项目外目录）后，
+  shared 与默认工作区统一放到 `<AGENT_DATA_ROOT>/{shared,workspace}`，代码根 src/agent/
+  彻底退出 VFS（main_agent/nl2sql_agent 的 `/` 兜底路由改为指向 data_root）。
+  首次运行若外部目录缺失，自动从仓库内置 `src/agent/{shared,workspace}` 原子拷贝种子。
+  未配置时回退仓库内 `src/agent/{shared,workspace}`（兼容现有部署）。
 - 注册表 `workspaces.json` 记录所有工作区及当前活跃工作区。
 - 活跃工作区切换即时生效（DynamicFilesystemBackend 每次操作前重新解析 root_dir）。
 
 隔离矩阵：
-    按工作区隔离：db_config.json, checkpoint/, feedback/, semantic/, report/, tmp/,
+    按工作区隔离：db_config.json, semantic/, report/, tmp/,
                   nl2sql_process_data/, large_tool_results/
-    全局共享：    memory/, skills/, model_config.json（可选工作区覆盖）
+    全局共享：    memory/, skills/, model_config.json, checkpoint/,
+                  trace/, feedback/, fts.sqlite
 
 用法：
     from agent.workspace_manager import get_workspace_manager
@@ -29,6 +34,13 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
+# 必须先加载 .env 再读 AGENT_DATA_ROOT / SHARED_RESOURCES_PATH 等模块级 env——
+# 否则 import 顺序不同时（如 eval 脚本直连、Docker env 注入）外部基础目录会静默回退。
+# 默认 override=False：Docker 已注入的 env（如 AGENT_DATA_ROOT=/app/data）不被 .env 覆盖。
+load_dotenv()
+
 _logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
@@ -39,15 +51,25 @@ _DEFAULT_REGISTRY_PATH = os.getenv(
     str(Path(__file__).resolve().parent / "workspaces.json"),
 )
 
-# 默认工作区目录（零配置回退，即现有 src/agent/workspace/）
-# manager.py 在 workspace_manager/ 子目录下，需要上两层到 src/agent/
-_DEFAULT_WORKSPACE_DIR = Path(__file__).resolve().parent.parent / "workspace"
+# 仓库内置种子目录锚点（随 git 分发）：manager.py 在 workspace_manager/ 子目录，
+# 上两层到 src/agent/。shared 与 workspace 的仓库种子从这里拷贝到外部基础目录。
+_REPO_AGENT_DIR = Path(__file__).resolve().parent.parent
+
+# 外部基础目录（项目外，.env AGENT_DATA_ROOT 配置）——shared 与默认工作区都放在这里。
+# 配置后：shared → <AGENT_DATA_ROOT>/shared，默认工作区 → <AGENT_DATA_ROOT>/workspace。
+# 为空 = 未配置，回退仓库内 src/agent/（旧行为，兼容现有部署）。
+_DATA_ROOT = os.getenv("AGENT_DATA_ROOT", "").strip()
+
+# 默认工作区目录：AGENT_DATA_ROOT/workspace（配置时）→ src/agent/workspace（回退）
+_DEFAULT_WORKSPACE_DIR = (
+    Path(_DATA_ROOT) / "workspace" if _DATA_ROOT else _REPO_AGENT_DIR / "workspace"
+)
 
 # 共享资源根目录（memory/、skills/、model_config.json 的父目录）
-# 独立于默认工作区：src/agent/shared/（可被 .env SHARED_RESOURCES_PATH 覆盖）
+# 优先级：SHARED_RESOURCES_PATH env → AGENT_DATA_ROOT/shared → src/agent/shared
 _SHARED_RESOURCES_DIR = Path(
     os.getenv("SHARED_RESOURCES_PATH")
-    or Path(__file__).resolve().parent.parent / "shared"
+    or (Path(_DATA_ROOT) / "shared" if _DATA_ROOT else _REPO_AGENT_DIR / "shared")
 )
 
 
@@ -62,6 +84,7 @@ class WorkspaceManager:
         self._registry_path = Path(registry_path or _DEFAULT_REGISTRY_PATH)
         self._cache: Optional[dict] = None
         self._cache_valid = False
+        self._seed_data_root_once()  # 首次运行：外部基础目录缺失时从仓库种子初始化
 
     # ── 注册表读写 ──────────────────────────────────────────
 
@@ -104,16 +127,49 @@ class WorkspaceManager:
             self._cache_valid = False
             self._cache = None
 
+    # ── 首次运行种子初始化 ───────────────────────────────────
+
+    def _seed_data_root_once(self) -> None:
+        """首次运行初始化：AGENT_DATA_ROOT 配置时，若外部 shared/workspace 缺失，
+        从仓库内置 `src/agent/shared`、`src/agent/workspace` 原子拷贝种子。
+
+        目的：.env 里只配 `AGENT_DATA_ROOT` 即可跑起来（本地全新克隆 / Docker 首启），
+        无需手工拷贝。目录已存在则跳过（此后运行时数据以外部目录为准，仓库种子不再改动）。
+
+        原子性：先拷到同名 `.seed_tmp`，成功后 `os.replace` 改名，避免拷贝中断留下
+        半成品目录导致后续运行误判「已存在」。
+        """
+        import shutil
+
+        if not _DATA_ROOT:
+            return  # 未配置外部基础目录，沿用仓库内目录，无需种子
+        for target, seed in (
+            (_SHARED_RESOURCES_DIR, _REPO_AGENT_DIR / "shared"),
+            (_DEFAULT_WORKSPACE_DIR, _REPO_AGENT_DIR / "workspace"),
+        ):
+            try:
+                if target.is_dir() or not seed.is_dir():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target.parent / f"{target.name}.seed_tmp"
+                shutil.rmtree(tmp, ignore_errors=True)
+                shutil.copytree(seed, tmp)
+                os.replace(tmp, target)
+                _logger.info("[workspace] 首次运行：从仓库种子初始化 %s → %s", seed, target)
+            except OSError as e:
+                _logger.warning(
+                    "[workspace] 种子初始化 %s 失败: %s（继续使用仓库内目录）", target, e
+                )
+
     # ── 活跃工作区 ──────────────────────────────────────────
 
-    @property
-    def active_workspace(self) -> Path:
-        """当前活跃工作区的根目录。
+    def _resolve_active_path(self) -> Path:
+        """解析当前活跃工作区的实际目录。
 
-        解析顺序：
-        1. 注册表 `workspaces.json` 中 `active` 字段指向的工作区路径
-        2. 环境变量 `WORKSPACE_PATH` 覆盖
-        3. 默认工作区 `src/agent/workspace/`（零配置回退）
+        顺序：注册表 active 指向的路径 → 环境变量 WORKSPACE_PATH → 默认工作区。
+        前两级都校验目录存在，不存在则回退下一级（并打 warning 便于排障）。
+        这是活跃工作区的**唯一**路径来源；`active_name` 按它反查名称，
+        保证「显示的名称」与「实际生效的目录」永远一致。
         """
         with _LOCK:
             if not self._cache_valid:
@@ -127,6 +183,10 @@ class WorkspaceManager:
                     p = Path(ws["path"])
                     if p.is_dir():
                         return p.resolve()
+                    _logger.warning(
+                        "[workspace] 活跃工作区 '%s' 目录不存在: %s，回退默认/环境变量",
+                        active_name, ws["path"],
+                    )
 
             # 环境变量覆盖
             env_path = os.getenv("WORKSPACE_PATH", "")
@@ -139,18 +199,55 @@ class WorkspaceManager:
             return _DEFAULT_WORKSPACE_DIR.resolve()
 
     @property
+    def active_workspace(self) -> Path:
+        """当前活跃工作区的根目录。
+
+        解析顺序（见 _resolve_active_path）：
+        1. 注册表 `workspaces.json` 中 `active` 字段指向的工作区路径
+        2. 环境变量 `WORKSPACE_PATH` 覆盖
+        3. 默认工作区 `src/agent/workspace/`（零配置回退）
+        """
+        return self._resolve_active_path()
+
+    @property
     def active_name(self) -> str:
-        """当前活跃工作区的名称。默认工作区返回 'default'。"""
+        """当前活跃工作区名称，与 `active_workspace` 实际解析到的目录严格一致。
+
+        按实际目录反查注册表名称；查不到（目录缺失回退默认、或 WORKSPACE_PATH
+        指向未注册目录）时返回 'default'——不再返回「注册表里但目录已不存在」的悬空名。
+        """
         try:
+            actual = self._resolve_active_path()
             with _LOCK:
                 if not self._cache_valid:
                     self._refresh_cache()
                 assert self._cache is not None
-                return self._cache.get("active") or "default"
+                workspaces = self._cache.get("workspaces") or {}
+            for k, v in workspaces.items():
+                if not v.get("path"):
+                    continue
+                try:
+                    if Path(v["path"]).resolve() == actual:
+                        return k
+                except OSError:
+                    continue
+            return "default"
         except Exception:
             return "default"
 
     # ── 共享资源路径（固定，不随工作区切换）──────────────────
+
+    @property
+    def data_root(self) -> Path:
+        """VFS 根后端目录 = 共享资源根的父目录（shared 的上一层）。
+
+        - 配置 AGENT_DATA_ROOT 时 = 该外部基础目录（代码根 src/agent/ 彻底退出 VFS）；
+        - 未配置（旧部署）时 = src/agent/（兼容旧 VFS，行为与 `shared_code_backend` 一致）。
+
+        main_agent / nl2sql_agent 的 `vfs_root_backend` 以此为根；SkillsMiddleware 的
+        `sources=["/shared/skills/main/"]` 也经它解析（shared 必须是 data_root 的子目录）。
+        """
+        return _SHARED_RESOURCES_DIR.parent
 
     @property
     def shared_memory_dir(self) -> Path:
@@ -167,16 +264,46 @@ class WorkspaceManager:
         """共享 model_config.json（默认路径，可被工作区覆盖）。"""
         return _SHARED_RESOURCES_DIR / "model_config.json"
 
+    # ── 全局共享数据路径（不随工作区切换）────────────────────
+    # 2026-08-27 决策：checkpoint/trace/fts/feedback 全局共享，切换工作区不丢会话。
+    # 数据锚点 = src/agent/shared/（_SHARED_RESOURCES_DIR，可被 .env
+    # SHARED_RESOURCES_PATH 覆盖）。workspace/ 本身是默认工作区目录，不能作为
+    # 共享锚点。隔离矩阵更新为：
+    #   按工作区隔离：db_config.json, semantic/, report/, tmp/,
+    #                 nl2sql_process_data/, large_tool_results/
+    #   全局共享：    memory/, skills/, model_config.json, checkpoint/,
+    #                 trace/, feedback/, fts.sqlite
+
+    @property
+    def shared_data_root(self) -> Path:
+        """全局共享数据根目录（所有工作区共用，锚定 _SHARED_RESOURCES_DIR）。"""
+        return _SHARED_RESOURCES_DIR
+
+    @property
+    def shared_checkpoint_dir(self) -> Path:
+        """全局共享 checkpoint 目录（所有工作区共用）。"""
+        return _SHARED_RESOURCES_DIR / "checkpoint"
+
+    @property
+    def shared_trace_db(self) -> Path:
+        """全局共享 trace 库路径（所有工作区共用，独立子目录存放 .sqlite/-shm/-wal）。"""
+        return _SHARED_RESOURCES_DIR / "trace" / "traces.sqlite"
+
+    @property
+    def shared_feedback_dir(self) -> Path:
+        """全局共享 feedback 目录（所有工作区共用）。"""
+        return _SHARED_RESOURCES_DIR / "feedback"
+
     # ── 工作区级路径（随活跃工作区变化）──────────────────────
 
     @property
     def checkpoint_dir(self) -> Path:
-        """当前工作区的 checkpoint 目录。"""
+        """当前工作区的 checkpoint 目录（仅供展示，实际存储走 shared_checkpoint_dir）。"""
         return self.active_workspace / "checkpoint"
 
     @property
     def feedback_dir(self) -> Path:
-        """当前工作区的 feedback 目录。"""
+        """当前工作区的 feedback 目录（仅供展示，实际存储走 shared_feedback_dir）。"""
         return self.active_workspace / "feedback"
 
     @property
@@ -238,7 +365,7 @@ class WorkspaceManager:
                     "name": "默认工作区",
                     "created_at": "",
                 }
-            active = self._cache.get("active") or "default"
+            active = self.active_name
             return [
                 {**v, "name_key": k, "active": k == active}
                 for k, v in workspaces.items()
@@ -247,13 +374,22 @@ class WorkspaceManager:
     def register_workspace(self, name: str, path: str, display_name: str = "") -> dict:
         """注册一个新工作区。
 
-        - 如果目录不存在，自动创建并初始化子目录结构
-        - 如果目录已存在且非空，不覆盖已有文件，只初始化缺失的子目录
+        - 路径不存在时自动创建（含父目录链）并初始化子目录结构
+        - 路径已存在且非空，不覆盖已有文件，只初始化缺失的子目录
+        - 路径已存在但是文件 → 拒绝（无法作为工作区目录）
         - name 用于注册表唯一标识（如 "project-a"）
         """
         p = Path(path).resolve()
+
+        if p.exists() and not p.is_dir():
+            raise ValueError(f"路径已存在但不是目录: {path}")
+
         if not p.is_dir():
-            raise ValueError(f"目录不存在: {path}")
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+                _logger.info("[workspace] 注册工作区时自动创建目录: %s", p)
+            except OSError as e:
+                raise ValueError(f"无法创建目录 {path}: {e}") from e
 
         # 初始化工作区子目录结构
         self._init_workspace_dirs(p)
@@ -303,6 +439,12 @@ class WorkspaceManager:
                     "created_at": "",
                 }
                 reg["workspaces"] = workspaces
+
+            # 切换前校验目录存在，避免「激活成功但运行时回退默认目录」的悬空态
+            if name != "default":
+                p = Path(workspaces[name]["path"])
+                if not p.is_dir():
+                    raise ValueError(f"工作区 '{name}' 目录不存在: {p}")
 
             reg["active"] = name
             self._write_registry(reg)

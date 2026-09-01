@@ -18,7 +18,7 @@ from deepagents.middleware import SkillsMiddleware
 from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from agent.llms.model import deepseek_model
 from agent.tools.mcp_tool import main_tools as mcp_tools
-from agent.settings.setting import settings
+from agent.tools.report_builder import build_report_tool
 from agent.settings.file_permissions import FILE_PERMISSIONS
 from agent.middlewares.query_keywords import QueryKeywordsMiddleware
 from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
@@ -27,7 +27,11 @@ from agent.middlewares.current_db_context import CurrentDbContextMiddleware
 from agent.middlewares.token_meter import TokenMeterMiddleware, _accumulate_token_stats
 from agent.middlewares.trace_recorder import TraceRecorderMiddleware
 from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
+from agent.middlewares.vfs_path_resolver import VfsPathResolverMiddleware
+from agent.middlewares.execute_guard import ExecuteGuardMiddleware
+from agent.middlewares.quota_error import QuotaErrorMiddleware
 from agent.trace.langfuse_client import get_langfuse_callbacks, get_prompt_text
+from agent.utils.skills_versioning import effective_skills_sources
 from typing import Annotated
 from typing_extensions import NotRequired
 
@@ -59,22 +63,18 @@ def _build_system_prompt() -> str:
         required_markers=["{{CHART_SPEC}}", "{{CHART_ENGINE_NAME}}", "{{CHART_OUTPUT_FORMAT}}"],
         min_chars=100,
     )
-    engine = settings.CHART_ENGINE.lower()
-
-    # 读取对应引擎的图表规范
-    chart_spec_path = Path(__file__).parent / "prompt" / "chart_specs" / f"{engine}.md"
+    # 读取 ECharts 图表规范
+    chart_spec_path = Path(__file__).parent / "prompt" / "chart_specs" / "echarts.md"
     if chart_spec_path.exists():
         chart_spec = chart_spec_path.read_text(encoding="utf-8")
     else:
-        # 回退到 semiotic
-        chart_spec_path = Path(__file__).parent / "prompt" / "chart_specs" / "semiotic.md"
-        chart_spec = chart_spec_path.read_text(encoding="utf-8")
-        engine = "semiotic"
+        chart_spec = ""
+        _log.warning("[main_agent] chart_specs/echarts.md 不存在，图表规范将缺失")
 
     # 替换占位符
     prompt = base.replace("{{CHART_SPEC}}", chart_spec)
-    prompt = prompt.replace("{{CHART_ENGINE_NAME}}", "Semiotic" if engine == "semiotic" else "ECharts")
-    # prompt = prompt.replace("{{CHART_OUTPUT_FORMAT}}", "SVG" if engine == "semiotic" else "PNG")
+    prompt = prompt.replace("{{CHART_ENGINE_NAME}}", "ECharts")
+    # prompt = prompt.replace("{{CHART_OUTPUT_FORMAT}}", "PNG")
     prompt = prompt.replace("{{CHART_OUTPUT_FORMAT}}", "html")
 
     return prompt
@@ -124,26 +124,35 @@ def dynamic_prompt(request: ModelRequest) -> str:
 # - "/shared/memory/" → shared_memory_backend（共享 memory）
 # - "/shared/skills/" → shared_skills_backend（共享 skills）
 # - "/workspace/"        → workspace_data_backend（当前工作区：report/tmp/process_data 等）
-# - "/"                  → shared_code_backend（代码文件：prompt/settings 等）
-shared_code_backend = FilesystemBackend(root_dir=base_dir, virtual_mode=True)
+# - "/"                  → vfs_root_backend（VFS 根：AGENT_DATA_ROOT 配置时指向项目外
+#                          基础目录，代码根 src/agent/ 彻底退出 VFS；未配置时回退 src/agent/）
+vfs_root_backend = FilesystemBackend(root_dir=_wm.data_root, virtual_mode=True)
 shared_memory_backend = FilesystemBackend(root_dir=_shared_memory_dir, virtual_mode=True)
 shared_skills_backend = FilesystemBackend(root_dir=_shared_skills_dir, virtual_mode=True)
+# skill 版本化：SKILLS_REF 物化目录（<data_root>/skill_refs/），skill 脚本经 VFS 也读物化版
+skills_ref_backend = FilesystemBackend(root_dir=_wm.data_root / "skill_refs", virtual_mode=True)
 # 动态工作区：每次操作前从 WorkspaceManager 重新解析 root_dir，切换工作区即时生效
 workspace_data_backend = DynamicFilesystemBackend(get_root_dir=lambda: _wm.active_workspace)
 shell_backend = DynamicLocalShellBackend(get_root_dir=lambda: _wm.active_workspace, inherit_env=True)
 
 composite_backend = CompositeBackend(
     default=shell_backend,
+    # 中间产物（自动压缩 conversation_history / 溢出 large_tool_results）统一落到
+    # 前端选择的工作区（{active_workspace}/conversation_history、.../large_tool_results）。
+    # 默认 "/" 会把它们路由到 vfs_root_backend（项目外数据根），造成跨工作区混放。
+    artifacts_root="/workspace/",
     routes={
         "/shared/memory/": shared_memory_backend,
         "/shared/skills/": shared_skills_backend,
+        "/skill_refs/": skills_ref_backend,
         "/workspace/": workspace_data_backend,
-        "/": shared_code_backend,
+        "/": vfs_root_backend,
     },
 )
+# SKILLS_REF 实验注入时换成物化版 skill，默认仍读共享磁盘 skill
 skills_middleware = SkillsMiddleware(
-    backend=shared_code_backend,
-    sources=["/shared/skills/main/"]
+    backend=vfs_root_backend,
+    sources=effective_skills_sources(["/shared/skills/main/"], group="main"),
 )
 # 从运行时 context 读取前端传入的查询关键词，注入系统提示词，
 # 使 LLM 委派判断与前端拦截判断使用同一份关键词。
@@ -151,11 +160,18 @@ query_keywords_middleware = QueryKeywordsMiddleware()
 # 前端「开启思考过程」开关 → 每次模型调用按 configurable.enable_thinking 重建模型
 thinking_toggle_middleware = ThinkingToggleMiddleware()
 # 方案 B L1：工具结果进入 checkpoint 前瘦身——超大结果落盘截断（head+tail 预览 + 路径指针）、
-# 完全重复结果去重为小占位。阈值/开关见 MessageSlimmerMiddleware 构造参数。
-message_slimmer = MessageSlimmerMiddleware(backend=composite_backend, max_chars_before_truncate=8_000)
+# 完全重复结果去重为小占位。阈值由 MessageSlimmerMiddleware 从环境变量
+# LARGE_RESULT_TRUNCATE_CHARS 读取（默认 8000；传 None 显式关闭截断）。
+message_slimmer = MessageSlimmerMiddleware(backend=composite_backend)
 # 把当前库名（configurable.db_name）注入最新用户消息，作为当轮最高优先级信号，
 # 防止 LLM 被对话历史/总结里过时的库名误导（切库后仍按旧库委派）。
 db_context_middleware = CurrentDbContextMiddleware()
+# 模型输出后处理：把最终 AIMessage 里的 VFS 路径（/workspace/report/...）改写为真实
+# 磁盘路径（D:/workspace1/report/...），让聊天显示可打开、含工作区名的路径。
+vfs_path_resolver = VfsPathResolverMiddleware()
+# execute（shell）护栏：文件权限管不住 execute（LocalShellBackend 直接跑宿主 shell），
+# 这里拦截破坏性命令与工作区外路径引用（rm /tmp/x 等），见 execute_guard.py。
+execute_guard = ExecuteGuardMiddleware()
 
 nl2sql_async = AsyncSubAgent(
     name="nl2sql",
@@ -214,16 +230,18 @@ if _agent_model is None:
     )
 
 trace_recorder = TraceRecorderMiddleware(
-    db_path=str(_wm.active_workspace / "traces.sqlite"),
+    db_path=str(_wm.shared_trace_db),
     agent_type="chat_agent",
 )
 
 agent = create_deep_agent(
     model=_agent_model,
-    tools=mcp_tools,
+    tools=[*mcp_tools, build_report_tool],
     subagents=[nl2sql_async],
     memory=["/shared/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
-    middleware=[skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent")],
+    # vfs_path_resolver 放列表末尾（最内层、紧贴模型）：后处理在 langfuse_span /
+    # trace_recorder 等外层记录之前完成，保证 trace、checkpoint、前端看到同一份真实路径。
+    middleware=[QuotaErrorMiddleware(), execute_guard, skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent"), vfs_path_resolver],
     backend=composite_backend,
     permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写
     system_prompt=SYSTEM_PROMPT,

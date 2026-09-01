@@ -3,14 +3,9 @@
   "active": "default",
   "workspaces": {
     "default": {
-      "path": "D:\\code_work_space\\llm\\nl2sql\\src\\agent\\workspace",
+      "path": "/app/data/workspace",
       "name": "默认工作区",
       "created_at": ""
-    },
-    "测试工作区111": {
-      "path": "D:\\tem",
-      "name": "测试工作区",
-      "created_at": "2026-08-20T05:33:45.988062+00:00"
     }
   }
 }

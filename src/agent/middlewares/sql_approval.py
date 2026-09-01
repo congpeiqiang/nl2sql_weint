@@ -1,20 +1,25 @@
 # -*- coding: utf-8 -*-
-"""SQL 执行审批闸门（P1-3，对标 deepseek-harness interaction/user-approval）。
+"""SQL 只读硬拦截（原 P1-3 审批闸门升级，2026-08-28）。
 
 在 nl2sql 子 agent 的 run_sql 类工具执行前做确定性分类：
-- 只读查询（SELECT/WITH...SELECT）→ 直接放行（含全表拉取，不再审批）；
-- 写/DDL（INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE...）→ interrupt 审批。
+- 只读查询（SELECT/WITH...SELECT/SHOW/DESCRIBE/EXPLAIN/PRAGMA...）→ 直接放行（含全表拉取）；
+- 写/DDL（INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE...）→ **直接拒绝执行**，
+  返回 ``status="error"`` 的 ToolMessage，不执行、不弹人工审批卡。
 
-实现：langchain 1.x ``HumanInTheLoopMiddleware``（after_model 阶段 interrupt），
-payload 为 ``{action_requests, review_configs}``——与前端 ToolApprovalInterrupt
-组件的协议一致。用户决策（approve/edit/reject）经后端恢复端点
-``POST /api/threads/{sub_thread_id}/sql-approval`` 回传，子 run 继续执行。
-
-策略开关：前端 localStorage 持久化（ask/never），随 configurable.sql_approval_policy
-透传（主 agent run → deepagents_async_config_patch → 子 agent run）。
+历史（v1）：曾用 langchain 1.x ``HumanInTheLoopMiddleware``（after_model 阶段 interrupt）做
+写/DDL 人工审批，前端 ToolApprovalInterrupt + 后端 ``POST /api/threads/{tid}/sql-approval`` 恢复。
+2026-08-28 产品要求「执行的 SQL 只运行查询操作，其余操作一律禁止」→ 升级为硬拦截，
+写/DDL 无审批通道；``configurable.sql_approval_policy``（前端「SQL 审批」开关）不再影响写/DDL。
+``classify_sql`` 保留（eval 复用 + 前端只读展示）。API 端点 ``api/sql_approval.py`` 不再被触发，
+保留不动（避免破坏旧协议）。
 """
 import logging
 import re
+from typing import Any, Callable
+
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import ToolMessage
+from langgraph.prebuilt.tool_node import ToolCallRequest
 
 _logger = logging.getLogger(__name__)
 
@@ -64,8 +69,8 @@ def classify_sql(sql: str) -> tuple[str, str]:
     Returns:
         (verdict, detail)：
         - ("read", "")              只读查询，放行
-        - ("write", <关键词>)       写/DDL，需审批
-        - ("full_dump", "")         疑似全表拉取（无 WHERE/LIMIT/聚合），需审批
+        - ("write", <关键词>)       写/DDL，直接拒绝
+        - ("full_dump", "")         疑似全表拉取（无 WHERE/LIMIT/聚合），放行
     """
     if not sql or not sql.strip():
         return "read", ""
@@ -104,107 +109,98 @@ def classify_sql(sql: str) -> tuple[str, str]:
     return verdict, detail
 
 
-# ── HITL 中间件构建 ──────────────────────────────────────────────────────
+# ── 只读硬拦截中间件 ────────────────────────────────────────────────────
 
 # run_sql 类工具名特征：wrenai_<库名>_run_sql / dbmcp_run_sql / run_sql
 def _is_run_sql_tool(name: str) -> bool:
     return name == "run_sql" or name.endswith("_run_sql")
 
 
-def _make_when_predicate():
-    """构建 `when` 判定：只读（含全表拉取）放行，仅写/DDL 触发 interrupt。
+class SqlReadOnlyMiddleware(AgentMiddleware):
+    """只读硬拦截：run_sql 类工具执行前，非 SELECT（写/DDL）直接拒绝，不执行、不审批。"""
 
-    策略开关：configurable.sql_approval_policy == "never" 时全部放行
-    （前端「SQL 审批」关闭；默认 "ask"）。
-    """
+    @staticmethod
+    def _tool_name(request: ToolCallRequest) -> str:
+        tc = getattr(request, "tool_call", None) or {}
+        if isinstance(tc, dict):
+            return tc.get("name", "")
+        return getattr(tc, "name", "")
 
-    def when(request) -> bool:  # noqa: ANN001  ToolCallRequest
-        try:
-            from langgraph.config import get_config
+    @staticmethod
+    def _sql(request: ToolCallRequest) -> str:
+        tc = getattr(request, "tool_call", None) or {}
+        args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {}) or {}
+        if isinstance(args, dict):
+            sql = args.get("sql", "")
+            return sql if isinstance(sql, str) else ""
+        return ""
 
-            configurable = (get_config().get("configurable", {}) or {})
-            policy = str(configurable.get("sql_approval_policy", "ask")).lower()
-        except Exception:  # noqa: BLE001  读不到配置按默认 ask
-            policy = "ask"
-        if policy == "never":
-            return False
-
-        args = (request.tool_call or {}).get("args", {}) or {}
-        sql = str(args.get("sql", "") or "")
-        verdict, _detail = classify_sql(sql)
-        if verdict in ("read", "full_dump"):
-            return False
-        _logger.info(
-            "[sql_approval] 拦截 %s（%s）: %s",
-            (request.tool_call or {}).get("name", "?"),
-            verdict,
-            sql[:120],
+    def _deny(self, request: ToolCallRequest, detail: str) -> ToolMessage:
+        tool_call_id = getattr(getattr(request, "runtime", None), "tool_call_id", None) or ""
+        sql = self._sql(request)
+        _logger.warning(
+            "[sql_approval] 拦截非 SELECT SQL（%s）: %s", detail, sql[:200]
         )
-        return True
+        return ToolMessage(
+            content=(
+                "Error: 系统为只读查询系统，仅允许执行 SELECT（含 WITH...SELECT）只读查询。"
+                f"检测到 {detail or '非查询'} 操作，已禁止执行。"
+                "请改用 SELECT 查询，或向用户说明无法执行数据修改。"
+            ),
+            name=self._tool_name(request),
+            tool_call_id=tool_call_id,
+            status="error",
+        )
 
-    return when
+    # ── 中间件接口 ─────────────────────────────────────────────
 
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage],
+    ) -> ToolMessage:
+        """同步工具调用：run_sql 先做只读校验，写/DDL 直接拒绝。"""
+        if _is_run_sql_tool(self._tool_name(request)):
+            sql = self._sql(request)
+            if sql:
+                verdict, detail = classify_sql(sql)
+                if verdict == "write":
+                    return self._deny(request, detail)
+        return handler(request)
 
-def _make_description_factory():
-    """生成审批卡描述：原因 + 目标库 + SQL 预览。"""
-
-    def describe(tool_call, state, runtime) -> str:  # noqa: ANN001
-        args = (tool_call or {}).get("args", {}) or {}
-        sql = str(args.get("sql", "") or "")
-        verdict, detail = classify_sql(sql)
-        if verdict == "write":
-            reason = f"写/DDL 操作（{detail}）"
-        else:
-            reason = "需要人工确认"
-        db = str(args.get("db_name", "") or "")
-        if not db:
-            try:
-                from langgraph.config import get_config
-
-                db = str(
-                    (get_config().get("configurable", {}) or {}).get("db_name", "")
-                    or ""
-                )
-            except Exception:  # noqa: BLE001
-                db = ""
-        db_part = f"目标数据库：{db}\n" if db else ""
-        return f"⚠️ SQL 执行需要批准 —— {reason}\n{db_part}"
-
-    return describe
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Any],
+    ) -> ToolMessage:
+        """异步工具调用：run_sql 先做只读校验，写/DDL 直接拒绝。"""
+        if _is_run_sql_tool(self._tool_name(request)):
+            sql = self._sql(request)
+            if sql:
+                verdict, detail = classify_sql(sql)
+                if verdict == "write":
+                    return self._deny(request, detail)
+        result = handler(request)
+        if hasattr(result, "__await__"):
+            return await result
+        return result
 
 
 def build_sql_approval_middleware(tools):
-    """为 run_sql 类工具构建 HumanInTheLoopMiddleware。
+    """为 run_sql 类工具构建只读硬拦截中间件。
 
     Args:
-        tools: 子 agent 解析后的工具列表（按名称匹配 run_sql 变体）。
+        tools: 子 agent 解析后的工具列表（仅用于确认 run_sql 工具存在并记日志）。
 
     Returns:
-        中间件实例；无 run_sql 工具时返回 None。
+        SqlReadOnlyMiddleware 实例；无 run_sql 工具时返回 None。
     """
     run_sql_names = [
         getattr(t, "name", "") for t in tools
         if _is_run_sql_tool(getattr(t, "name", "") or "")
     ]
     if not run_sql_names:
-        _logger.info("[sql_approval] 未发现 run_sql 工具，跳过审批闸门")
+        _logger.info("[sql_approval] 未发现 run_sql 工具，跳过只读闸门")
         return None
-
-    from langchain.agents.middleware import HumanInTheLoopMiddleware
-
-    when = _make_when_predicate()
-    describe = _make_description_factory()
-    interrupt_on = {
-        name: {
-            # 批准 / 编辑 SQL 后批准 / 拒绝；不提供 respond（避免凭空伪造查询结果）
-            "allowed_decisions": ["approve", "edit", "reject"],
-            "description": describe,
-            "when": when,
-        }
-        for name in run_sql_names
-    }
-    _logger.info("[sql_approval] 审批闸门挂载: %s", ", ".join(sorted(run_sql_names)))
-    return HumanInTheLoopMiddleware(
-        interrupt_on=interrupt_on,
-        description_prefix="SQL 执行需要批准",
-    )
+    _logger.info("[sql_approval] 只读硬拦截挂载: %s", ", ".join(sorted(run_sql_names)))
+    return SqlReadOnlyMiddleware()

@@ -111,6 +111,50 @@ def _summarize_result(content: str) -> str:
     return f"{head}\n\n...({len(content)} 字符，中间已省略；完整结果可通过 check_async_task 增量读取获取)...\n\n{tail}"
 
 
+def _extract_last_sql(messages) -> str:
+    """从子线程消息提取最后一次 run_sql 的真实执行 SQL。
+
+    报告装配（build_report）需要把真实执行的 SQL 写进报告，但 nl2sql 子 agent
+    的最终回复通常只有数据表+分析文字，SQL 只在中间的 run_sql 工具调用里
+    （wrenai_<库名>_run_sql / dbmcp_run_sql，sql 在 tool_calls[].args.sql）。
+    这里确定性提取，不依赖 LLM 在最终回复中附带 SQL。
+
+    兼容 dict（threads.get_state 返回的 checkpoint）与 LangChain Message 对象。
+    仅匹配 run_sql（不含 dry_run 校验调用）；取最后一次即产生最终数据的那条。
+    """
+    last_tool_idx = -1
+    for i, m in enumerate(messages):
+        if isinstance(m, dict):
+            role = m.get("role") or m.get("type")
+            name = m.get("name") or ""
+        else:
+            role = getattr(m, "type", "")
+            name = getattr(m, "name", "") or ""
+        if role in ("tool", "tool_result") and "run_sql" in name:
+            last_tool_idx = i
+    if last_tool_idx < 0:
+        return ""
+    # 回看该 tool 消息之前的 AI tool_calls，取同名调用 args.sql
+    for j in range(last_tool_idx - 1, -1, -1):
+        m = messages[j]
+        if isinstance(m, dict):
+            tool_calls = m.get("tool_calls") or []
+        else:
+            tool_calls = getattr(m, "tool_calls", None) or []
+        for c in tool_calls:
+            name = c.get("name") if isinstance(c, dict) else getattr(c, "name", "")
+            args = c.get("args") if isinstance(c, dict) else getattr(c, "args", {})
+            if (
+                isinstance(name, str)
+                and name.endswith("run_sql")
+                and isinstance(args, dict)
+            ):
+                sql = args.get("sql", "")
+                if isinstance(sql, str) and sql.strip():
+                    return sql.strip()
+    return ""
+
+
 def _add_incremental(result: dict, thread_values: dict, since: Optional[int]) -> None:
     """给 check 结果附加 cursor；since 给定时只回该游标之后的新消息。"""
     messages = (
@@ -166,6 +210,10 @@ def apply_patch():
                 }
             else:
                 result["result"] = "(completed with no output messages)"
+            # 报告装配需要真实执行 SQL：从子线程消息提取最后一次 run_sql 附到 result.sql
+            sql = _extract_last_sql(messages)
+            if sql:
+                result["sql"] = sql
         elif run["status"] == "error":
             error_detail = run.get("error")
             result["error"] = (
@@ -208,6 +256,9 @@ def apply_patch():
             "last_checked_at": now,
             "last_updated_at": last_updated_at,
         }
+        # M-T5c：保留 description（_tasks_reducer 整条替换，不补会被抹掉）
+        if task.get("description"):
+            updated_task["description"] = task["description"]
         return Command(
             update={
                 "messages": [ToolMessage(
@@ -319,6 +370,80 @@ def apply_patch():
         return tool
 
     _mod._build_check_tool = _patched_build_check_tool
+
+    # ── 3. 替换 _build_update_tool / _build_list_tasks_tool：description 耐久 ──
+    # deepagents 的 update_async_task / list_async_tasks 重建 AsyncTask 时丢掉
+    # description，且 _tasks_reducer 是整条替换 → 前端任务描述会被抹掉（M-T5c）。
+    # 这里在返回前把旧 state 里的 description 补回（check_async_task 已单独修）。
+    def _reapply_task_descriptions(out, state):
+        from langgraph.types import Command
+
+        if not isinstance(out, Command):
+            return out
+        upd = out.update or {}
+        new_tasks = upd.get("async_tasks")
+        if not isinstance(new_tasks, dict) or not new_tasks:
+            return out
+        old_tasks = (state or {}).get("async_tasks") or {}
+        merged = {}
+        for tid, entry in new_tasks.items():
+            old = old_tasks.get(tid) or {}
+            if (
+                isinstance(entry, dict)
+                and not entry.get("description")
+                and old.get("description")
+            ):
+                entry = dict(entry)
+                entry["description"] = old["description"]
+            merged[tid] = entry
+        if merged != new_tasks:
+            upd["async_tasks"] = merged
+        return out
+
+    _orig_update = getattr(_mod, "_build_update_tool", None)
+    _orig_list = getattr(_mod, "_build_list_tasks_tool", None)
+
+    if _orig_update:
+
+        def _patched_build_update_tool(agent_map, clients, _orig=_orig_update):
+            tool = _orig(agent_map, clients)
+            orig_func, orig_coro = tool.func, tool.coroutine
+
+            def _w(task_id: str, message: str, runtime: Annotated[ToolRuntime, InjectedToolArg()]):
+                return _reapply_task_descriptions(
+                    orig_func(task_id, message, runtime), runtime.state
+                )
+
+            async def _aw(task_id: str, message: str, runtime: Annotated[ToolRuntime, InjectedToolArg()]):
+                return _reapply_task_descriptions(
+                    await orig_coro(task_id, message, runtime), runtime.state
+                )
+
+            tool.func, tool.coroutine = _w, _aw
+            return tool
+
+        _mod._build_update_tool = _patched_build_update_tool
+
+    if _orig_list:
+
+        def _patched_build_list_tasks_tool(clients, _orig=_orig_list):
+            tool = _orig(clients)
+            orig_func, orig_coro = tool.func, tool.coroutine
+
+            def _w(runtime: Annotated[ToolRuntime, InjectedToolArg()], status_filter=None):
+                return _reapply_task_descriptions(
+                    orig_func(runtime, status_filter), runtime.state
+                )
+
+            async def _aw(runtime: Annotated[ToolRuntime, InjectedToolArg()], status_filter=None):
+                return _reapply_task_descriptions(
+                    await orig_coro(runtime, status_filter), runtime.state
+                )
+
+            tool.func, tool.coroutine = _w, _aw
+            return tool
+
+        _mod._build_list_tasks_tool = _patched_build_list_tasks_tool
 
     _logger.info("[check_progress] patched check_async_task for detailed progress")
 

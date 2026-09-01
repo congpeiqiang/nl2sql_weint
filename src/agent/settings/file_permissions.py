@@ -1,32 +1,30 @@
 """代理文件读写安全控制 —— deepagents FilesystemPermission 声明式规则。
 
-多工作区 VFS 设计：
+多工作区 VFS 设计（2026-08-28 收紧为「共享只读 / 工作区可读写 / 代码根禁读写」；
+同日外部基础目录：`/` 兜底路由由 src/agent/ 改为 AGENT_DATA_ROOT 数据根）：
 - "/shared/memory/" → shared_memory_backend（共享 memory，只读）
 - "/shared/skills/" → shared_skills_backend（共享 skills，只读）
-- "/workspace/"        → workspace_data_backend（当前工作区，可写 report/tmp/nl2sql_process_data）
-- "/"                  → shared_code_backend（代码文件，只读）
+- "/workspace/"     → workspace_data_backend（前端动态选择的活跃工作区，可读可写）
+- "/"               → vfs_root_backend（VFS 根 = AGENT_DATA_ROOT 项目外数据根，
+                      代码根 src/agent/ 彻底退出 VFS；未配置时回退 src/agent/，读写均拒绝）
+
+读权限边界：**只有 /shared/**（共享 memory/skills）与 /workspace/**（前端动态选择的
+工作区）可读**；数据根其余路径、代码根 src/agent/ 及一切未知路径读写均拒绝。
+写权限边界：**只有 /workspace/**（前端动态选择的工作区）可写**。
 
 注意：规则按声明顺序解析，第一条命中即胜，无命中默认放行（deepagents
-`_check_fs_permission`）—— 所以必须是「先 allow 写目录、再 deny /** 兜底」，
-顺序不能颠倒，否则 deny 会先命中导致写目录也写不了。
+`_check_fs_permission`）—— 所以每条操作必须是「先 allow、再 deny /** 兜底」，
+顺序不能颠倒，否则 deny 会先命中导致 allow 目录也失效。
 """
 from deepagents import FilesystemPermission
 
 FILE_PERMISSIONS: list[FilesystemPermission] = [
-    # 1) 只读整个 VFS 根（显式声明，防御未来默认值变化；当前默认 allow 等价）
-    FilesystemPermission(operations=["read"], paths=["/**"], mode="allow"),
-    # 2) 可写路径：共享技能/记忆 + workspace 下的运行时数据目录
-    FilesystemPermission(operations=["write"], paths=[
-        # 共享代码/技能/记忆（只读，但允许 write 以兼容未来需要）
-        "/**",
-        "/shared/skills/**",
-        "/shared/memory/**",
-        # 当前工作区运行时数据目录
-        "/workspace/report/**",
-        "/workspace/tmp/**",
-        "/workspace/nl2sql_process_data/**",
-        "/workspace/large_tool_results/**",
-    ], mode="allow"),
-    # 3) 其余路径写操作一律拒绝（default allow → 必须显式 deny 兜底）
+    # 1) 可读：共享 memory/skills + 前端动态选择的工作区
+    FilesystemPermission(operations=["read"], paths=["/shared/**", "/workspace/**"], mode="allow"),
+    # 2) 其余路径读操作一律拒绝（代码根 src/agent/ 除 shared 外、及一切未知路径）
+    FilesystemPermission(operations=["read"], paths=["/**"], mode="deny"),
+    # 3) 可写：仅前端动态选择的工作区
+    FilesystemPermission(operations=["write"], paths=["/workspace/**"], mode="allow"),
+    # 4) 其余路径写操作一律拒绝（default allow → 必须显式 deny 兜底）
     FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"),
 ]

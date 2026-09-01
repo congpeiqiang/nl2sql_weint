@@ -89,14 +89,23 @@ def _load_mcp_servers(servers: Dict[str, Any], server_type: str = "unknown") -> 
                 # （get_context / recall_queries 在主进程直接调用 wren API，
                 #  绕过 MCP 子进程 + MemoryStore 420MB 嵌入模型加载）
                 if name.startswith("wrenai_"):
-                    from agent.utils.semantic_db import get_detector, wrenai_server_name
-                    _det = get_detector()
-                    for _t in tools:
-                        for _db in _det.discover():
-                            _proj = _det.project_path_for(_db)
-                            if _proj and name == wrenai_server_name(_db):
-                                _t._wren_project_path = str(_proj)
-                                break
+                    try:
+                        from agent.utils.semantic_db import get_detector, wrenai_server_name
+                        _det = get_detector()
+                        _injected = 0
+                        for _t in tools:
+                            for _db in _det.discover():
+                                _proj = _det.project_path_for(_db)
+                                if _proj and name == wrenai_server_name(_db):
+                                    _t._wren_project_path = str(_proj)
+                                    _injected += 1
+                                    break
+                        if _injected > 0:
+                            _logger.info("[MCP] %s: 已注入 _wren_project_path 到 %d 个工具", name, _injected)
+                        else:
+                            _logger.warning("[MCP] %s: 未匹配到任何数据库，fast-path 将不可用", name)
+                    except Exception as e:
+                        _logger.warning("[MCP] %s: _wren_project_path 注入失败（%s: %s），fast-path 将不可用", name, type(e).__name__, e)
 
                 wrapped = [wrap_tool(t) for t in tools]
                 all_tools.extend(wrapped)
@@ -119,30 +128,15 @@ def _load_mcp_servers(servers: Dict[str, Any], server_type: str = "unknown") -> 
 
 # ── 2. 获取主智能体配置 ──────────────────────────────────
 def _get_main_server_config() -> Dict[str, Any]:
-    """获取主智能体的 MCP 服务器配置（根据 CHART_ENGINE 二选一）"""
-    engine = settings.CHART_ENGINE.lower()
-
-    if engine == "echarts":
-        # ECharts MCP（本地全局安装，bin 命令 mcp-echarts，避免 npx 下载最新版）
-        return {
-            "mcp-server-echarts": {
-                "transport": "stdio",
-                "command": "mcp-echarts",
-                "args": [],
-                "env": {
-                    **_UTF8_ENV,
-                },
-            },
-        }
-
-    # 默认 Semiotic MCP
+    """获取主智能体的 MCP 服务器配置（ECharts MCP）"""
+    # ECharts MCP（本地全局安装，bin 命令 mcp-echarts，避免 npx 下载最新版）
     return {
-        "mcp-server-chart": {
+        "mcp-server-echarts": {
             "transport": "stdio",
-            "command": "npx",
-            "args": ["-p", "semiotic", "semiotic-mcp"],
+            "command": "mcp-echarts",
+            "args": [],
             "env": {
-                **_UTF8_ENV,
+                **os.environ, **_UTF8_ENV,
             },
         },
     }
@@ -212,7 +206,7 @@ def _get_sub_server_config() -> Dict[str, Any]:
             "command": settings.WREN_BIN_PATH,
             "args": args,
             "env": {
-                **_UTF8_ENV,
+                **os.environ, **_UTF8_ENV,
                 "WREN_LOG_LEVEL": "ERROR",
                 "PYTHONUNBUFFERED": "1",
                 # Wren recall_queries 检索后端（grep / lancedb），由 settings 控制。
@@ -232,7 +226,7 @@ def _get_sub_server_config() -> Dict[str, Any]:
                 "--transport", "stdio",
             ],
             "env": {
-                **_UTF8_ENV,
+                **os.environ, **_UTF8_ENV,
                 # 保证子进程能 import mcp_server 包（父进程 src 不一定在 PYTHONPATH）
                 "PYTHONPATH": os.pathsep.join(
                     filter(None, [str(_REPO_ROOT / "src"), os.environ.get("PYTHONPATH", "")])

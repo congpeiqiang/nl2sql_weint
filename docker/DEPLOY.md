@@ -239,6 +239,29 @@ sudo docker compose up -d langgraph-api
 
 ---
 
+### 4.5 每日 BadCase 采集调度（宿主机 cron + docker exec）
+
+容器内不跑 cron；差评/低分 → `Dataset:badcase` 的采集由宿主机每日触发。
+> 完整部署说明见 `docs/weint环境/NL2SQL-部署与更新手册.md`（生产环境手册，
+> 含服务器路径 /home/weint/apps/nl2sql/nl2sql-app/ 与容器名 nl2sql-app_langgraph-api_1）。
+
+```bash
+# 宿主机 crontab -e（root 或 docker 组用户；日志目录需存在 mkdir -p /home/weint/apps/nl2sql/logs）
+13 2 * * * /home/weint/apps/nl2sql/nl2sql-app/backend/scripts/daily_collect_badcase.sh >> /home/weint/apps/nl2sql/logs/nl2sql_collect_badcase.log 2>&1
+```
+
+脚本用 `docker exec nl2sql-app_langgraph-api_1` 在容器内依次跑 `collect_badcase`、
+`feedback_gate`、`badcase_status summary`。容器 `env_file: .env.prod` 已注入生产
+LANGFUSE_* 与 `AGENT_DATA_ROOT=/app/data`，无需宿主机重复配置。
+
+验证调度是否生效（容器 venv 是 `uv sync --no-install-project` 装的、无 `_nl2sql_src.pth`，
+必须 `PYTHONPATH=/app/src` + venv python 才能 import `agent`）：
+```bash
+docker exec nl2sql-app_langgraph-api_1 bash -c 'cd /app && PYTHONPATH=/app/src /app/.venv/bin/python -m agent.eval.collect_badcase --days 1'
+```
+
+---
+
 ## 五、回滚
 
 ```bash
@@ -312,6 +335,7 @@ SELECT count(*) FROM checkpoints;
 | 本地前端 CORS 错误 | 后端未配跨域 | 后端 `ALLOW_PRIVATE_NETWORK=true` 已设置 |
 | 本地前端连不上后端 | 安全组未放行 2026 | 阿里云安全组放行 TCP 2026 |
 | nginx 504（方案 B） | 后端处理超时 | 检查 `proxy_read_timeout` |
+| 容器内 `ls` 中文文件名显示 `$'\345\277\220'` octal 转义 | 容器 shell 无 UTF-8 locale（`LANG/LC_ALL` 未生效——Dockerfile `ENV` 或 compose `environment` 缺失，或容器未重建） | Dockerfile 已 `ENV LANG/LC_ALL=C.UTF-8`（2026-08-31）+ compose `environment` 同配；重新 `docker compose up -d --build langgraph-api` 重建容器。**注意：仅改 compose `environment` 需重建容器才生效（`docker compose restart` 不重新读 env）**。验证：`docker exec <容器> bash -c 'locale | grep LANG; ls /app/data/workspace/'` |
 
 ---
 

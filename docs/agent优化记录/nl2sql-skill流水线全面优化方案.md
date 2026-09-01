@@ -101,6 +101,75 @@ LLM 在策略选择时就知道有哪些 Cube 可用，匹配则走 Strategy C �
 | track_popularity | invoiceline→track→album→artist→genre→mediatype | times_purchased, revenue, track_count, avg_unit_price | genre_name, artist_name, album_title, media_type | "最畅销流派" |
 | artist_catalog | track→album→artist→genre | track_count, album_count, total_duration_min, total_size_mb, catalog_value | artist_name, genre_name | "哪个艺人专辑最多" |
 
+### 3.3 Cube 工作原理
+
+Cube 不是"固定 SQL"，而是**预定义的结构化模板**（base_object + measures + dimensions），由 Wren Rust 引擎动态生成 SQL。
+
+#### 与 Strategy A/B 对比
+
+| | Strategy A/B | Strategy C (Cube) |
+|---|---|---|
+| **谁写 SQL** | LLM 自己写 | Rust 引擎生成 |
+| **LLM 做什么** | 理解问题 → 写完整 SQL | 理解问题 → 选 cube + measures + dimensions |
+| **容易出错吗** | 容易（JOIN 写错、列名拼错） | 不容易（SQL 由引擎生成，保证正确） |
+| **token 消耗** | 高（多轮推理 + dry_run） | 低（3 次工具调用） |
+
+#### Cube 匹配机制
+
+匹配**完全靠 LLM 语义理解**，无程序化匹配逻辑：
+
+1. `dynamic_prompt` 注入 Cube 名称到 system prompt（如 `sales_analytics`）
+2. `sql-of-thought` 指令要求 LLM **最先调用 `list_cubes()`** 检查匹配
+3. LLM 根据名字语义判断：`sales_analytics` = "销售分析" → 匹配"各国销售额排名"
+
+> Cube 命名要直观——LLM 理解 `sales_analytics` 比 `cube_001` 容易得多。
+
+#### sales_analytics 定义详解
+
+```yaml
+name: sales_analytics          # Cube 唯一标识
+description: "音乐商店销售分析"  # 给 LLM 看的描述
+base_object: invoiceline       # 基础表（SQL 的 FROM）
+```
+
+**measures（度量 = 要算什么数字）**：
+
+| 名称 | SQL | 含义 |
+|------|-----|------|
+| `total_revenue` | `SUM(unitprice × quantity)` | 总收入 |
+| `invoice_count` | `COUNT(DISTINCT invoiceid)` | 订单数 |
+| `avg_order_value` | `AVG(invoice.total)` | 客单价（跨表引用 invoice） |
+| `tracks_sold` | `SUM(quantity)` | 售出曲目数 |
+| `line_count` | `COUNT(*)` | 行项数 |
+
+**dimensions（维度 = 按什么分组）**：
+
+| 名称 | SQL | 含义 |
+|------|-----|------|
+| `billing_country` | `invoice.billingcountry` | 国家 |
+| `billing_city` | `invoice.billingcity` | 城市 |
+| `genre_name` | `genre.name` | 流派（跨 2 表：invoiceline→track→genre） |
+| `invoice_year` | `EXTRACT(YEAR FROM invoicedate)` | 年份 |
+| `invoice_month` | `EXTRACT(MONTH FROM invoicedate)` | 月份 |
+
+#### SQL 生成流程
+
+```
+用户问 "各国销售额排名"
+  ↓
+LLM 选参数：cube="sales_analytics", measures=["total_revenue"], dimensions=["billing_country"]
+  ↓
+Rust 引擎 cube_query_to_sql() 自动生成：
+
+SELECT invoice.billingcountry, SUM(invoiceline.unitprice * invoiceline.quantity) AS total_revenue
+FROM invoiceline
+JOIN invoice ON invoiceline.invoiceid = invoice.invoiceid   ← 引擎自动加（从 relationships.yml 解析）
+GROUP BY invoice.billingcountry
+ORDER BY total_revenue DESC
+```
+
+> **注意**：cube 定义中不要写 `joins` 字段——Wren Rust 引擎不识别，它用项目级 `relationships.yml` 来解析跨表 JOIN。
+
 ---
 
 ## 四、新增 MCP 工具
@@ -176,3 +245,89 @@ def get_all_knowledge() -> dict:
    - 确认耗时明显缩短
 4. 测试 Cube 通道：问"各国销售额排名" → 应走 Strategy C → `list_cubes` → `query_cube`
 5. 切回 imdb 数据库，确认知识库加载仍正常
+
+---
+
+## 八、Cube JOIN 修复（2026-08-25 补充）
+
+### 问题
+
+Cube 的 dimension expression 使用跨表引用（如 `invoice.billingcountry`），Wren Rust 引擎的 `cube_query_to_sql` 生成的 SQL 只在 FROM 里包含 base_object，不会自动 JOIN 关联表，导致：
+
+```
+[GENERIC_USER_ERROR] missing FROM-clause entry for table "invoice"
+```
+
+### 根因
+
+Wren Rust 引擎的 `Cube` 对象只有 `base_object`、`dimensions`、`measures`、`time_dimensions`、`hierarchies` 字段——**没有 `joins` 字段**。Cube expression 中的跨表引用（如 `invoice.billingcountry`）会被原样嵌入 SQL SELECT，但 FROM 子句只有 base_object 的 CTE，无法解析。
+
+### 修复方案：relationship column + calculated field
+
+需要 3 层配合：
+
+```
+relationships.yml（已有）          → 定义模型间关联
+models/<base>/metadata.yml（新增） → relationship column + calculated field
+cubes/<name>/metadata.yml（修改）  → expression 引用 calculated field（不跨表）
+```
+
+#### 示例：sales_analytics（base: invoiceline）
+
+**Step 1: invoiceline model 添加 relationship column + calculated field**
+
+```yaml
+# models/invoiceline/metadata.yml 新增列
+columns:
+  # ... 原有列 ...
+  - name: invoice                    # relationship column（name = 关联模型名）
+    type: invoice                    # type = 关联模型名
+    relationship: invoiceline_invoice # 引用 relationships.yml 中的关联名
+  - name: billing_country            # calculated field（暴露关联列）
+    type: VARCHAR
+    is_calculated: true
+    expression: "invoice.billingcountry"  # relationship_name.column_name
+```
+
+**Step 2: Cube expression 引用 calculated field**
+
+```yaml
+# cubes/sales_analytics/metadata.yml
+dimensions:
+  - name: billing_country
+    expression: "invoiceline.billing_country"  # ← 引用 calculated field，不跨表
+    type: string
+```
+
+**Step 3: 多跳关联需要链式传递**
+
+例如 invoiceline → track → genre：
+```
+track model: 加 relationship column (genre) + calculated field (genre_name: genre.name)
+invoiceline model: 加 relationship column (track) + calculated field (genre_name: track.genre_name)
+cube: expression: "invoiceline.genre_name"
+```
+
+### 已修改的文件
+
+| 文件 | 新增内容 |
+|------|----------|
+| `models/album/metadata.yml` | relationship column: artist + calculated field: artist_name |
+| `models/track/metadata.yml` | relationship columns: album/genre/mediatype + calculated fields: album_title/genre_name/media_type/artist_name |
+| `models/invoiceline/metadata.yml` | relationship columns: invoice/track + calculated fields: billing_country/billing_city/invoice_total/invoice_date/genre_name/artist_name/album_title/media_type |
+| `cubes/sales_analytics/metadata.yml` | expression 改为引用 invoiceline 的 calculated fields |
+| `cubes/track_popularity/metadata.yml` | 同上 |
+| `cubes/artist_catalog/metadata.yml` | expression 改为引用 track 的 calculated fields |
+
+### 验证
+
+重新构建语义库后，`query_cube(cube="sales_analytics", measures=["total_revenue"], dimensions=["billing_country"])` 应生成带 JOIN 的 SQL：
+
+```sql
+-- cube_query_to_sql 生成：
+SELECT billing_country, SUM(unitprice * quantity) AS total_revenue
+FROM invoiceline GROUP BY 1
+
+-- transform_sql 展开 calculated field：
+... invoice RIGHT OUTER JOIN invoiceline ON invoice.invoiceid = invoiceline.invoiceid ...
+```

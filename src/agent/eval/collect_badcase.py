@@ -31,10 +31,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]  # src/agent/eval/collect_ba
 
 
 def _load_env() -> None:
-    """独立脚本运行先加载项目 .env（start_server 由入口加载；此处兜底）。"""
-    from dotenv import load_dotenv
+    """独立脚本运行先加载项目 env（start_server 由入口加载；此处兜底）。
 
-    load_dotenv(_PROJECT_ROOT / ".env")
+    生产部署在容器（env_file: .env.prod 注入）；宿主机/本机手动跑时统一由
+    agent.settings.env_loader 叠加 .env.prod 的 LANGFUSE_*（生产项目凭据）。
+    """
+    from agent.settings.env_loader import load_env
+
+    load_env()
 
 # 五维 + 执行成功：值低于阈值 → BadCase（§3.5 第 2/4 类）
 SCORE_DIMS = (
@@ -129,6 +133,33 @@ def collect(days: int = 1, threshold: float = DEFAULT_THRESHOLD,
         pool.sort(key=lambda t: t.get("start_time") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return pool[0]
 
+    def _session_feedback_type(sid: str) -> str:
+        """会话内最新一条本地用户反馈的 feedback_type（差评采集用）。
+
+        本地 FeedbackStore 为唯一真相（thread_id == session_id）；类型为空
+        （存量/未判定）时走慢路径判定并回填。任何失败按 ''（非 chat）处理，
+        不误丢差评采集。
+        """
+        try:
+            from agent.feedback.feedback_type import classify_feedback_type
+            from agent.feedback.store import get_store
+
+            recs = get_store().session_feedback(sid)
+            if not recs:
+                return ""
+            latest = max(recs, key=lambda r: r.updated_at or "")
+            if latest.feedback_type:
+                return latest.feedback_type
+            ftype = classify_feedback_type(
+                latest.thread_id, latest.message_id, latest.sql
+            )
+            if ftype:
+                get_store().set_feedback_type(latest.thread_id, latest.message_id, ftype)
+            return ftype
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[badcase] 判定反馈类型失败（按非 chat 处理）: %s", e)
+            return ""
+
     collected = _load_stamp()
     new_count = 0
     status_items: list[dict] = []  # 积累新条目，循环结束后批量注册状态
@@ -146,8 +177,18 @@ def collect(days: int = 1, threshold: float = DEFAULT_THRESHOLD,
             v = scores.get(dim)
             if v is not None and v < threshold:
                 reasons.append(f"{dim}={v:.2f}")
-        if scores.get("user-feedback") == 0:
-            reasons.append("user_feedback=0")
+        # 优化①：差评采集只收「查询类」反馈——闲聊/无关对话差评（如「回复太啰嗦」）
+        # 不是 NL2SQL 质量信号，跳过采集（类型 ''= 未判定/存量，按 query 处理不丢信号）。
+        uf_value = scores.get("user-feedback")
+        if uf_value is not None and uf_value < 0.5:
+            fb_type = _session_feedback_type(sid)
+            if fb_type != "chat":
+                reasons.append("user_feedback=0")
+            else:
+                _logger.debug(
+                    "[badcase] session=%s 差评属闲聊反馈（type=chat），跳过采集",
+                    sid[:12],
+                )
         if not reasons:
             continue
         question = session_question(sid)

@@ -29,7 +29,7 @@ description: "触发：用户提出数据库查询问题；用户希望将自然
 
 ## 策略决策（入口）
 
-收到用户问题后，按以下优先级选择策略：
+收到用户问题后，**先检查 Cube 匹配**，再按优先级选择策略：
 
 ```
 用户问题
@@ -37,10 +37,11 @@ description: "触发：用户提出数据库查询问题；用户希望将自然
     ├─ Step 0: 澄清门(nl2sql-clarification)  → clear=false 则输出 [需要澄清] 停止
     │   └─ clear=true → 按下方优先级选策略
     │
-    ├─ 匹配 Cube 指标? 
-    │   → 策略C: Cube通道
-    │     调用: list_cubes → describe_cube → query_cube
-    │     跳过: 全部 NL2SQL 流水线步骤
+    ├─ 【最先检查】调用 list_cubes() 查看可用 Cube
+    │   ├─ 有 Cube 匹配用户问题？
+    │   │   → 策略C: Cube通道（最优先，跳过全部 NL2SQL 步骤）
+    │   └─ 无匹配 / list_cubes 返回空？
+    │       → 继续下方策略选择
     │
     ├─ 单表/简单筛选/COUNT(*)/ORDER BY LIMIT?
     │   → 策略B: 快速通道
@@ -51,6 +52,9 @@ description: "触发：用户提出数据库查询问题；用户希望将自然
         → 策略A: 标准流水线
           完整 sql-of-thought 流水线 + WrenAI 语义层
 ```
+
+> **重要**：策略 C 优先级最高。每次查询前必须调用 `list_cubes()` 检查是否有匹配的 Cube。
+> 匹配到 Cube 时**禁止**走 Strategy A/B 的 NL2SQL 流水线。
 
 ---
 
@@ -122,18 +126,19 @@ Step 3: run_sql(sql)                 → 执行
 完全不经过 NL2SQL 流水线，直接调用 WrenAI Cube API。
 
 ```
-Step 1: list_cubes()                 → 列出可用 Cube
+Step 1: list_cubes()                 → 列出可用 Cube（必须先调用）
 Step 2: describe_cube(name)          → 获取度量 + 维度
 Step 3: query_cube(                  → 直接查询
-          cube="sales_cube",
-          measures=["total_sales"],
-          dimensions=["region"],
-          time_dimension="order_date:month",
-          filters=["region:in:CN"]
+          cube="sales_analytics",
+          measures=["total_revenue"],
+          dimensions=["billing_country"]
         )
 ```
 
 **优势**: 不需要生成SQL，不需要 dry_run，最省 token。
+
+> **工具约束**：Strategy C 只使用 `list_cubes` / `describe_cube` / `query_cube` 三个工具。
+> **禁止**调用 `get_context`、`recall_queries`、`get_mdl`、`describe_schema`、`describe_model` 等 Schema 发现工具——这些是给 Strategy A/B 用的，Strategy C 不需要。
 
 ---
 
@@ -177,3 +182,4 @@ Schema Linking 阶段应充分利用并行调用加速 Schema 获取：
 
 - 性能: 始终加 LIMIT，先筛选再 JOIN
 - 规则: 调用 get_instructions() 获取当前数据库的最新业务规则
+- **只读铁律**：只允许生成并执行 `SELECT`（含 `WITH ... SELECT`）只读查询。严禁任何 DML（INSERT/UPDATE/DELETE/REPLACE/MERGE）与 DDL（DROP/ALTER/CREATE/TRUNCATE/RENAME/GRANT/REVOKE）及 SET/USE/LOAD/COPY/CALL 等非查询语句。用户要求修改数据时拒绝并说明「本系统为只读查询系统，仅支持 SELECT 查询操作」。

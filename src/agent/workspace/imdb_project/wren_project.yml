@@ -1,9 +1,0 @@
-schema_version: 5
-name: imdb
-version: "1.0"
-
-catalog: wren
-schema: public
-
-data_source: mysql
-profile: imdb

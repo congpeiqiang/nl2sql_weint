@@ -3,11 +3,11 @@
 """
 save_chart.py — 图表保存辅助脚本
 
-将图表工具（generate_echarts / renderChart）生成的图表内容保存为独立文件到工作区报告目录。
+将图表工具（generate_echarts）生成的图表内容保存为独立文件到工作区报告目录。
 
 支持三种输入格式：
 1. SVG 字符串（ECharts outputType="svg" 返回）：直接提取 <svg>...</svg> 保存
-2. base64 HTML iframe（Semiotic renderChart 返回）：解码 base64 → 提取 <svg> → 保存
+2. base64 HTML iframe：解码 base64 → 提取 <svg> → 保存
 3. PNG 文件路径（ECharts outputType="png" 返回）：复制文件到工作区报告目录
 
 用法：

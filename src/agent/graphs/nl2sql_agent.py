@@ -15,6 +15,7 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt
 
 from agent.llms.model import deepseek_model
 from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
+from agent.middlewares.quota_error import QuotaErrorMiddleware
 from agent.middlewares.sql_approval import build_sql_approval_middleware
 from agent.middlewares.tool_filter import ToolFilterMiddleware
 from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
@@ -24,6 +25,7 @@ from agent.subagents.track_progress import ProgressTrackerMiddleware
 from agent.settings.file_permissions import FILE_PERMISSIONS
 from agent.middlewares.trace_recorder import TraceRecorderMiddleware
 from agent.trace.langfuse_client import get_langfuse_callbacks
+from agent.utils.skills_versioning import effective_skills_sources
 
 base_dir = Path(__file__).resolve().parent.parent  # graphs/ 子目录，上两层到 src/agent/
 
@@ -62,28 +64,39 @@ for pattern in tool_names:
         if pattern in tn and t not in resolved_tools:
             resolved_tools.append(t)
 
-# 技能
-skills = cfg.get("skills", ["/shared/skills/nl2sql/"])
+# 技能（SKILLS_REF 实验注入时换版本，默认磁盘不变）
+skills = effective_skills_sources(
+    cfg.get("skills", ["/shared/skills/nl2sql/"]), group="nl2sql",
+)
 
 # VFS 后端设计（与 main_agent.py 同构，多工作区隔离）
-shared_code_backend = FilesystemBackend(root_dir=base_dir, virtual_mode=True)
+vfs_root_backend = FilesystemBackend(root_dir=_wm.data_root, virtual_mode=True)
 shared_skills_backend = FilesystemBackend(root_dir=_shared_skills_dir, virtual_mode=True)
+# skill 版本化：SKILLS_REF 物化目录（<data_root>/skill_refs/），skill 脚本经 VFS 也读物化版；
+# 无 SKILLS_REF 时无人引用此路由，零行为变化
+skills_ref_backend = FilesystemBackend(root_dir=_wm.data_root / "skill_refs", virtual_mode=True)
 # 动态工作区：每次操作前从 WorkspaceManager 重新解析 root_dir，切换工作区即时生效
 workspace_data_backend = DynamicFilesystemBackend(get_root_dir=lambda: _wm.active_workspace)
 
 # nl2sql_agent 不需要 shell backend 和 memory backend，
-# 但需要 CompositeBackend 来路由 /shared/skills/ → 共享、/workspace/ → 当前工作区
+# 但需要 CompositeBackend 来路由 /shared/skills/ → 共享、/workspace/ → 当前工作区。
+# 注意：/workspace/ 必须是显式路由——否则最长前缀匹配会被 / 吃掉，/workspace/**
+# 落到代码根（=默认工作区），前端切换到非默认工作区后 nl2sql 写文件仍落默认位置。
 from deepagents.backends import CompositeBackend
 composite_backend = CompositeBackend(
     default=workspace_data_backend,
+    # 子 agent 自动压缩 offload（conversation_history）也落到前端选择的工作区
+    artifacts_root="/workspace/",
     routes={
         "/shared/skills/": shared_skills_backend,
-        "/": shared_code_backend,
+        "/skill_refs/": skills_ref_backend,
+        "/workspace/": workspace_data_backend,
+        "/": vfs_root_backend,
     },
 )
 
 # ── Skills Middleware ──────────────────────────────────────────
-skills_middleware = SkillsMiddleware(backend=shared_code_backend, sources=skills)
+skills_middleware = SkillsMiddleware(backend=vfs_root_backend, sources=skills)
 
 # ── SQL 审批闸门（P1-3）──────────────────────────────────────
 # 只对 run_sql 类工具生效；只读查询直接放行（清晰查询零打扰），
@@ -170,7 +183,7 @@ def dynamic_prompt(request: ModelRequest) -> str:
 # TodoListMiddleware 默认的"简单任务可跳过 write_todos"指引（见 write_todos.py 模块 docstring）。
 _middleware = [
     TraceRecorderMiddleware(
-        db_path=os.path.join(str(_wm.active_workspace), "traces.sqlite"),
+        db_path=str(_wm.shared_trace_db),
         agent_type="nl2sql_agent",
     ),
     skills_middleware,
@@ -187,6 +200,8 @@ _middleware = [
 if sql_approval_middleware is not None:
     _middleware.append(sql_approval_middleware)
 _middleware.append(WriteTodosProtocolMiddleware())
+# 最外层：LLM 额度耗尽错误 → 友好中文提示（须包住所有内层模型调用）
+_middleware.insert(0, QuotaErrorMiddleware())
 
 agent = create_deep_agent(
     model=deepseek_model,

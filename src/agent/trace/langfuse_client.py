@@ -17,11 +17,32 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 
 _logger = logging.getLogger(__name__)
 
 _client = None
 _handler = None
+
+# M-T3b：trace_id → root observation_id 映射（CallbackHandler on_chain_start 后写入，
+# LangfuseSpanMiddleware._start_span 读取作为 parent_span_id，让 skill span 嵌套到
+# chat_agent observation 下而非平级 root observation）。进程级，线程安全靠 GIL。
+_ROOT_OBS_MAP: dict[str, str] = {}
+
+# M-T3d：thread_id → (trace_id, root_observation_id) 映射。仅在「新查询」的 root
+# chain 写入（子 agent / auto-continue 不写），记录该 thread 当前查询的主 trace。
+# auto-continue run 启动时读取它，把续跑 observations 复用回原 trace（而非新开
+# 一个 chat-turn trace）。进程级，线程安全靠 GIL。
+_THREAD_TRACE_MAP: dict[str, tuple[str, str]] = {}
+
+# M-T5：task_id → (main_thread_id, trace_id, root_observation_id, user_question,
+# description) 映射。task_id 即异步子任务的独立 LangGraph thread_id（deepagents
+# start_async_task 在 client.threads.create() 后把返回 thread_id 既作 task_id 又作
+# runs.create 参数）。在 _wrap_runs_create 派发时写入，auto-continue 续跑到达时
+# 用它按「任务」路由回原查询的 trace——解决连问场景：任务 N 完成通知落在问题
+# N+1 的 run 活跃期时，不再误挂到 N+1 的 trace。进程级，线程安全靠 GIL。
+_TASK_TRACE_MAP: dict[str, tuple[str, str, str, str, str]] = {}
+_TASK_TRACE_CAP = 2000
 
 # M5 灰度：本进程解析到的 prompt label（进程级，import 时掷一次）+ 各 label 已拉到的版本
 _CANARY_RESOLVED: str | None = None
@@ -128,6 +149,10 @@ def get_langfuse_handler():
 
     用于 graph.with_config({"callbacks": [...]})。langfuse 4.x 的 CallbackHandler
     基于 contextvar 为每次 run 创建独立 trace，可安全跨并发请求共享。
+
+    M-T3：首次创建时 monkey-patch on_chain_start——子 agent root chain 启动时
+    从 metadata.langfuse_parent_trace_id 读父 trace_id，激活 OTel NonRecordingSpan
+    上下文，使子 agent 的 observations 嵌套到主 agent trace 下。
     """
     global _handler
     if not langfuse_enabled():
@@ -136,7 +161,366 @@ def get_langfuse_handler():
         from langfuse.langchain import CallbackHandler
 
         _handler = CallbackHandler()
+        _patch_handler_for_trace_nesting(_handler)
+        # M-T6b-1：run 被取消（runs.cancel / 前端停止 / 审批超时）会让正在执行的
+        # model/agent span 以 CancelledError 结束。langfuse 只把 GraphBubbleUp 等
+        # 控制流异常当非错误，CancelledError 不在列 → 取消被标成红 ERROR，且
+        # status_message 序列化坏（实测出现 <object object at ...>）。把
+        # asyncio.CancelledError 也归入控制流异常：取消 → level=DEFAULT（不标红）
+        # + status_message 可读（"User interrupted the run"）。
+        try:
+            import asyncio as _asyncio
+            from langfuse.langchain.CallbackHandler import CONTROL_FLOW_EXCEPTION_TYPES
+
+            CONTROL_FLOW_EXCEPTION_TYPES.add(_asyncio.CancelledError)
+            _logger.debug(
+                "[langfuse] CancelledError 归入控制流异常（run 取消不再标 ERROR）"
+            )
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[langfuse] 注册 CancelledError 控制流异常失败: %s", e)
     return _handler
+
+
+def get_root_observation_id(trace_id: str) -> str:
+    """查 trace_id 对应的 root observation ID（M-T3b：供 skill span 作 parent_span_id）。
+
+    由 _patch_handler_for_trace_nesting 在 on_chain_start 完成后写入。
+    找不到 → 空字符串（skill span 仅用 trace_id，不指定 parent，成为 root observation）。
+    """
+    return _ROOT_OBS_MAP.get(trace_id, "")
+
+
+def get_thread_trace_context(thread_id: str) -> tuple[str, str]:
+    """查 thread 最近一次「新查询」的 (trace_id, root_observation_id)（M-T3d）。
+
+    auto-continue run 启动时用它把续跑 observations 复用回原 trace。
+    找不到 → ("", "")（auto-continue 照常新开 trace，既有行为）。
+    """
+    return _THREAD_TRACE_MAP.get(thread_id, ("", ""))
+
+
+# ── M-T5：任务级注册表（task_id → 发起该任务的那次查询）────────────────
+
+def register_task_trace_context(
+    task_id: str,
+    main_thread_id: str,
+    trace_id: str,
+    root_obs_id: str,
+    question: str = "",
+    description: str = "",
+) -> bool:
+    """派发异步子任务时登记：task_id → 所属查询的 trace 上下文（M-T5）。
+
+    task_id 即子任务的独立 LangGraph thread_id。幂等：已存在不覆盖（保护原绑定，
+    避免 update_async_task 等重派发误覆盖）；cap 用 FIFO 驱逐最旧条目。
+    进程级，线程安全靠 GIL。返回 True=新登记，False=跳过。
+    """
+    if not task_id or not trace_id:
+        return False
+    if task_id in _TASK_TRACE_MAP:
+        return False
+    while len(_TASK_TRACE_MAP) >= _TASK_TRACE_CAP:
+        # FIFO 驱逐最旧条目：dict 按插入序，next(iter()) 即最旧 key
+        _oldest = next(iter(_TASK_TRACE_MAP), None)
+        if _oldest is None:
+            break
+        del _TASK_TRACE_MAP[_oldest]
+    _TASK_TRACE_MAP[task_id] = (
+        main_thread_id or "",
+        trace_id,
+        root_obs_id or "",
+        question or "",
+        description or "",
+    )
+    _logger.info(
+        "[langfuse_m5] task=%s registered → trace=%s obs=%s thread=%s q=%s desc=%s",
+        task_id[:12], trace_id[:16], (root_obs_id or "∅")[:16],
+        main_thread_id[:12], (question or "∅")[:20], (description or "∅")[:30],
+    )
+    return True
+
+
+def get_task_trace_context(task_id: str) -> tuple[str, str, str, str, str]:
+    """按 task_id 查发起该任务的那次查询的 trace 上下文（M-T5）。
+
+    支持前缀匹配（auto-continue 正文里「任务 X（」是短 id 前 8 位）。
+    找不到 → ("", "", "", "", "")（调用方回退线程级映射）。
+    """
+    if not task_id:
+        return ("", "", "", "", "")
+    hit = _TASK_TRACE_MAP.get(task_id)
+    if hit is not None:
+        return hit
+    if len(task_id) < 36:
+        for tid, entry in _TASK_TRACE_MAP.items():
+            if tid.startswith(task_id):
+                return entry
+    return ("", "", "", "", "")
+
+
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_AC_CHECK_RE = re.compile(r'check_async_task\s*\(\s*["\']?([0-9a-fA-F-]{36})["\']?\s*\)')
+_AC_TASK_RE = re.compile(r"任务\s*([0-9a-fA-F-]{8,36})\s*（")
+
+
+def _extract_task_id_from_auto_continue(inputs):
+    """从 auto-continue 输入中解析 task_id（M-T5）。
+
+    三级解析，命中即返回：
+      1. 消息 id：`auto-continue-{完整uuid}-{ms}`；
+      2. 正文：`check_async_task("完整uuid")`；
+      3. 正文：`任务 {uuid 前 8 位或完整}（`（短 id 由 get_task_trace_context 前缀匹配）。
+    全部未命中 → None。
+    """
+    try:
+        messages = inputs.get("messages") if isinstance(inputs, dict) else None
+        if not isinstance(messages, (list, tuple)) or not messages:
+            return None
+        last = messages[-1]
+        mid = ""
+        content = ""
+        if isinstance(last, dict):
+            mid = str(last.get("id", "") or "")
+            content = last.get("content", "") or ""
+        else:
+            mid = str(getattr(last, "id", "") or "")
+            content = getattr(last, "content", "") or ""
+        if isinstance(content, list):
+            text = ""
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "") or ""
+                    break
+            content = text
+        content = str(content)
+
+        if mid.startswith("auto-continue-"):
+            m = _UUID_RE.match(mid[len("auto-continue-"):])
+            if m:
+                return m.group(0)
+        m = _AC_CHECK_RE.search(content)
+        if m:
+            return m.group(1)
+        m = _AC_TASK_RE.search(content)
+        if m:
+            return m.group(1)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _is_auto_continue(inputs) -> bool:
+    """判断 root chain 输入是否为前端 auto-continue 自动续跑通知（M-T3d）。
+
+    auto-continue 消息特征：message.id 以 "auto-continue" 开头，或 content 以
+    "[系统" 开头（系统自动通知）。命中即视为同一查询的续跑，应复用原 trace。
+    """
+    try:
+        messages = inputs.get("messages") if isinstance(inputs, dict) else None
+        if not isinstance(messages, (list, tuple)) or not messages:
+            return False
+        last = messages[-1]
+        mid = ""
+        content = ""
+        if isinstance(last, dict):
+            mid = str(last.get("id", "") or "")
+            content = last.get("content", "") or ""
+        else:
+            mid = str(getattr(last, "id", "") or "")
+            content = getattr(last, "content", "") or ""
+        if isinstance(content, list):
+            text = ""
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "") or ""
+                    break
+            content = text
+        content = str(content)
+        return mid.startswith("auto-continue") or content.startswith("[系统")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _fallback_thread_route(metadata: dict) -> tuple[str, str, str]:
+    """auto-continue 无任务级命中时的线程级兜底路由（M-T5，行为等同原 M-T3d）。
+
+    返回 (parent_trace_id, parent_obs_id, case)。case 区分来源便于日志定位。
+    """
+    _ac_tid = str((metadata or {}).get("langfuse_session_id", "") or "")
+    if _ac_tid:
+        _rec_trace, _rec_obs = get_thread_trace_context(_ac_tid)
+        if _rec_trace:
+            return _rec_trace, _rec_obs, "auto-continue(thread)"
+        _logger.info(
+            "[langfuse_m3d] auto-continue 命中但 thread=%s 无原 "
+            "trace 记录（跨进程/重启后首查不在此进程）→ 照常新开",
+            _ac_tid,
+        )
+    return "", "", "auto-continue(no-thread)"
+
+
+def _patch_handler_for_trace_nesting(handler) -> None:
+    """M-T3/T3b/T3d：monkey-patch CallbackHandler.on_chain_start。
+
+    M-T3：子 agent root chain 启动时，从 metadata.langfuse_parent_trace_id 读
+    父 trace_id，激活 OTel NonRecordingSpan 上下文 → 子 agent observations
+    嵌套到主 agent trace 下。
+
+    M-T3b：on_chain_start 完成后，抓 root observation ID 存入 _ROOT_OBS_MAP
+    → LangfuseSpanMiddleware._start_span 读取作为 parent_span_id → skill span
+    嵌套到 chat_agent observation 下（而非平级 root observation）。
+
+    M-T3d：auto-continue 续跑检测（_is_auto_continue）→ 从 _THREAD_TRACE_MAP
+    读该 thread 最近一次「新查询」的 (trace_id, root_obs)，注入同样的
+    NonRecordingSpan context → 续跑 observations 归入原 trace，不再新开
+    第二个 chat-turn trace。「新查询」（无父且非续跑）时把 (trace, root_obs)
+    写入 _THREAD_TRACE_MAP。
+
+    主 agent 新查询场景：不注入 OTel context → CallbackHandler 照常创建新
+    trace，但仍记录 root observation ID + thread 映射。
+    """
+    original_on_chain_start = handler.on_chain_start
+
+    def _patched_on_chain_start(
+        serialized, inputs, *, run_id, parent_run_id=None,
+        tags=None, metadata=None, **kwargs,
+    ):
+        # M-T3/T3d：父 context 检测——两类场景复用父 trace，避免新开 trace
+        #   A（M-T3）：子 agent —— runs.create 注入的 metadata 带 langfuse_parent_trace_id
+        #   B（M-T3d）：auto-continue 续跑 —— 末条消息是自动续跑通知，
+        #     从 _THREAD_TRACE_MAP 读该 thread「新查询」的原 trace，续跑
+        #     observations 归入原 trace（而非新开一个 chat-turn trace）
+        parent_tid = ""
+        parent_oid = ""
+        parent_case = ""
+        if parent_run_id is None:
+            if metadata and metadata.get("langfuse_parent_trace_id"):
+                parent_tid = str(metadata["langfuse_parent_trace_id"])
+                parent_oid = str(metadata.get("langfuse_parent_obs_id", "") or "")
+                parent_case = "subagent"
+            elif _is_auto_continue(inputs):
+                # M-T5：优先按 task_id 路由到发起任务的那次查询（解决连问场景
+                # 任务 N 完成通知落在问题 N+1 的 run 活跃期时误挂到 N+1 的 trace）；
+                # 未命中回退 M-T3d 的线程级路由（跨进程/重启/旧格式兜底）。
+                _ac_task = _extract_task_id_from_auto_continue(inputs)
+                if _ac_task:
+                    _m5 = get_task_trace_context(_ac_task)
+                    if _m5[1]:  # trace_id 非空 → 任务级命中
+                        parent_tid = _m5[1]
+                        parent_oid = _m5[2]
+                        parent_case = f"auto-continue-task:{_ac_task[:12]}"
+                    else:
+                        parent_tid, parent_oid, parent_case = _fallback_thread_route(metadata)
+                else:
+                    parent_tid, parent_oid, parent_case = _fallback_thread_route(metadata)
+
+        has_parent = bool(parent_tid)
+        token = None
+        if has_parent:
+            try:
+                from opentelemetry import trace as otel_trace
+                from opentelemetry import context as otel_context
+
+                # M-T3 修复（2026-08-26）：span_id 必须用父 agent 的 root
+                # observation id（真实存在的 observation），不能用占位 1。
+                # 用 1 时子 agent root observation 的 parent_span_id 指向不存在
+                # 的 span → Langfuse 丢弃该 observation（API 404），连带其整棵
+                # 子树（子 agent 的 model/tools/middleware）全部丢失。
+                # _wrap_runs_create 已在 orig_create 之前把主 agent root obs id
+                # 快照进 metadata.langfuse_parent_obs_id，直接用。
+                #
+                # M-T3c 修复 3（2026-08-26，重启后实测仍 404 的根因）：
+                # trace_flags 必须置 SAMPLED(0x01)！默认 TraceFlags(0)=未采样，
+                # OTel ParentBased(AlwaysOn) 采样器对未采样父 → 子 span 全部
+                # NonRecordingSpan → end() 不触发 on_end → 整棵子树从未导出到
+                # Langfuse 服务端（进程内 _runs 有记录、API 恒 404）。与 SDK
+                # 内部 Langfuse._create_remote_parent_span 的构造参数对齐
+                # （trace_flags=TraceFlags(0x01)、is_remote=False）。
+                try:
+                    parent_span_id = int(parent_oid, 16) if parent_oid else 1
+                except (ValueError, TypeError):
+                    parent_span_id = 1
+                span_context = otel_trace.SpanContext(
+                    trace_id=int(parent_tid, 16),
+                    span_id=parent_span_id,
+                    trace_flags=otel_trace.TraceFlags(0x01),  # sampled！
+                    is_remote=False,
+                )
+                non_recording = otel_trace.NonRecordingSpan(span_context)
+                ctx = otel_trace.set_span_in_context(non_recording)
+                token = otel_context.attach(ctx)
+                _logger.info(
+                    "[langfuse_m3] %s root chain → 注入父 trace context %s "
+                    "parent_obs=%s",
+                    parent_case or "parent",
+                    parent_tid[:16],
+                    parent_oid[:16] if parent_oid else "(none→span_id=1)",
+                )
+            except Exception as e:
+                _logger.debug("[langfuse_m3] 注入父 trace context 失败: %s", e)
+                token = None
+
+        try:
+            result = original_on_chain_start(
+                serialized, inputs, run_id=run_id,
+                parent_run_id=parent_run_id, tags=tags,
+                metadata=metadata, **kwargs,
+            )
+        finally:
+            if token is not None:
+                try:
+                    from opentelemetry import context as otel_context
+                    otel_context.detach(token)
+                except Exception:
+                    pass
+
+        # M-T3b：root chain 完成后，记录 trace_id → root observation_id
+        if parent_run_id is None:
+            try:
+                obs = handler._runs.get(run_id)
+                if obs is not None:
+                    tid = getattr(obs, "trace_id", "") or ""
+                    oid = getattr(obs, "id", "") or getattr(obs, "observation_id", "") or ""
+                    otel_span_id = ""
+                    try:
+                        ctx = obs._otel_span.get_span_context()
+                        otel_span_id = format(ctx.span_id, "016x")
+                    except Exception:
+                        pass
+                    if tid and oid:
+                        _ROOT_OBS_MAP[tid] = oid
+                        # M-T3d：仅「新查询」记录 thread → (trace, root_obs)，
+                        # 供后续 auto-continue 复用；子 agent / auto-continue
+                        # （has_parent=True）不写，避免覆盖原查询记录。
+                        if not has_parent:
+                            _thr = str(
+                                (metadata or {}).get("langfuse_session_id", "") or ""
+                            )
+                            if _thr:
+                                _THREAD_TRACE_MAP[_thr] = (tid, oid)
+                        _logger.info(
+                            "[langfuse_m3b] root obs recorded: trace=%s obs=%s "
+                            "otel_span_id=%s handler.last_trace_id=%s "
+                            "obs_type=%s case=%s map_size=%d",
+                            tid, oid, otel_span_id,
+                            getattr(handler, 'last_trace_id', '?'),
+                            type(obs).__name__,
+                            parent_case or "new-query", len(_ROOT_OBS_MAP),
+                        )
+                else:
+                    _logger.info(
+                        "[langfuse_m3b] _runs.get(%s) returned None! "
+                        "_runs keys: %s",
+                        run_id, list(handler._runs.keys())[-5:],
+                    )
+            except Exception as e:
+                _logger.warning("[langfuse_m3b] 记录 root obs 失败: %s", e)
+
+        return result
+
+    handler.on_chain_start = _patched_on_chain_start
 
 
 def get_langfuse_callbacks() -> list:

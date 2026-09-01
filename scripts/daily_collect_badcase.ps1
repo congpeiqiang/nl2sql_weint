@@ -1,7 +1,13 @@
-# 每日 BadCase 采集 → Langfuse Dataset:badcase
+# 每日 BadCase 采集 → Langfuse Dataset:badcase（开发机/宿主机兜底）
+#
+# ⚠ 生产已迁到 Linux Docker 容器：容器内采集请用 scripts/daily_collect_badcase.sh
+#   （宿主机 cron + docker exec），本 ps1 仅保留给开发机手动/Windows 任务计划兜底。
+#
 # 由 Windows 任务计划（nl2sql-collect-badcase）进程外触发，日志追加到根目录
 # server_collect_badcase.log。进程外启动避免随 Claude 会话被杀
 # （见记忆 server-run-durability-background-task）。
+# 采集脚本通过 agent.settings.env_loader 叠加 .env.prod 的 LANGFUSE_*（生产项目凭据），
+# 本机跑也会连生产 Langfuse；AGENT_DATA_ROOT 保持 .env 的本机路径，stamp 落开发工作区。
 $ErrorActionPreference = 'Continue'
 $root = 'D:\code_work_space\llm\nl2sql'
 $env:PYTHONUTF8 = '1'

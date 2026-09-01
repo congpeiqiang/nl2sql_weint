@@ -10,7 +10,7 @@ description: >
 
 ## 概述
 
-本技能负责将图表工具（ECharts `generate_echarts`、Semiotic `renderChart`）生成的图表内容保存为独立文件到工作区报告目录 `/workspace/report/`，方便报告引用和用户下载。
+本技能负责将图表工具（ECharts `generate_echarts`）生成的图表内容保存为独立文件到工作区报告目录 `/workspace/report/`，方便报告引用和用户下载。
 
 **核心价值：** 无需每次手动写 Python 代码解码 base64 / 提取 SVG，直接调用封装好的辅助脚本即可。
 
@@ -33,7 +33,7 @@ description: >
 | 格式 | 来源 | 示例 |
 |------|------|------|
 | **SVG 字符串** | ECharts `outputType="svg"` | `<svg xmlns="...">...</svg>` |
-| **base64 HTML iframe** | Semiotic `renderChart` | `<iframe src="data:text/html;base64,...">` |
+| **base64 HTML iframe** | ECharts 交互式 HTML | `<iframe src="data:text/html;base64,...">` |
 | **PNG 文件路径** | ECharts `outputType="png"` | `C:\Users\xxx\Downloads\uuid.png` |
 
 ### Step 2: 调用辅助脚本保存

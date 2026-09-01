@@ -71,6 +71,7 @@ dry_run(sql)               ← WrenAI 验证
 - **dry_run**: 生成后立即 dry_run，失败最多修复3次
 - **纠错**: 3次 dry_run 失败 → 调用 nl2sql-correction
 - 不要执行run_sql
+- **只读铁律**：只生成 `SELECT`（含 `WITH ... SELECT`）只读查询；**严禁**生成 INSERT/UPDATE/DELETE/REPLACE/MERGE 等 DML，或 DROP/ALTER/CREATE/TRUNCATE/RENAME/GRANT/REVOKE 等 DDL 及 SET/USE/LOAD/COPY/CALL 等非查询语句
 
 ## 错误处理
 

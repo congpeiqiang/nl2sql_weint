@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from functools import wraps
 from typing import Any
 
 import httpx
@@ -190,6 +191,21 @@ def _fallback_summary(messages: list[dict]) -> str:
     return summary
 
 
+def _error_boundary(func):
+    """全局兜底：任何未捕获异常返回 502，而不是 500（500 前端无 body，无法提示）。"""
+
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            _logger.error("[thread_compact] 未捕获异常: %s", e, exc_info=True)
+            return json_response({"error": f"压缩失败: {type(e).__name__}: {e}"}, status=502)
+
+    return wrapper
+
+
+@_error_boundary
 async def compact_thread(request: Request):
     thread_id = request.path_params["thread_id"]
     if not _UUID_RE.match(thread_id):
@@ -246,9 +262,12 @@ async def compact_thread(request: Request):
             additional_kwargs={"lc_source": "summarization"},
         )
 
+        # 注意：langgraph 消息对象（RemoveMessage/HumanMessage）不能被 json.dumps
+        # 直接序列化，必须用 .model_dump() 转 dict（否则 httpx.post(json=...) 抛
+        # "TypeError: Object of type RemoveMessage is not JSON serializable" → 500）。
         new_messages: list[Any] = [
-            RemoveMessage(id=REMOVE_ALL_MESSAGES),
-            summary_msg,
+            RemoveMessage(id=REMOVE_ALL_MESSAGES).model_dump(),
+            summary_msg.model_dump(),
             *preserved,
         ]
 

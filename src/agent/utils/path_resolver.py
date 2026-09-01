@@ -5,7 +5,6 @@ import logging, base64, os, re
 from functools import wraps
 from pathlib import Path
 from typing import Any
-from agent.settings.setting import settings
 from agent.utils.semantic_db import get_detector
 
 # 模块顶部导入 langgraph.config（而非每次工具调用动态 import）：
@@ -238,23 +237,16 @@ def _resolve_args(args, kwargs):
     return args, kwargs
 
 def _is_chart_tool(tool: Any) -> bool:
-    """Check if a tool is a chart generation tool (Semiotic, ECharts or AntV)."""
+    """Check if a tool is a chart generation tool (ECharts or AntV)."""
     name = getattr(tool, "name", "")
     keywords = ("chart", "render", "suggestchart", "getschema", "diagnose", "repair", "generate-echarts", "echarts")
     return bool(name and any(kw in name.lower() for kw in keywords))
 def _sanitize_chart_result(result: Any, is_chart: bool) -> Any:
-    """根据 CHART_ENGINE 选择对应的图表结果处理逻辑。
-
-    - Semiotic: 将 SVG 转为内嵌 iframe
-    - ECharts: 将 SVG 字符串转为内嵌 iframe，或将 PNG 文件路径转为 <img> 标签
-    """
+    """将 ECharts 生成的图表结果转为可渲染内容。"""
     if not is_chart:
         return result
 
-    engine = settings.CHART_ENGINE.lower()
-    if engine == "echarts":
-        return _sanitize_echarts_result(result)
-    return _sanitize_semiotic_result(result, is_chart)
+    return _sanitize_echarts_result(result)
 
 
 def _move_echarts_image_to_workspace(src_path: str) -> str:
@@ -284,7 +276,7 @@ def _move_echarts_image_to_workspace(src_path: str) -> str:
 
 
 def _svg_to_data_url(svg: str) -> str:
-    """将 SVG 字符串转为内嵌 iframe（与 Semiotic 引擎一致）。"""
+    """将 SVG 字符串转为内嵌 iframe。"""
     import re, base64
     svg = svg.strip()
     svg = re.sub(r"</svg>[\s\S]*$", "</svg>", svg)
@@ -342,7 +334,7 @@ def _sanitize_echarts_result(result: Any) -> Any:
     支持三种输出：
     - ECharts option JSON（outputType="option"）：包装为自包含交互式 HTML（内联 echarts.min.js，
       支持 tooltip / 缩放 / 图例切换），以 base64 iframe 渲染在会话，并自动落盘 .html 到工作区
-    - SVG 字符串（outputType="svg"）：转为内嵌 iframe，与 Semiotic 引擎一致，可正常渲染
+    - SVG 字符串（outputType="svg"）：转为内嵌 iframe，可正常渲染
     - PNG 文件路径（outputType="png"）：转为 <img> 标签，并自动复制到工作区 report 目录
     """
     import logging
@@ -457,85 +449,6 @@ def _sanitize_echarts_result(result: Any) -> Any:
     return result
 
 
-def _sanitize_semiotic_result(result: Any, is_chart: bool) -> Any:
-    """将图表 SVG 转为内嵌 iframe。"""
-    import logging
-    _log = logging.getLogger(__name__)
-    _log.warning(f"[CHART] ENTER: is_chart={is_chart}, type={type(result).__name__}, preview={str(result)[:200]}")
-    if isinstance(result, str):
-        _log.info(f"[CHART] str result[:100]={result[:100]}")
-    if not is_chart:
-        return result
-
-    import re, time
-    from pathlib import Path
-
-    def _svg_to_data_url(svg: str) -> str:
-        import base64
-        svg = svg.strip()
-        svg = re.sub(r"</svg>[\s\S]*$", "</svg>", svg)
-        html = f'<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"></head><body style="margin:0;display:flex;justify-content:center;background:#fff">{svg}</body></html>'
-        b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
-        return f'<iframe src="data:text/html;base64,{b64}" width="100%" height="500" style="border:none;border-radius:8px"></iframe>'
-
-    if isinstance(result, tuple) and len(result) == 2:
-        cnt, artifact = result
-        _log.info(f"[CHART] tuple: content_type={type(cnt).__name__}, len={len(str(cnt))}, preview={str(cnt)[:200]}")
-        if isinstance(cnt, list) and len(cnt) > 0:
-            _log.info(f"[CHART] list[0] type={type(cnt[0]).__name__}, keys={list(cnt[0].keys()) if isinstance(cnt[0], dict) else 'N/A'}")
-        if isinstance(cnt, str) and "<svg" in cnt:
-            r = _svg_to_data_url(cnt)
-            _log.info(f"[CHART] transformed to iframe[:100]={r[:100]}")
-            return (r, artifact)
-        # Try extracting SVG from list/dict content
-        import re as _re
-        def _extract_svg(data):
-            if isinstance(data, str) and '<svg' in data:
-                m = _re.search(r'<svg[\s\S]*?</svg>', data)
-                return m.group(0) if m else None
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict):
-                        for v in item.values():
-                            r = _extract_svg(v)
-                            if r:
-                                return r
-            if isinstance(data, dict):
-                for v in data.values():
-                    r = _extract_svg(v)
-                    if r:
-                        return r
-            return None
-        svg_str = _extract_svg(cnt)
-        if svg_str:
-            r = _svg_to_data_url(svg_str)
-            _log.info(f"[CHART] extracted SVG from nested {type(cnt).__name__} → iframe[:100]={r[:100]}")
-            return (r, artifact)
-        # Fallback: try wrapping as image
-        _log.warning(f"[CHART] no SVG found in {type(cnt).__name__}: {str(cnt)[:300]}")
-        # Check if it's a base64 image or URL
-        if isinstance(cnt, str):
-            if cnt.startswith('data:image'):
-                return (f'<img src="{cnt}" style="max-width:100%;border-radius:8px"/>', artifact)
-            if cnt.startswith('http://') or cnt.startswith('https://'):
-                return (f'<img src="{cnt}" style="max-width:100%;border-radius:8px"/>', artifact)
-        return result
-
-    if isinstance(result, str):
-        _log.info(f"[CHART] str result: len={len(result)}, preview={result[:200]}")
-        if "<svg" in result:
-            r = _svg_to_data_url(result)
-            _log.info(f"[CHART] str SVG → iframe[:100]={r[:100]}")
-            return r
-        if result.startswith('data:image'):
-            return f'<img src="{result}" style="max-width:100%;border-radius:8px"/>'
-        if result.startswith('http'):
-            return f'<img src="{result}" style="max-width:100%;border-radius:8px"/>'
-        _log.warning(f"[CHART] str result not SVG/image: {result[:200]}")
-
-    return result
-
-
 def _inject_db_name(tool_name: str, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
     """将前端选择的 db_name 从 LangGraph configurable 强制注入到 dbmcp 直连工具调用中。
 
@@ -592,116 +505,102 @@ def _inject_db_name(tool_name: str, args: tuple, kwargs: dict) -> tuple[tuple, d
     return args, kwargs
 
 
+_CARTESIAN_TYPES = {"bar", "line", "scatter"}
+
+
+def _auto_fix_cartesian_axes(option: dict) -> dict:
+    """P1 修复：mcp-echarts 的 isValidEChartsOption 强制要求 cartesian 系列
+    （bar/line/scatter）必须有 xAxis 与 yAxis，否则整表渲染报
+    "Invalid ECharts option" 并触发 LLM 重试（每次 ~21s 浪费）。
+
+    DeepSeek 偶尔会省略坐标轴。这里在本地补默认轴，避免图表失败：
+    - bar/line：xAxis 缺省 → category 轴（能从 {name,value} 数据里提取类目则填，
+      否则留空数组让 ECharts 按索引显示）；yAxis 缺省 → value 轴。
+    - scatter：xAxis/yAxis 都缺省 → 都补 value 轴。
+    只补缺失侧，已有的轴一律不动（不覆盖 LLM 的显式设计）。
+    """
+    series = option.get("series")
+    if not series:
+        return option
+    if not isinstance(series, list):
+        series = [series]
+    # 仅当存在 bar/line/scatter 系列时才需要坐标轴
+    cart_types = {
+        s.get("type") for s in series
+        if isinstance(s, dict) and s.get("type") in _CARTESIAN_TYPES
+    }
+    if not cart_types:
+        return option
+
+    has_x = bool(option.get("xAxis"))
+    has_y = bool(option.get("yAxis"))
+
+    # 纯 scatter（无 bar/line）时 X 轴应为数值轴；否则默认分类轴
+    pure_scatter = cart_types == {"scatter"}
+
+    if not has_x:
+        if pure_scatter:
+            option["xAxis"] = {"type": "value"}
+            _log.warning("[ECHARTS] P1 自动补齐缺失 xAxis（scatter value 轴）")
+        else:
+            categories: list[Any] = []
+            # 从 {name, value} 形式的数据提取类目（bar/line 常见）
+            for s in series:
+                if not isinstance(s, dict):
+                    continue
+                data = s.get("data")
+                if isinstance(data, list):
+                    for it in data:
+                        if isinstance(it, dict) and "name" in it and it["name"] not in categories:
+                            categories.append(it["name"])
+            if categories:
+                option["xAxis"] = {"type": "category", "data": categories}
+            else:
+                # 无类目数据（如纯数值数组）：仍给 category 空轴，ECharts 按索引展示
+                option["xAxis"] = {"type": "category"}
+            _log.warning(
+                "[ECHARTS] P1 自动补齐缺失 xAxis（%s 类目）",
+                len(categories) if categories else "空",
+            )
+    if not has_y:
+        # scatter 的 y 轴是 value；bar/line 也是 value（y 为数值维度）
+        option["yAxis"] = {"type": "value"}
+        _log.warning("[ECHARTS] P1 自动补齐缺失 yAxis")
+    return option
+
+
 def _pack_chart_props(kwargs: dict) -> dict:
-    """根据 CHART_ENGINE 选择对应的参数处理逻辑。
-
-    - Semiotic: 将 chart 属性（data, categoryAccessor, valueAccessor …）打包进 ``props`` 字段
-    - ECharts: generate_echarts 工具参数（width/height/echartsOption/outputType）直接透传，
-      但需做参数名归一化（echarts → echartsOption）并默认强制 outputType="option"
+    """ECharts generate_echarts 工具参数处理：
+    参数名归一化（echarts → echartsOption）、默认强制 outputType="option"，
+    并对缺失坐标轴的 cartesian 系列本地补默认轴（P1，避免 mcp-echarts 校验失败）。
     """
-    engine = settings.CHART_ENGINE.lower()
-    if engine == "echarts":
-        kwargs = dict(kwargs)
-        # 参数名归一化：LLM 可能传 echarts（旧名），echarts-mcp 实际需要 echartsOption
-        if "echarts" in kwargs and "echartsOption" not in kwargs:
-            kwargs["echartsOption"] = kwargs.pop("echarts")
-        # 一律强制 option 输出：返回 ECharts 配置 JSON，系统包装为交互式 HTML 图表。
-        # 若尊重 LLM 显式传的 svg/png，可能导致同一图表生成两次（一次交互 HTML、
-        # 一次静态 SVG），用户只保留可交互的。因此不区分 outputType，全部走 option。
-        kwargs["outputType"] = "option"
-        return kwargs
+    kwargs = dict(kwargs)
+    # 参数名归一化：LLM 可能传 echarts（旧名），echarts-mcp 实际需要 echartsOption
+    if "echarts" in kwargs and "echartsOption" not in kwargs:
+        kwargs["echartsOption"] = kwargs.pop("echarts")
+    # 一律强制 option 输出：返回 ECharts 配置 JSON，系统包装为交互式 HTML 图表。
+    # 若尊重 LLM 显式传的 svg/png，可能导致同一图表生成两次（一次交互 HTML、
+    # 一次静态 SVG），用户只保留可交互的。因此不区分 outputType，全部走 option。
+    kwargs["outputType"] = "option"
 
-    return _pack_semiotic_props(kwargs)
-
-
-def _pack_semiotic_props(kwargs: dict) -> dict:
-    """semiotic-mcp 的 renderChart / diagnoseConfig 等工具要求 chart 属性
-    （data, categoryAccessor, valueAccessor …）全部嵌套在 ``props`` 字段内：
-
-        { component: "BarChart", props: { data: [...], ... }, format: "svg" }
-
-    但 LLM 经常把所有字段平铺到顶层。本函数把非元数据字段打包进 ``props``。
-    同时自动修正 xy / ordinal 图表的 accessor 命名差异：
-        xy 图表（LineChart 等）使用 xAccessor / yAccessor
-        ordinal 图表（BarChart 等）使用 categoryAccessor / valueAccessor
-    """
-    # semiotic-mcp 元数据字段 + LangChain 框架内部字段，均不应被打包进 props
-    TOP_LEVEL_KEYS = {
-        "component", "props", "theme", "format", "usageMode", "viewportWidth",
-        # LangChain BaseTool / StructuredTool 框架参数
-        "config", "callbacks", "tags", "metadata", "run_name",
-    }
-    # xy 类图表使用 xAccessor/yAccessor；ordinal 类使用 categoryAccessor/valueAccessor
-    _XY_COMPONENTS = {
-        "LineChart", "AreaChart", "StackedAreaChart", "Scatterplot", "BubbleChart",
-        "Heatmap", "ConnectedScatterplot", "QuadrantChart", "MultiAxisLineChart",
-        "CandlestickChart", "DifferenceChart", "BumpChart",
-    }
-    _ORDINAL_COMPONENTS = {
-        "BarChart", "StackedBarChart", "GroupedBarChart", "SwarmPlot", "BoxPlot",
-        "DotPlot", "Histogram", "ViolinPlot", "RidgelinePlot", "PieChart",
-        "DonutChart", "FunnelChart", "LikertChart", "SwimlaneChart", "Treemap",
-        "ParallelCoordinatesChart", "SummaryChart",
-    }
-    if "component" not in kwargs:
-        return kwargs
-    if "props" in kwargs and isinstance(kwargs["props"], dict) and not any(
-        k not in TOP_LEVEL_KEYS for k in kwargs
-    ):
-        # props 已存在且无多余顶层字段，仍需检查 accessor 命名
-        pass
-    else:
-        props = kwargs.get("props") if isinstance(kwargs.get("props"), dict) else {}
-        extra = {k: v for k, v in kwargs.items() if k not in TOP_LEVEL_KEYS}
-        if not extra:
-            return kwargs
-        new_props = {**extra, **props}  # props 内已有字段优先（防止被覆盖）
-        kwargs = {k: v for k, v in kwargs.items() if k in TOP_LEVEL_KEYS} | {"props": new_props}
-
-    # 修正 accessor 命名
-    component = kwargs.get("component", "")
-    props = kwargs.get("props")
-    if isinstance(props, dict):
-        if component in _XY_COMPONENTS:
-            if "categoryAccessor" in props and "xAccessor" not in props:
-                props["xAccessor"] = props.pop("categoryAccessor")
-            if "valueAccessor" in props and "yAccessor" not in props:
-                props["yAccessor"] = props.pop("valueAccessor")
-            # LineChart 的 xScaleType 只接受 linear/log/time，不支持 ordinal。
-            # 当 x 值是字符串时：把分类值映射为数值索引（0,1,2…），保留原始标签
-            # 存到 _x_labels 供坐标轴显示。
-            _x_acc = props.get("xAccessor")
-            _data = props.get("data")
-            if (
-                component == "LineChart"
-                and _x_acc
-                and isinstance(_data, list)
-                and _data
-                and isinstance(_data[0], dict)
-                and isinstance(_data[0].get(_x_acc), str)
-            ):
-                # 按出现顺序建立 分类值 → 索引 映射
-                _seen = {}
-                _labels = []
-                for row in _data:
-                    v = row.get(_x_acc)
-                    if v not in _seen:
-                        _seen[v] = len(_labels)
-                        _labels.append(v)
-                # 把原始标签存到 _label 字段，供 tooltip 显示
-                for row in _data:
-                    row["_label"] = row[_x_acc]
-                    row[_x_acc] = _seen[row[_x_acc]]
-                # 确保数据点可见，方便 hover 显示 tooltip
-                props.setdefault("showPoints", True)
-                _log.warning(
-                    f"[_pack_chart_props] LineChart categorical x mapped to indices: "
-                    f"labels={_labels}")
-        elif component in _ORDINAL_COMPONENTS:
-            if "xAccessor" in props and "categoryAccessor" not in props:
-                props["categoryAccessor"] = props.pop("xAccessor")
-            if "yAccessor" in props and "valueAccessor" not in props:
-                props["valueAccessor"] = props.pop("yAccessor")
+    # ── P1：cartesian 系列缺轴 → 本地补默认轴 ──
+    # ⚠ mcp-echarts 的 generate_echarts schema 要求 echartsOption 是 JSON **字符串**，
+    # 补轴函数返回 dict，若直接回填会在 MCP 侧报 "Expected string, received object
+    # at echartsOption" → 补轴后必须 json.dumps 序列化回 str（str 与 dict 入参统一）。
+    opt_raw = kwargs.get("echartsOption")
+    if isinstance(opt_raw, str):
+        try:
+            opt = json.loads(opt_raw)
+            if isinstance(opt, dict):
+                kwargs["echartsOption"] = json.dumps(
+                    _auto_fix_cartesian_axes(opt), ensure_ascii=False
+                )
+        except Exception:  # noqa: BLE001 解析失败不动，交给 mcp-echarts 报错
+            pass
+    elif isinstance(opt_raw, dict):
+        kwargs["echartsOption"] = json.dumps(
+            _auto_fix_cartesian_axes(opt_raw), ensure_ascii=False
+        )
     return kwargs
 
 
@@ -767,10 +666,12 @@ def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
     """
     project_path = getattr(tool, "_wren_project_path", None)
     if project_path is None:
+        _log.debug("[WREN FAST-PATH] %s 跳过：_wren_project_path 未注入", tool.name)
         return None
 
     backend = os.environ.get("WREN_MEMORY_BACKEND", "").strip().lower()
     if backend != "grep":
+        _log.debug("[WREN FAST-PATH] %s 跳过：WREN_MEMORY_BACKEND=%r（非 grep）", tool.name, backend)
         return None
 
     # ── get_context：小 schema 返回全文，跳过 MemoryStore ──
