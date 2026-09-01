@@ -17,6 +17,7 @@ import logging
 import re
 import time as _time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Optional
 
 from langchain.tools import ToolRuntime
@@ -303,6 +304,127 @@ def _extract_last_sql(messages) -> str:
     return sqls[-1]["sql"]
 
 
+# ── sql-generation process_data 回填：SQL 与产出最终结果表的 run_sql 对齐 ────
+# process_data/sql-generation/*.json 在 dry_run 工具调用边界落盘，当时只能记录
+# 干跑版本 A；若子 agent 执行时改为版本 B 产出最终结果表，前端展示的 SQL（check
+# 结果 sql 字段，已取产出 run_sql）会与 process_data 不一致。子任务成功后按
+# `_extract_last_sql` 确定的产出 SQL 回填，保留原干跑 SQL 便于排查。
+_BACKFILL_SKILL = "sql-generation"
+
+
+def _session_thread_id() -> str:
+    """读「会话线程 id」，与 langfuse_span._thread_id 同源。
+
+    process_data 落盘目录按会话线程 id 组织（nl2sql_process_data/{session_thread_id}/…），
+    而 check_async_task 拿到的 task["thread_id"] 是子 agent 线程 id。这里读
+    config.metadata.langfuse_session_id（HTTP 层注入的会话级权威值），无则回退
+    configurable.trace_parent_thread_id / thread_id。
+    """
+    try:
+        from langgraph.config import get_config as _lg_get_config
+        cfg = _lg_get_config()
+        if cfg:
+            meta = cfg.get("metadata") or {}
+            if meta.get("langfuse_session_id"):
+                return str(meta["langfuse_session_id"])
+            configurable = cfg.get("configurable") or {}
+            if configurable.get("trace_parent_thread_id"):
+                return str(configurable["trace_parent_thread_id"])
+            if configurable.get("thread_id"):
+                return str(configurable["thread_id"])
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _collect_dry_run_sqls(messages) -> set:
+    """收集本子任务干跑（dry_run）过的 SQL。
+
+    用于把 process_data 回填范围限定在当前子任务：进程里一个会话可能跑多个查询
+    子任务，process_data 目录按会话线程 id 共享，不限定会把别的任务的干跑文件
+    一起改写。按 tool_calls[].name 后缀 dry_run + args.sql 提取。
+    """
+    dry = set()
+    for m in messages:
+        if isinstance(m, dict):
+            tcs = m.get("tool_calls") or []
+        else:
+            tcs = getattr(m, "tool_calls", None) or []
+        for tc in tcs:
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+            args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
+            if not (isinstance(name, str) and name.endswith("dry_run")):
+                continue
+            s = args.get("sql") if isinstance(args, dict) else ""
+            if isinstance(s, str) and s.strip():
+                dry.add(s.strip())
+    return dry
+
+
+def _norm_sql(s: str) -> str:
+    """SQL 归一化（折叠空白），用于比较时忽略纯空白差异。"""
+    return " ".join(s.strip().split())
+
+
+def _backfill_process_data_sql(messages, producing_sql: str) -> int:
+    """把 sql-generation 的 process_data 里的 SQL 回填为产出最终结果表的 run_sql。
+
+    范围限定：只改本子任务干跑过的文件（按子线程消息里的 dry_run 工具调用 SQL
+    精确匹配），不影响同会话里其它查询任务的中间产物。幂等：与原值一致（含纯
+    空白差异）则跳过。返回实际改写文件数。
+    """
+    producing_sql = (producing_sql or "").strip()
+    if not producing_sql or not messages:
+        return 0
+    dry_sqls = _collect_dry_run_sqls(messages)
+    if not dry_sqls:
+        return 0
+    sid = _session_thread_id()
+    if not sid:
+        return 0
+    try:
+        from agent.middlewares.langfuse_span import _active_workspace_path
+        root = _active_workspace_path()
+    except Exception:  # noqa: BLE001
+        return 0
+    if not root:
+        return 0
+    skill_dir = Path(root) / "nl2sql_process_data" / sid / _BACKFILL_SKILL
+    if not skill_dir.exists():
+        return 0
+    updated = 0
+    for f in sorted(skill_dir.glob("*.json")):
+        try:
+            obj = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        inp = obj.get("input") if isinstance(obj, dict) else None
+        if not isinstance(inp, dict):
+            continue
+        cur_sql = str(inp.get("sql") or "").strip()
+        if not cur_sql or cur_sql not in dry_sqls:
+            continue  # 不是本子任务的干跑文件
+        if _norm_sql(cur_sql) == _norm_sql(producing_sql):
+            continue  # 已一致，幂等
+        inp["sql"] = producing_sql
+        obj["_dry_run_sql"] = cur_sql
+        obj["_final_sql"] = producing_sql
+        obj["_backfilled"] = True
+        obj["_backfilled_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            f.write_text(json.dumps(obj, ensure_ascii=False, default=str),
+                         encoding="utf-8")
+            updated += 1
+        except OSError:
+            _logger.debug("[check_progress] process_data 回填写盘失败: %s", f)
+    if updated:
+        _logger.info(
+            "[check_progress] sql-generation process_data 回填 %d 个文件 → 产出 run_sql",
+            updated,
+        )
+    return updated
+
+
 def _add_incremental(result: dict, thread_values: dict, since: Optional[int]) -> None:
     """给 check 结果附加 cursor；since 给定时只回该游标之后的新消息。"""
     messages = (
@@ -362,6 +484,9 @@ def apply_patch():
             sql = _extract_last_sql(messages)
             if sql:
                 result["sql"] = sql
+                # sql-generation process_data 回填为产出 run_sql（若 dry_run 与
+                # 实际执行 SQL 不一致），保证中间产物与前端/报告 SQL 同源
+                _backfill_process_data_sql(messages, sql)
         elif run["status"] == "error":
             error_detail = run.get("error")
             result["error"] = (
