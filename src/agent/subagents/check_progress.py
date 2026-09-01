@@ -66,30 +66,84 @@ def _brief_message(msg) -> dict:
 # ── 结果摘要化（P0：减少主 agent LLM 输入 token）─────────────────────
 _MAX_RESULT_CHARS = 2000      # 结果内容最大字符数
 _MAX_RESULT_ROWS = 20         # SQL 表格结果最多保留行数
+# 子 agent 用"（续）"把大表拆多段时的延续标记（不计为数据行/正文）
+_CONTINUE_MARK = re.compile(r"^\s*[（(]?续[）)]?\s*$")
+
+
+def _trim_block(text: str, budget: int) -> str:
+    """截断一段非表格文本：保留头尾、中间省略，预算内尽量完整保留关键结论。"""
+    if len(text) <= budget:
+        return text
+    half = budget // 2
+    return text[:half].rstrip() + f"\n…({len(text)} 字符，中间省略)…\n" + text[-half:].lstrip()
 
 
 def _summarize_result(content: str) -> str:
     """智能摘要子 agent 返回的结果内容，保留结构信息、截断数据行。
 
     确保 LLM 能判断是否需要图表，同时避免 34k+ tokens 的 prompt 膨胀。
+
+    修复（2026-09-01，trace 8ccef016「78 个部门」幻觉）：
+      - 不再丢弃表格上方的关键结论（如"共 152 个名称 / 431 条记录"）——
+        旧实现只拼表头+前 20 行，主 agent 看不到结论，把摘要行数误当业务统计；
+      - 行数按真实数据行统计：子 agent 用"（续）"把大表拆成多段时，第二段的
+        表头/分隔行曾被误计为数据行（76 行数成 78）；
+      - 摘要 marker 明确"行数≠业务统计口径"。
     """
     if len(content) <= _MAX_RESULT_CHARS:
         return content
 
-    # ── 1. 检测 SQL 表格结果（Markdown 表格格式） ──
+    # ── 1. 解析 Markdown 表格（支持"（续）"拆分的多段表） ──
     lines = content.split("\n")
-    table_lines = [l for l in lines if l.strip().startswith("|")]
-    if len(table_lines) >= 3:  # 至少有 header + separator + 1 行数据
-        header = table_lines[0]
-        sep = table_lines[1] if len(table_lines) > 1 else ""
-        data_rows = table_lines[2:]
-        kept = data_rows[:_MAX_RESULT_ROWS]
+    pre_lines, post_lines, table_runs = [], [], []
+    cur = None
+    for l in lines:
+        if l.strip().startswith("|"):
+            if cur is None:
+                cur = {"header": l, "sep": "", "data": []}
+            elif not cur["sep"]:
+                cur["sep"] = l
+            else:
+                cur["data"].append(l)
+        else:
+            if cur is not None:
+                table_runs.append(cur)
+                cur = None
+            if not l.strip() or _CONTINUE_MARK.match(l.strip()):
+                continue  # 空行 / "（续）"标记不计入正文
+            if not table_runs:
+                pre_lines.append(l)
+            else:
+                post_lines.append(l)
+    if cur is not None:
+        table_runs.append(cur)
+
+    if table_runs:
+        total_data = sum(len(r["data"]) for r in table_runs)
+        kept = []
+        for r in table_runs:
+            for d in r["data"]:
+                if len(kept) >= _MAX_RESULT_ROWS:
+                    break
+                kept.append(d)
+            if len(kept) >= _MAX_RESULT_ROWS:
+                break
+        first = table_runs[0]
         suffix = (
-            f"\n\n*(共 {len(data_rows)} 行数据，以上展示前 {len(kept)} 行；"
-            f"完整结果可通过 check_async_task 增量读取获取)*"
+            f"\n\n*(数据表共 {total_data} 行，以上展示前 {len(kept)} 行；"
+            "行数仅为展示表格行数，业务统计口径以结果文字为准；"
+            "完整数据可通过 check_async_task 增量读取获取)*"
         )
-        summary = header + "\n" + sep + "\n" + "\n".join(kept) + suffix
-        return summary
+        table_part = first["header"] + "\n" + first["sep"] + "\n" + "\n".join(kept) + suffix
+        parts = []
+        pre_text = "\n".join(pre_lines).strip()
+        if pre_text:
+            parts.append(_trim_block(pre_text, _MAX_RESULT_CHARS // 2))
+        parts.append(table_part)
+        post_text = "\n".join(post_lines).strip()
+        if post_text:
+            parts.append(_trim_block(post_text, _MAX_RESULT_CHARS // 2))
+        return "\n\n".join(parts)
 
     # ── 2. 检测 JSON 数组结果 ──
     try:
@@ -111,18 +165,115 @@ def _summarize_result(content: str) -> str:
     return f"{head}\n\n...({len(content)} 字符，中间已省略；完整结果可通过 check_async_task 增量读取获取)...\n\n{tail}"
 
 
-def _extract_last_sql(messages) -> str:
-    """从子线程消息提取最后一次 run_sql 的真实执行 SQL。
+def _msg_content_str(m) -> str:
+    """消息 content 归一化为纯文本（兼容 str / list[content-block]）。"""
+    if isinstance(m, dict):
+        c = m.get("content", "")
+    else:
+        c = getattr(m, "content", "") or ""
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        parts = []
+        for it in c:
+            if isinstance(it, dict) and it.get("type") == "text":
+                parts.append(str(it.get("text", "")))
+            else:
+                parts.append(str(it))
+        return "\n".join(parts)
+    return str(c)
 
-    报告装配（build_report）需要把真实执行的 SQL 写进报告，但 nl2sql 子 agent
-    的最终回复通常只有数据表+分析文字，SQL 只在中间的 run_sql 工具调用里
-    （wrenai_<库名>_run_sql / dbmcp_run_sql，sql 在 tool_calls[].args.sql）。
+
+def _run_sql_meta(messages, i):
+    """解析第 i 条 run_sql 工具结果消息：返回 (sql, 返回行数, 列名集合)。
+
+    通过 tool_call_id 与之前 AI 消息的 tool_calls[].id 精确对齐，避免同一 AI
+    消息里连续多个 run_sql 时结果错配。
+    """
+    m = messages[i]
+    rows, cols = 0, []
+    try:
+        obj = json.loads(_msg_content_str(m))
+    except (json.JSONDecodeError, ValueError):
+        obj = None
+    if isinstance(obj, dict):
+        rr = obj.get("rows")
+        if isinstance(rr, list):
+            rows = len(rr)
+        elif obj.get("row_count") is not None:
+            try:
+                rows = int(obj["row_count"])
+            except (TypeError, ValueError):
+                rows = 0
+        cc = obj.get("columns")
+        if isinstance(cc, list):
+            cols = [str(x).strip().lower() for x in cc]
+
+    tcid = m.get("tool_call_id") if isinstance(m, dict) else getattr(m, "tool_call_id", None)
+    last_sql = ""
+    for j in range(i - 1, -1, -1):
+        mj = messages[j]
+        if isinstance(mj, dict):
+            tcs = mj.get("tool_calls") or []
+        else:
+            tcs = getattr(mj, "tool_calls", None) or []
+        for tc in tcs:
+            tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+            args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
+            if not (isinstance(name, str) and name.endswith("run_sql")):
+                continue
+            if not isinstance(args, dict):
+                continue
+            s = args.get("sql", "")
+            sql = s.strip() if isinstance(s, str) else ""
+            if not sql:
+                continue
+            if tcid and tc_id and str(tc_id) == str(tcid):
+                return sql, rows, cols
+            last_sql = sql  # 无 id 匹配时回退：最后一个 run_sql 的 sql
+    return last_sql, rows, cols
+
+
+def _final_table_headers(messages) -> set:
+    """取最后一条带 Markdown 表格的 AI 消息的表头列（归一化小写集合）。"""
+    for m in reversed(messages):
+        if isinstance(m, dict):
+            role = m.get("role") or m.get("type")
+        else:
+            role = getattr(m, "type", "")
+        if role not in ("ai", "assistant"):
+            continue
+        for line in _msg_content_str(m).split("\n"):
+            s = line.strip()
+            if not s.startswith("|"):
+                continue
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if not cells:
+                continue
+            if all(set(c) <= set("-: ") for c in cells):
+                continue  # 分隔行
+            return {c.lower() for c in cells if c}
+    return set()
+
+
+def _extract_last_sql(messages) -> str:
+    """从子线程消息提取真实执行 SQL，供报告装配（build_report）使用。
+
+    nl2sql 子 agent 的最终回复通常只有数据表+分析文字，SQL 只在中间的 run_sql
+    工具调用里（wrenai_<库名>_run_sql / dbmcp_run_sql，sql 在 tool_calls[].args.sql）。
     这里确定性提取，不依赖 LLM 在最终回复中附带 SQL。
 
-    兼容 dict（threads.get_state 返回的 checkpoint）与 LangChain Message 对象。
-    仅匹配 run_sql（不含 dry_run 校验调用）；取最后一次即产生最终数据的那条。
+    不再简单取"消息序列最后一条 run_sql"：子 agent 在产出最终结果后可能还跑
+    探值/核查 SQL（如 DISTINCT 取值、COUNT(*)、HAVING 重名核查），这些不是产出
+    结果表的 SQL（trace 8ccef016 曾把 HAVING 重名核查 SQL 误当执行 SQL 附给报告）。
+
+    启发式（按优先级）：
+      1) 结果列名与子 agent 最终答案表格表头匹配的 run_sql；
+      2) 返回行数最多的 run_sql（最终数据表通常是最大结果集）；
+      3) 兜底：最后一条 run_sql。
     """
-    last_tool_idx = -1
+    sqls = []  # [{sql, rows, cols}]
     for i, m in enumerate(messages):
         if isinstance(m, dict):
             role = m.get("role") or m.get("type")
@@ -130,29 +281,26 @@ def _extract_last_sql(messages) -> str:
         else:
             role = getattr(m, "type", "")
             name = getattr(m, "name", "") or ""
-        if role in ("tool", "tool_result") and "run_sql" in name:
-            last_tool_idx = i
-    if last_tool_idx < 0:
+        if role not in ("tool", "tool_result") or "run_sql" not in name:
+            continue
+        sql, rows, cols = _run_sql_meta(messages, i)
+        if sql:
+            sqls.append({"sql": sql, "rows": rows, "cols": cols})
+
+    if not sqls:
         return ""
-    # 回看该 tool 消息之前的 AI tool_calls，取同名调用 args.sql
-    for j in range(last_tool_idx - 1, -1, -1):
-        m = messages[j]
-        if isinstance(m, dict):
-            tool_calls = m.get("tool_calls") or []
-        else:
-            tool_calls = getattr(m, "tool_calls", None) or []
-        for c in tool_calls:
-            name = c.get("name") if isinstance(c, dict) else getattr(c, "name", "")
-            args = c.get("args") if isinstance(c, dict) else getattr(c, "args", {})
-            if (
-                isinstance(name, str)
-                and name.endswith("run_sql")
-                and isinstance(args, dict)
-            ):
-                sql = args.get("sql", "")
-                if isinstance(sql, str) and sql.strip():
-                    return sql.strip()
-    return ""
+
+    final_headers = _final_table_headers(messages)
+    if final_headers:
+        for s in reversed(sqls):
+            if s["cols"] and set(s["cols"]) & final_headers:
+                return s["sql"]
+
+    best = max(sqls, key=lambda s: s["rows"])
+    if best["rows"] > 0:
+        return best["sql"]
+
+    return sqls[-1]["sql"]
 
 
 def _add_incremental(result: dict, thread_values: dict, since: Optional[int]) -> None:
