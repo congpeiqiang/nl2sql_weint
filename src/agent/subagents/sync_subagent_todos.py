@@ -218,7 +218,7 @@ async def _async_sync_loop(
         from agent.trace.event_store import EventStore
         from agent.trace.event_log import EventType
         wm = _get_workspace_manager()
-        _trace_db = os.path.join(str(wm.active_workspace), "traces.sqlite")
+        _trace_db = str(wm.shared_trace_db)
         _trace_store = EventStore(_trace_db)
         _trace_store.open()
         # 记录子智能体启动事件
@@ -243,6 +243,8 @@ async def _async_sync_loop(
     active_queries_written = False  # 是否已写入 active_queries=true 到 state
     active_queries_cleared = False  # 是否已写入 active_queries=false 到 state
     async_tasks_written = False  # 是否已写入 async_tasks 终止态（主线程 in-flight 时会多次被拒，需重试）
+    query_header_entry = None    # 本任务 query_headers 条目（2c 写入时赋值，供 M-T5c 描述兜底）
+    description_written = False  # 是否已把任务描述 merge 进 async_tasks（M-T5c，一次性）
     # ── P1-3 SQL 审批等待状态 ──
     approval_pending = False          # 子 run 正停在审批 interrupt 上
     approval_relayed = False          # awaiting_approval 已写入主线程 async_tasks
@@ -261,6 +263,23 @@ async def _async_sync_loop(
 
     wait_for_run_cycles = 0  # 等待 run 出现的周期数
     loop_start = time.monotonic()  # 本任务开始时间（用于运行时长保护）
+
+    # ── P1-9 启动自愈：async_tasks 终态写入与 active_queries=false 是两个不原子写，
+    # 中间进程重启会留下"async_tasks=success 但 active_queries=true"的脏状态 → 前端
+    # 永远显示执行中卡片。sync 线程启动时若发现该任务已是终态，不再写 active_queries=true，
+    # 直接进完成分支清 false 收尾（也顺手幂等重写终态）。
+    try:
+        _boot_status = await _read_task_status(client, main_thread_id, sub_thread_id)
+        if _boot_status in _RUN_DONE_STATUSES:
+            _logger.info(
+                "[sync] 任务 %s 启动即终态 %s，跳过 active_queries=true，直接清收尾",
+                sub_thread_id[:8], _boot_status,
+            )
+            run_status = _boot_status
+            sub_agent_done = True
+            active_queries_written = True
+    except Exception as _boot_err:
+        _logger.debug("[sync] 启动终态检查失败(继续正常流程): %s", _boot_err)
 
     while True:
         await asyncio.sleep(0.5)  # 加快同步频率，减少 write_todos 覆盖窗口
@@ -504,6 +523,37 @@ async def _async_sync_loop(
                 except Exception as e:
                     _logger.debug("[sync] 写入 active_queries=true 失败(将重试): %s", str(e)[:80])
 
+            # ── 2e. 首次把任务描述 merge 进 async_tasks[task_id]（M-T5c）──
+            # 派发时描述登记在进程级任务注册表（_TASK_TRACE_MAP）；此处落进 state，
+            # 让跨进程/重启后前端仍能显示真实描述（而非任务 ID）。
+            # 前提：query_headers 已成功写入（主线程非 in-flight，state 可写）。
+            # 读-改-写复用 _sync_update_state（_SYNC_WRITE_LOCK 串行化）；仅当
+            # entry 缺 description 时触发一次。
+            if not description_written and query_headers_written:
+                _desc_m5 = _lookup_task_description(sub_thread_id, query_header_entry)
+                if _desc_m5:
+                    try:
+                        _st0 = await client.threads.get_state(thread_id=main_thread_id)
+                        _tasks0 = (_st0.get("values") or {}).get("async_tasks") or {}
+                        _entry0 = _tasks0.get(sub_thread_id)
+                        if isinstance(_entry0, dict) and not _entry0.get("description"):
+                            _merged0 = dict(_entry0)
+                            _merged0["description"] = _desc_m5
+                            await asyncio.to_thread(
+                                _sync_update_state,
+                                main_thread_id,
+                                {"async_tasks": {sub_thread_id: _merged0}},
+                            )
+                            description_written = True
+                            _logger.info(
+                                "[sync] M-T5c: async_tasks[%s] 补 description=%s",
+                                sub_thread_id[:8], _desc_m5[:50],
+                            )
+                    except Exception as e:
+                        _logger.debug(
+                            "[sync] M-T5c: 写 description 失败(将重试): %s", str(e)[:80]
+                        )
+
             # ── 3. 子智能体运行中：写入 subagent_steps 独立字段 ──
             if not sub_agent_done:
                 sub_todos = await _extract_subagent_todos(
@@ -631,7 +681,20 @@ async def _async_sync_loop(
                         base = dict(task or {})
                         base["task_id"] = sub_thread_id
                         base["agent_name"] = agent_name
-                        base["status"] = run_status  # "success" / "error"
+                        # M-T5c：终态写不能丢掉 description（初始 task 字典无该字段；
+                        # 2e 已 merge 进 state，这里从注册表/query_headers 再兜底一次）
+                        if not base.get("description"):
+                            base["description"] = _lookup_task_description(
+                                sub_thread_id, query_header_entry
+                            )
+                        base["status"] = run_status  # "success" / "error" / "cancelled" / "timeout" / "interrupted"
+                        # 终态错误详情透传（方案2）：非 success 时取 run.error 截断写入，
+                        # 供前端侧边栏展示具体失败原因（此前恒为 None，用户看不到任何原因）。
+                        _err_text = await _terminal_error(
+                            client, sub_thread_id, run_status
+                        )
+                        if _err_text:
+                            base["error"] = _err_text
                         now_str = time.strftime(
                             "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                         )
@@ -754,6 +817,26 @@ async def _get_latest_run(client, thread_id: str) -> Optional[dict]:
         return None
 
 
+async def _terminal_error(client, thread_id: str, run_status: str) -> Optional[str]:
+    """取终态 run 的错误详情（压平空白 + 截断 500），供 async_tasks 终态写入。
+
+    success / 取不到错误 / 异常时返回 None（不阻塞终态写入）。
+    方案2（2026-09-01）：此前 async_tasks 终态恒不带 error，前端侧边栏只能看到
+    「执行失败」看不到具体原因；此处把 run["error"]（如 APITimeoutError: Request timed out.）
+    透传出去。
+    """
+    if run_status == "success":
+        return None
+    try:
+        run = await _get_latest_run(client, thread_id)
+        raw = (run or {}).get("error") or None
+        if not raw:
+            return None
+        return " ".join(str(raw).split())[:500]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def _extract_approval_payload(client, sub_thread_id: str) -> Optional[dict]:
     """子线程处于 interrupt 等待时，提取 HITL 审批 payload（P1-3）。
 
@@ -794,6 +877,29 @@ async def _read_task_status(
     except Exception as e:
         _logger.warning("[sync] read_task_status failed: %s", e)
         return None
+
+
+def _lookup_task_description(
+    task_id: str, query_header_entry: Optional[dict] = None
+) -> str:
+    """按 task_id 找任务描述（M-T5c）。
+
+    优先级：
+    1. 进程级任务注册表（派发时 _wrap_runs_create 登记，含【任务目标】完整描述）；
+    2. query_headers 条目（watcher 已写入 state，去 📋 前缀）。
+    注册表在跨进程/重启后会丢失，query_headers 持久在 state 里，作兜底。
+    """
+    desc = ""
+    try:
+        from agent.trace.langfuse_client import get_task_trace_context
+        desc = str(get_task_trace_context(task_id)[4] or "")
+    except Exception:
+        pass
+    if not desc and query_header_entry:
+        content = str(query_header_entry.get("content", "") or "")
+        if content.startswith("📋 "):
+            desc = content[2:]
+    return desc
 
 
 async def _extract_task_title(
