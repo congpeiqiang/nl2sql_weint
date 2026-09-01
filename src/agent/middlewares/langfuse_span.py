@@ -40,12 +40,21 @@ from agent.trace.langfuse_client import create_score, get_client, langfuse_enabl
 
 _logger = logging.getLogger(__name__)
 
-# 工具名后缀 → skill 分类（启发式；wrenai_imdb_run_sql / dbmcp_run_sql 均命中后缀）
+# 工具名后缀 → skill 分类（启发式；wrenai_imdb_run_sql / dbmcp_run_sql 均命中后缀）。
+# get_context/get_instructions/get_all_knowledge 是澄清/知识检索的真实工作（此前不在
+# map 里 → 无 span，clarification 的语义检索在 trace 里完全不可见），补进独立族
+# knowledge-retrieval（新族不进 _maybe_score 分支，不产生打分）。
 TOOL_SKILL_MAP = {
     "get_db_info": "schema-linking",
     "get_mdl": "schema-linking",
     "describe_schema": "schema-linking",
     "list_models": "schema-linking",
+    "list_cubes": "schema-linking",
+    "describe_cube": "schema-linking",
+    "query_cube": "cube-query",
+    "get_context": "knowledge-retrieval",
+    "get_instructions": "knowledge-retrieval",
+    "get_all_knowledge": "knowledge-retrieval",
     "recall_queries": "recall-queries",
     "run_sql": "sql-execution",
     "dry_run": "sql-generation",
@@ -115,8 +124,10 @@ def _classify_skill(tool_name: str) -> Optional[str]:
 
 # 线程最近加载的编排 skill：thread_id → skill 名。deepagents 渐进披露要求模型执行
 # 某 skill 前先 read_file 其 SKILL.md（skills.py "How to Use Skills"）——该调用是
-# 「当前在跑哪个编排 skill」的唯一权威信号；后续工具调用继承它，让 span 显示真实
-# 的 nl2sql-* 编排 skill 而非启发式分类。进程级，线程安全靠 GIL。
+# 「当前在跑哪个编排 skill」的权威信号。但 skill 内容也注入系统提示词（SkillsMiddleware），
+# 模型常不重读 SKILL.md 就切换 skill（实例：读 clarification 后直接跑 sql-of-thought
+# 流水线），导致活动 skill 过期。故后续工具调用不是无条件继承，而是先查「工具→归属
+# skill」权威表（见 _resolve_display_skill）。进程级，线程安全靠 GIL。
 _THREAD_ACTIVE_SKILL: dict[str, str] = {}
 _ACTIVE_SKILL_CAP = 2000
 # 匹配 .../{skill}/SKILL.md 路径，提取 skill 目录名（shared/skills、skill_refs 前缀皆可）
@@ -139,14 +150,64 @@ def _set_active_skill(thread_id: str, skill: str) -> None:
     _THREAD_ACTIVE_SKILL[thread_id] = skill
 
 
+# 工具 → 正向使用它的真实编排 skill（从各 SKILL.md 抽取，排除"不要/禁止"否定引用）。
+# - sql-of-thought 是顶层编排器，正向执行 run_sql/list_models/query_cube 等
+#   （sql-generation 的 run_sql 是"不要执行 run_sql"；schema-linking 已移除 list_models）；
+# - 值长度 1 = 唯一归属 → 展示直接采用（覆盖过期活动 skill，修复"模型读完
+#   clarification SKILL.md 后未重读其它 SKILL.md 就跑流水线 → list_models/run_sql
+#   被误标 clarification"）；长度 >1 = 共享工具 → 活动 skill 是 owner 才继承。
+_TOOL_OWNER_SKILLS: dict[str, tuple[str, ...]] = {
+    # ── 唯一归属（覆盖过期活动 skill）──
+    "list_models": ("nl2sql-sql-of-thought",),
+    "list_cubes": ("nl2sql-sql-of-thought",),
+    "describe_cube": ("nl2sql-sql-of-thought",),
+    "query_cube": ("nl2sql-sql-of-thought",),
+    "run_sql": ("nl2sql-sql-of-thought",),
+    "dry_plan": ("nl2sql-sql-generation",),
+    "get_all_knowledge": ("nl2sql-knowledge-loader",),
+    # ── 共享（活动 skill 在 owners 内才继承）──
+    "get_context": (
+        "nl2sql-clarification", "nl2sql-schema-linking",
+        "nl2sql-sql-generation", "nl2sql-sql-of-thought",
+    ),
+    "get_instructions": (
+        "nl2sql-clarification", "nl2sql-knowledge-loader",
+        "nl2sql-schema-linking", "nl2sql-sql-of-thought",
+    ),
+    "recall_queries": (
+        "nl2sql-knowledge-loader", "nl2sql-schema-linking",
+        "nl2sql-sql-of-thought", "nl2sql-sql-generation",
+    ),
+    "describe_schema": ("nl2sql-schema-linking", "nl2sql-sql-of-thought"),
+    "get_mdl": ("nl2sql-schema-linking", "nl2sql-sql-of-thought"),
+    "get_db_info": ("nl2sql-schema-linking", "nl2sql-sql-of-thought"),
+    "dry_run": (
+        "nl2sql-sql-generation", "nl2sql-sql-of-thought",
+        "nl2sql-correction", "nl2sql-performance-optimization",
+    ),
+}
+
+
+def _tool_owners(tool_name: str) -> Optional[tuple[str, ...]]:
+    """工具名后缀 → 正向使用它的真实编排 skill 元组（无则 None）。"""
+    for key, owners in _TOOL_OWNER_SKILLS.items():
+        if tool_name == key or tool_name.endswith("_" + key):
+            return owners
+    return None
+
+
 def _resolve_display_skill(tool_name: str, args: dict, thread_id: str, heuristic: str) -> str:
     """展示用 skill 名：优先真实编排 skill，回退启发式分类（评分仍走 heuristic）。
 
-    - read_file/write_file 命中 SKILL.md → 返回该 skill 并记为线程活动 skill
-      （模型「读取 skill 指令 → 按它执行」的渐进披露流程，见 SKILLS_SYSTEM_PROMPT）；
-    - 其他工具 → 继承线程最近加载的编排 skill（该调用属于那次 skill 执行，
-      比工具名后缀猜更准——recall_queries/run_sql 被多个 skill 共用）；
-    - 均无 → 启发式分类兜底。
+    优先级：
+    1. read_file/write_file 命中 SKILL.md → 权威信号，返回该 skill 并记为线程活动 skill；
+    2. read_file/write_file（未命中 SKILL.md）→ 归属当前活动 skill（文件读写是当前
+       skill 执行的一部分，SKILL.md 读取与产物落盘都算）；
+    3. 工具唯一归属 skill（list_models/run_sql/query_cube 等只被一个 skill 正向使用）
+       → 直接返回（覆盖过期活动 skill）；
+    4. 共享工具：活动 skill 是该工具的合法 owner 才继承，否则回退启发式
+       （活动 skill 过期 / 不属于该工具时不强行继承，避免张冠李戴）；
+    5. 均无 → 启发式分类兜底。
     """
     if tool_name in ("read_file", "write_file"):
         p = _vfs_path_from_args(tool_name, args)
@@ -155,7 +216,16 @@ def _resolve_display_skill(tool_name: str, args: dict, thread_id: str, heuristic
             if sk:
                 _set_active_skill(thread_id, sk)
                 return sk
+        act = _THREAD_ACTIVE_SKILL.get(thread_id, "") if thread_id else ""
+        return act if act else heuristic
+    owners = _tool_owners(tool_name)
     act = _THREAD_ACTIVE_SKILL.get(thread_id, "") if thread_id else ""
+    if owners:
+        if len(owners) == 1:
+            return owners[0]
+        if act and act in owners:
+            return act
+        return heuristic
     return act if act else heuristic
 
 
