@@ -30,6 +30,7 @@ from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
 from agent.middlewares.vfs_path_resolver import VfsPathResolverMiddleware
 from agent.middlewares.execute_guard import ExecuteGuardMiddleware
 from agent.middlewares.quota_error import QuotaErrorMiddleware
+from agent.middlewares.model_timeout import ModelTimeoutMiddleware
 from agent.trace.langfuse_client import get_langfuse_callbacks, get_prompt_text
 from agent.utils.skills_versioning import effective_skills_sources
 from typing import Annotated
@@ -241,7 +242,7 @@ agent = create_deep_agent(
     memory=["/shared/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
     # vfs_path_resolver 放列表末尾（最内层、紧贴模型）：后处理在 langfuse_span /
     # trace_recorder 等外层记录之前完成，保证 trace、checkpoint、前端看到同一份真实路径。
-    middleware=[QuotaErrorMiddleware(), execute_guard, skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent"), vfs_path_resolver],
+    middleware=[QuotaErrorMiddleware(), ModelTimeoutMiddleware(), execute_guard, skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent"), vfs_path_resolver],
     backend=composite_backend,
     permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写
     system_prompt=SYSTEM_PROMPT,

@@ -16,6 +16,7 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from agent.llms.model import deepseek_model
 from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
 from agent.middlewares.quota_error import QuotaErrorMiddleware
+from agent.middlewares.model_timeout import ModelTimeoutMiddleware
 from agent.middlewares.sql_approval import build_sql_approval_middleware
 from agent.middlewares.tool_filter import ToolFilterMiddleware
 from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
@@ -202,6 +203,8 @@ if sql_approval_middleware is not None:
 _middleware.append(WriteTodosProtocolMiddleware())
 # 最外层：LLM 额度耗尽错误 → 友好中文提示（须包住所有内层模型调用）
 _middleware.insert(0, QuotaErrorMiddleware())
+# 紧邻：LLM 调用超时 → 友好中文提示（不抛异常，agent 正常结束，前端可见）
+_middleware.insert(0, ModelTimeoutMiddleware())
 
 agent = create_deep_agent(
     model=deepseek_model,
