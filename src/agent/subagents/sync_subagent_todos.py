@@ -245,6 +245,7 @@ async def _async_sync_loop(
     async_tasks_written = False  # 是否已写入 async_tasks 终止态（主线程 in-flight 时会多次被拒，需重试）
     query_header_entry = None    # 本任务 query_headers 条目（2c 写入时赋值，供 M-T5c 描述兜底）
     description_written = False  # 是否已把任务描述 merge 进 async_tasks（M-T5c，一次性）
+    failure_reported_local = False  # 方案1：本 sync 线程内失败汇报是否已尝试（去重，state 标记兜底跨线程）
     # ── P1-3 SQL 审批等待状态 ──
     approval_pending = False          # 子 run 正停在审批 interrupt 上
     approval_relayed = False          # awaiting_approval 已写入主线程 async_tasks
@@ -681,6 +682,16 @@ async def _async_sync_loop(
                         base = dict(task or {})
                         base["task_id"] = sub_thread_id
                         base["agent_name"] = agent_name
+                        # 方案1：终态重写不得丢掉 failure_reported 标记（重启自愈/回退
+                        # 重写 base 时从现有条目带过来，避免失败汇报重复触发）
+                        try:
+                            _prev = await _read_async_task(
+                                client, main_thread_id, sub_thread_id
+                            )
+                            if isinstance(_prev, dict) and _prev.get("failure_reported"):
+                                base["failure_reported"] = True
+                        except Exception:  # noqa: BLE001
+                            pass
                         # M-T5c：终态写不能丢掉 description（初始 task 字典无该字段；
                         # 2e 已 merge 进 state，这里从注册表/query_headers 再兜底一次）
                         if not base.get("description"):
@@ -747,6 +758,27 @@ async def _async_sync_loop(
                             "[sync] 写 active_queries[%s]=false 失败: %s",
                             sub_thread_id[:8], str(e)[:100],
                         )
+
+                # ── 方案1：失败终态自动汇报主 agent（修断链 B）──
+                # 终态 async_tasks（含方案2 错误详情）+ active_queries=false 都落地后，
+                # 若子任务 error/timeout/cancelled，则等主线程空闲（≤30s）后 runs.create
+                # 注入 [系统自动通知]，让主 agent 生成用户可读的失败消息。此前失败后无任何
+                # 机制触发主 agent 转述 → 前端聊天区静默（只有侧边栏无详情的 ✕）。
+                # 去重：state 的 failure_reported 标记（跨线程/重启）+ 本线程 local 标志。
+                if (
+                    async_tasks_written
+                    and active_queries_cleared
+                    and run_status in ("error", "timeout", "cancelled")
+                    and not failure_reported_local
+                ):
+                    failure_reported_local = True  # 本线程只尝试一次（_maybe_report 内部 30s 等待）
+                    await _maybe_report_failure(
+                        client,
+                        main_thread_id,
+                        sub_thread_id,
+                        agent_name,
+                        run_status,
+                    )
 
                 # async_tasks + active_queries=false 都落地后，进入固定宽限期再退出
                 if async_tasks_written and active_queries_cleared:
@@ -1222,6 +1254,150 @@ async def _notify_main_agent_continue(
 
     except Exception as e:
         _log.error("[sync] 通知主智能体继续失败: %s", e, exc_info=True)
+
+
+async def _read_async_task(
+    client, main_thread_id: str, sub_thread_id: str
+) -> Optional[dict]:
+    """读主线程 state 里 async_tasks[sub_thread_id] 条目（不存在/异常返回 None）。"""
+    try:
+        st = await client.threads.get_state(thread_id=main_thread_id)
+        tasks = ((st or {}).get("values") or {}).get("async_tasks") or {}
+        entry = tasks.get(sub_thread_id)
+        return entry if isinstance(entry, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _report_subagent_failure(
+    client,
+    main_thread_id: str,
+    sub_thread_id: str,
+    agent_name: str,
+    run_status: str,
+) -> bool:
+    """子任务失败终态自动汇报主 agent（方案1，修断链 B）。
+
+    error/timeout/cancelled 终态下：等主线程当前 run 结束（≤30s，用户对话中不打扰），
+    然后 runs.create 注入一条 [系统自动通知] 失败说明，让主 agent 生成用户可读的
+    失败消息（此前失败后无任何机制触发主 agent 转述 → 前端聊天区静默）。
+
+    返回是否成功触发续跑（成功由调用方写 state 的 failure_reported 去重标记；
+    失败/主线程忙返回 False，静默降级不级联）。
+    """
+    # 终态标签（error/timeout 用失败语义；cancelled 是用户主动取消 → 确认回执）
+    _label = {
+        "error": "执行失败",
+        "timeout": "执行超时",
+        "cancelled": "已被取消",
+    }.get(run_status, "执行失败")
+
+    try:
+        # 1. 等主线程当前 run 结束（最多 30s）。无 run / 已是终态即认为空闲。
+        #    子任务失败时主线程最新 run 通常是 launch run（success），立即通过；
+        #    仅当用户正在别的对话/查询时才会等待。
+        idle = False
+        for _i in range(15):
+            runs = await client.runs.list(thread_id=main_thread_id, limit=1)
+            if not runs:
+                idle = True
+                break
+            if runs[0].get("status") in (
+                "success", "error", "cancelled", "timeout", "interrupted",
+            ):
+                idle = True
+                break
+            await asyncio.sleep(2)
+        if not idle:
+            _logger.info(
+                "[sync] 方案1: 主线程 30s 内未空闲，跳过失败汇报 sub=%s status=%s",
+                sub_thread_id[:8], run_status,
+            )
+            return False
+
+        # 2. 注入失败通知并续跑。消息带 [系统自动通知] 前缀：
+        #    - langfuse_metadata._extract_question_summary 跳过 [系统 → 不污染 user_question
+        #    - _extract_subagent_todos / message_feedback 也过滤 [系统 → 不会被当新问题/新查询
+        #    错误详情来自方案2 的 async_tasks[task].error（run.error 压平+截断 500）。
+        _err = ""
+        try:
+            _entry = await _read_async_task(
+                client, main_thread_id, sub_thread_id
+            )
+            _err = ((_entry or {}).get("error") or "").strip()
+        except Exception:  # noqa: BLE001
+            pass
+        content = (
+            f"[系统自动通知] 子任务 {agent_name} {_label}"
+            + (f"：{_err}。" if _err else "。")
+            + "请向用户说明失败原因与建议。"
+        )
+        run = await client.runs.create(
+            thread_id=main_thread_id,
+            assistant_id="chat_agent",
+            input={"messages": [{"role": "user", "content": content}]},
+            config={"recursion_limit": 500},
+        )
+        _rid = run.get("run_id", "unknown") if isinstance(run, dict) else run
+        _logger.info(
+            "[sync] 方案1: 失败汇报续跑已创建 run=%s sub=%s status=%s",
+            _rid, sub_thread_id[:8], run_status,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        _logger.error(
+            "[sync] 方案1: 失败汇报续跑失败: %s", str(e)[:200]
+        )
+        return False
+
+
+async def _maybe_report_failure(
+    client,
+    main_thread_id: str,
+    sub_thread_id: str,
+    agent_name: str,
+    run_status: str,
+) -> None:
+    """方案1 入口：state 标记去重（跨线程/重启）→ 触发汇报 → 成功则写 failure_reported。"""
+    # 1. 已有标记（此前已汇报）→ 跳过
+    try:
+        _entry = await _read_async_task(
+            client, main_thread_id, sub_thread_id
+        )
+        if isinstance(_entry, dict) and _entry.get("failure_reported"):
+            _logger.debug(
+                "[sync] 方案1: %s 已汇报过，跳过", sub_thread_id[:8]
+            )
+            return
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2. 触发（内部等主线程空闲 ≤30s；失败静默降级）
+    _ok = await _report_subagent_failure(
+        client, main_thread_id, sub_thread_id, agent_name, run_status
+    )
+
+    # 3. 成功 → 写 failure_reported 标记（best-effort，读-改-写复用锁）
+    if _ok:
+        try:
+            _entry = await _read_async_task(
+                client, main_thread_id, sub_thread_id
+            )
+            _merged = dict(_entry or {})
+            _merged["task_id"] = sub_thread_id
+            _merged["failure_reported"] = True
+            await asyncio.to_thread(
+                _sync_update_state,
+                main_thread_id,
+                {"async_tasks": {sub_thread_id: _merged}},
+            )
+            _logger.info(
+                "[sync] 方案1: %s failure_reported 已标记", sub_thread_id[:8]
+            )
+        except Exception as e:  # noqa: BLE001
+            _logger.warning(
+                "[sync] 方案1: 写 failure_reported 失败: %s", str(e)[:100]
+            )
 
 
 def _merge_todos(
