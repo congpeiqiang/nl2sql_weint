@@ -1,0 +1,67 @@
+{
+  "user_intent": {
+    "original_question": "查询炉台D330在调温阶段的页面亮度数据",
+    "domain": "crystal_manufacturing",
+    "keywords": ["炉台", "D330", "调温", "页面亮度"],
+    "intent_type": "query_device_process_data"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "device_code", "operator": "=", "value": "D330"},
+      {"field": "proc_stage", "operator": "=", "value": "调温"}
+    ],
+    "fields_to_display": ["页面亮度", "采集时间", "工艺阶段"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_general",
+      "name": "通用业务规则",
+      "condition": "无特殊业务规则，直接从知识库获取的通用规则"
+    }
+  ],
+  "field_mappings": {
+    "炉台": "device_code (设备编码)",
+    "调温阶段": "proc_stage (工艺阶段) = '调温'",
+    "页面亮度": "可能存储在 aix_crystal_record_data 的 content/value 键值对中，或对应 aix_crystal_comm_data 中的 melt_bright(熔接亮度) / shoulder_rel_bright(放肩亮度)"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "数据模型结构",
+      "content": "aix_crystal_comm_data: 晶体生长通用数据表，包含设备编码、工艺阶段、各类工艺参数（亮度、温度、拉速等）。aix_crystal_record_data: 晶体记录数据表，采用 content/value 键值对存储各类记录信息。"
+    },
+    {
+      "topic": "表选择",
+      "content": "多个同名表带不同后缀(_all, _kafka_consumer, _kafka_engine)，优先使用基础表 aix_crystal_comm_data 或 aix_crystal_record_data"
+    },
+    {
+      "topic": "亮度相关字段",
+      "content": "aix_crystal_comm_data 中有 melt_bright(熔接亮度) 和 shoulder_rel_bright(放肩亮度)。'页面亮度'可能存储在 aix_crystal_record_data 的 content 字段中"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["aix_crystal_comm_data", "aix_crystal_record_data"],
+    "main_fields": ["device_code", "proc_stage", "collect_time", "content", "value", "melt_bright", "shoulder_rel_bright"],
+    "filter_conditions": ["device_code = 'D330'", "proc_stage = '调温'"],
+    "time_range": "未指定"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2025-01-01T00:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 1,
+      "field_mappings": 3,
+      "knowledge": 3
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 1,
+      "field_mappings": 3,
+      "knowledge": 3
+    }
+  }
+}

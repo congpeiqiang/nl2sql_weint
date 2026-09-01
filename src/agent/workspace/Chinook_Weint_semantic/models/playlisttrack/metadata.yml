@@ -1,0 +1,16 @@
+# PlaylistTrack table
+name: playlisttrack
+table_reference:
+  table: PlaylistTrack
+columns:
+- name: PlaylistId
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+- name: TrackId
+  type: INTEGER
+  is_calculated: false
+  not_null: true
+  is_primary_key: true
+cached: false

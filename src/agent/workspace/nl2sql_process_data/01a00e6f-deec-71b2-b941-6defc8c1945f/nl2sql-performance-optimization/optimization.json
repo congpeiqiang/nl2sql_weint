@@ -1,0 +1,6 @@
+{
+  "sql": "SELECT t.primary_title, t.start_year, t.average_rating, t.num_votes, ROUND(t.average_rating / LOG10(t.num_votes + 1), 4) AS hidden_gem_score FROM titles t WHERE t.title_type = 'movie' AND t.average_rating >= 8.5 AND t.num_votes < 5000 AND t.average_rating IS NOT NULL AND t.start_year IS NOT NULL ORDER BY t.average_rating DESC, t.num_votes ASC",
+  "optimized_sql": "SELECT t.primary_title, t.start_year, t.average_rating, t.num_votes, ROUND(t.average_rating / LOG10(t.num_votes + 1), 4) AS hidden_gem_score FROM titles t WHERE t.title_type = 'movie' AND t.average_rating >= 8.5 AND t.num_votes < 5000 AND t.average_rating IS NOT NULL AND t.start_year IS NOT NULL ORDER BY t.average_rating DESC, t.num_votes ASC",
+  "issues": [],
+  "summary": "逐条对照性能规则集（10 条规则）检查，未发现性能隐患：无 SELECT *、无笛卡尔积、无子查询、WHERE 无函数包裹列、无 NOT IN、无 DISTINCT、无 LIKE 前缀通配、无 OR 条件、有 ORDER BY。LIMIT 按用户规范通过 run_sql limit 参数控制（服务端自动 cap），不视为问题。SQL 保持原样，无需优化。"
+}

@@ -1,0 +1,147 @@
+     1	---
+     2	name: langfuse
+     3	description: Interact with Langfuse and access its documentation. Use when needing to (1) query or modify Langfuse data programmatically via the CLI — traces, prompts, datasets, scores, sessions, and any other API resource, (2) look up Langfuse documentation, concepts, integration guides, or SDK usage, or (3) understand how any Langfuse feature works. This skill covers CLI-based API access (via npx) and multiple documentation retrieval methods.
+     4	allowed-tools:
+     5	  - WebFetch(domain:langfuse.com)
+     6	  - Bash(curl *langfuse.com/*)
+     7	  - Bash(npx langfuse-cli api __schema *)
+     8	  - Bash(npx langfuse-cli api * --help *)
+     9	  - Bash(npx langfuse-cli api * list *)
+    10	  - Bash(npx langfuse-cli api * get *)
+    11	  - Bash(bunx langfuse-cli api __schema *)
+    12	  - Bash(bunx langfuse-cli api * --help *)
+    13	  - Bash(bunx langfuse-cli api * list *)
+    14	  - Bash(bunx langfuse-cli api * get *)
+    15	---
+    16	
+    17	# Langfuse
+    18	
+    19	This skill helps you use Langfuse effectively across all common workflows: instrumenting applications, migrating prompts, debugging traces, and accessing data programmatically.
+    20	
+    21	## Core Principles
+    22	
+    23	Follow these principles for ALL Langfuse work:
+    24	
+    25	1. **Documentation First**: NEVER implement based on memory. Always fetch current docs before writing code (Langfuse updates frequently) See the section below on how to access documentation.
+    26	2. **CLI for Data Access**: Use `langfuse-cli` when querying/modifying Langfuse data. See the section below on how to use the CLI.
+    27	3. **Best Practices by Use Case**: Check the relevant reference file below for use-case-specific guidelines before implementing
+    28	4. **Use latest Langfuse versions**: Unless the user specified otherwise or there's a good reason, always use the latest version of Langfuse SDKs/APIs. Even if you're only creating a plan for another agent to execute, be explicit about the exact version to use.
+    29	5. **If you guide the user through UI** and are unsure about a label or location, inspect the user’s screenshots or ask to see the relevant screen. Do not assume UI labels have the exact same names as API, SDK, or CLI fields.
+    30	
+    31	
+    32	## Use case specific references
+    33	
+    34	- instrumenting an existing function/application: references/instrumentation.md
+    35	- migrating prompts from a codebase into Langfuse: references/prompt-migration.md
+    36	- creating a prompt or changing any part of an existing prompt, including small edits and debugging/tuning: references/prompt-engineering.md
+    37	- capturing user feedback (thumbs, ratings, implicit signals) as scores on traces: references/user-feedback.md
+    38	- further tips on using the Langfuse CLI: references/cli.md
+    39	- upgrading or migrating Langfuse SDKs and preserving application instrumentation attributes: references/sdk-upgrade.md
+    40	- upgrading legacy trace-level or dataset-item evaluators to observation-level or experiment evaluators: references/trace-evaluator-upgrade.md. Use the [evaluator migration guide](https://langfuse.com/faq/all/llm-as-a-judge-migration) as the primary reference.
+    41	- preparing a Langfuse project for the v4 platform migration: references/v4-project-migration.md
+    42	- judge calibration (LLM-as-a-Judge reliability, simple accuracy checks, advanced split-based validation, confusion matrices, and metric ingestion): references/judge-calibration.md
+    43	- systematic error analysis — reading traces, building failure taxonomy, deciding what to fix: references/error-analysis.md
+    44	- setting up CI/CD experiment gates with `langfuse/experiment-action`: references/ci-cd.md
+    45	- submitting feedback about this skill: references/skill-feedback.md
+    46	
+    47	
+    48	## 1. Langfuse API via CLI
+    49	
+    50	Use the `langfuse-cli` to interact with the full Langfuse REST API from the command line. Run via npx (no install required):
+    51	
+    52	Start by discovering the schema and available arguments:
+    53	
+    54	```bash
+    55	# Discover all available resources
+    56	npx langfuse-cli api __schema
+    57	
+    58	# List actions for a resource
+    59	npx langfuse-cli api <resource> --help
+    60	
+    61	# Show args/options for a specific action
+    62	npx langfuse-cli api <resource> <action> --help
+    63	```
+    64	
+    65	### Credentials
+    66	
+    67	Set environment variables before making calls:
+    68	
+    69	```bash
+    70	export LANGFUSE_PUBLIC_KEY=pk-lf-...
+    71	export LANGFUSE_SECRET_KEY=sk-lf-...
+    72	export LANGFUSE_BASE_URL=https://cloud.langfuse.com # example for EU cloud. For US cloud it's us.cloud.langfuse.com, and can also be a self-hosted URL. The server must always be specified in order to access Langfuse.
+    73	```
+    74	If `LANGFUSE_BASE_URL` is used instead of `LANGFUSE_HOST`, run `export LANGFUSE_HOST="$LANGFUSE_BASE_URL"`.
+    75	If not set, ask the user to set them in their shell or a `.env` file. Keys are found in the Langfuse project under Settings -> API Keys; the user should create a project API key pair there. If they do not have a Langfuse account yet, share that they can create one for free at `https://langfuse.com/cloud`. Do not ask them to paste keys into chat for security reasons.
+    76	
+    77	### Detailed CLI Reference
+    78	
+    79	For common workflows, tips, and full usage patterns, see [references/cli.md](references/cli.md).
+    80	
+    81	## 2. Langfuse Documentation
+    82	
+    83	Three methods to access Langfuse docs, in order of preference. **Always prefer your application's native web fetch and search tools** (e.g., `WebFetch`, `WebSearch`, `mcp_fetch`, etc.) over `curl` when available. The URLs and patterns below work with any fetching method — the `curl` examples are just illustrative.
+    84	
+    85	### 2a. Documentation Index (llms.txt)
+    86	
+    87	Fetch the full index of all documentation pages:
+    88	
+    89	```bash
+    90	curl -s https://langfuse.com/llms.txt
+    91	```
+    92	
+    93	Returns a structured list of every doc page with titles and URLs. Use this to discover the right page for a topic, then fetch that page directly.
+    94	
+    95	Alternatively, you can start on `https://langfuse.com/docs` and explore the site to find the page you need.
+    96	
+    97	### 2b. Fetch Individual Pages as Markdown
+    98	
+    99	Any page listed in llms.txt can be fetched as markdown by appending `.md` to its path or by using `Accept: text/markdown` in the request headers. Use this when you know which page contains the information needed. Returns clean markdown with code examples and configuration details.
+   100	
+   101	```bash
+   102	curl -s "https://langfuse.com/docs/observability/overview.md"
+   103	curl -s "https://langfuse.com/docs/observability/overview" -H "Accept: text/markdown"
+   104	```
+   105	
+   106	### 2c. Search Documentation
+   107	
+   108	When you need to find information across all docs and github issues/discussions without knowing the specific page:
+   109	
+   110	```bash
+   111	curl -s "https://langfuse.com/api/search-docs?query=<url-encoded-query>"
+   112	```
+   113	
+   114	Example:
+   115	
+   116	```bash
+   117	curl -s "https://langfuse.com/api/search-docs?query=How+do+I+trace+LangGraph+agents"
+   118	```
+   119	
+   120	Returns a JSON response with:
+   121	
+   122	- `query`: the original query
+   123	- `answer`: a JSON string containing an array of matching documents, each with:
+   124	  - `url`: link to the doc page
+   125	  - `title`: page title
+   126	  - `source.content`: array of relevant text excerpts from the page
+   127	
+   128	Search is a great fallback if you cannot find the relevant pages or need more context. Especially useful when debugging issues as all GitHub Issues and Discussions are also indexed. Responses can be large — extract only the relevant portions. Note that changelog posts may also surface here: use them only to confirm a feature exists, never to implement from — their examples may be outdated, so always implement from the docs and API/SDK reference.
+   129	
+   130	### Documentation Workflow
+   131	
+   132	1. Start with **llms.txt** to orient — scan for relevant page titles
+   133	2. **Fetch specific pages** when you identify the right one
+   134	3. Fall back to **search** when the topic is unclear and you want more context
+   135	
+   136	## Skill Feedback
+   137	
+   138	When the user expresses that something about this skill is not working as expected, gives incorrect guidance, is missing information, or could be improved — offer to submit feedback to the Langfuse skill maintainers. This includes when:
+   139	
+   140	- The skill gave wrong or outdated instructions
+   141	- A workflow didn't produce the expected result
+   142	- The user wishes the skill covered something it doesn't
+   143	- The user explicitly says something like "this should work differently" or "this is wrong"
+   144	
+   145	**Do NOT trigger this** for issues with Langfuse itself (the product) — only for issues with this skill's instructions and behavior.
+   146	
+   147	When triggered, follow the process in [references/skill-feedback.md](references/skill-feedback.md).

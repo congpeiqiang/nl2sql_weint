@@ -1,6 +1,0 @@
-{
-  "sql": "SELECT primary_title, runtime_minutes\nFROM titles\nWHERE title_type = 'movie' AND runtime_minutes > 180\nORDER BY runtime_minutes DESC",
-  "optimized_sql": null,
-  "issues": [],
-  "summary": "共发现 0 个性能问题。SQL 已明确列出所需列，无 SELECT *，无笛卡尔积风险，无函数包裹列，无 NOT IN，无 DISTINCT，无 LIKE 前缀通配符，无 OR 条件。LIMIT 通过 run_sql 的 limit 参数控制，不在 SQL 中写入。"
-}

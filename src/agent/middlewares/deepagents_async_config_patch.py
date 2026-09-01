@@ -46,13 +46,59 @@ def _current_configurable() -> dict:
         from langgraph.config import get_config as _lg_get_config
         cfg = _lg_get_config()
         configurable = cfg.get("configurable", {}) or {}
-        return {k: v for k, v in configurable.items() if not _is_internal_key(k)}
+        result = {k: v for k, v in configurable.items() if not _is_internal_key(k)}
+        # 注入追踪上下文：父 thread_id（子 agent 用于建立会话谱系）
+        parent_thread_id = configurable.get("thread_id", "")
+        if parent_thread_id:
+            result["trace_parent_thread_id"] = parent_thread_id
+        return result
     except Exception:
         return {}
 
 
+def _current_parent_thread_id() -> str:
+    """读取当前 run（主 agent）的真实 thread_id（在过滤内部键之前取）。"""
+    try:
+        from langgraph.config import get_config as _lg_get_config
+        cfg = _lg_get_config()
+        return str((cfg.get("configurable", {}) or {}).get("thread_id", ""))
+    except Exception:
+        return ""
+
+
+def _build_langfuse_metadata() -> dict:
+    """构建子 run 的 Langfuse 元数据（M2：session_id=thread_id 兜底分组）。
+
+    主 run 的请求级 metadata 由 LangfuseMetadataMiddleware 在 HTTP 层注入；
+    子 run 由 deepagents 在进程内创建（不走 HTTP），故在此补注入同样的
+    session/trace_name/tags + workspace/skills，让主、子 trace 在同一 session 分组。
+    """
+    parent_tid = _current_parent_thread_id()
+    metadata: dict = {}
+    if parent_tid:
+        metadata["langfuse_session_id"] = parent_tid
+        metadata["langfuse_trace_name"] = f"nl2sql-agent:{parent_tid}"
+        metadata["langfuse_tags"] = ["nl2sql"]
+    try:
+        from agent.workspace_manager import get_workspace_manager
+        wm = get_workspace_manager()
+        metadata.setdefault("workspace", {
+            "name": wm.active_name,
+            "path": str(wm.active_workspace),
+        })
+    except Exception:
+        pass
+    try:
+        # M6：与主 run 的 LangfuseMetadataMiddleware 一致，用 Langfuse 版本解析后的清单
+        from agent.trace.skill_manifest import get_enriched_skill_manifest
+        metadata.setdefault("skills", get_enriched_skill_manifest())
+    except Exception:
+        pass
+    return metadata
+
+
 def _wrap_runs_create(orig_create):
-    """包装 client.runs.create：未显式传 config 时注入当前 configurable。"""
+    """包装 client.runs.create：未显式传 config 时注入当前 configurable + Langfuse 元数据。"""
     import functools
 
     @functools.wraps(orig_create)
@@ -60,8 +106,12 @@ def _wrap_runs_create(orig_create):
         if "config" not in kwargs:
             configurable = _current_configurable()
             if configurable:
+                cfg = {"configurable": configurable}
+                meta = _build_langfuse_metadata()
+                if meta:
+                    cfg["metadata"] = meta
                 kwargs = dict(kwargs)
-                kwargs["config"] = {"configurable": configurable}
+                kwargs["config"] = cfg
         return orig_create(*args, **kwargs)
 
     return _patched

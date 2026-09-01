@@ -1,8 +1,0 @@
-1. 从 titles 表（别名 t）筛选 title_type='movie' 且 start_year IS NOT NULL 的行
-2. 计算年代：FLOOR(t.start_year / 10) * 10 作为 decade
-3. 按 decade 分组（GROUP BY FLOOR(t.start_year / 10) * 10）
-4. 对每组计算：
-   - 电影数量：COUNT(*) AS movie_count
-   - 平均评分：AVG(t.average_rating) AS avg_rating
-5. 按 decade 升序排序（ORDER BY decade ASC）
-6. 返回 decade, movie_count, avg_rating

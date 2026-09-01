@@ -1,0 +1,19 @@
+任务：从 album 表随机删除一条记录（删除不可逆，必须保证只删除一条）
+
+步骤 1（随机选取）：
+  执行 SELECT albumid, title, artistid FROM album ORDER BY random()
+  通过 run_sql 的 limit=1 参数控制只返回 1 行（SQL 中不写 LIMIT 子句，避免与
+  服务端自动追加的 LIMIT 冲突）
+  → 得到随机选中的 albumid
+
+步骤 2（确认待删除记录）：
+  展示步骤 1 返回的 albumid / title / artistid，作为待删除对象
+
+步骤 3（执行删除）：
+  DELETE FROM album WHERE albumid = <步骤1选中的 albumid>
+  - albumid 是主键，唯一确定一行，保证只删除一条
+  - 无其他表外键引用 album，删除不会违反外键约束
+
+步骤 4（验证结果）：
+  SELECT COUNT(*) FROM album → 应从 347 变为 346
+  SELECT albumid FROM album WHERE albumid = <被删id> → 应无结果

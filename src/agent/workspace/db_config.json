@@ -10,10 +10,11 @@
       "user": "aoi-dev",
       "password": "enc:Fp3AF4tsR+2JRu4/reWB7ywJ6usai2a4WKN2cOy39E/ocXq1WRNnVQ==",
       "extra_config": {},
-      "password_configured": false
+      "password_configured": false,
+      "wren_project": "D:\\code_work_space\\llm\\nl2sql\\src\\agent\\workspace\\aix_project"
     },
     {
-      "name": "Chinook_AutoIncrement",
+      "name": "Chinook_Weint",
       "db_type": "mysql",
       "host": "mysql-master",
       "port": 3306,
@@ -21,7 +22,20 @@
       "user": "aoi-dev",
       "password": "enc:fbe73cKaQHK/E+fg1nLz9pxPAkGB11vLLcvhKdJ5nslW5S5+HSZVGQ==",
       "extra_config": {},
-      "password_configured": true
+      "password_configured": true,
+      "wren_project": "D:\\code_work_space\\llm\\nl2sql\\src\\agent\\workspace\\Chinook_Weint_semantic"
+    },
+    {
+      "name": "Chinook_Aliyun",
+      "db_type": "postgres",
+      "host": "8.163.4.42",
+      "port": 5432,
+      "database": "chinook",
+      "user": "chinook",
+      "password": "chinook123",
+      "extra_config": {},
+      "password_configured": true,
+      "wren_project": "D:\\code_work_space\\llm\\nl2sql\\src\\agent\\workspace\\Chinook_Aliyun_semantic"
     },
     {
       "name": "imdb",
@@ -44,7 +58,19 @@
       "user": "weint",
       "password": "enc:LKo+wrrNmPvpOLkrhiAE7nflrUWNltgSvM80Wgjqczjt63tt",
       "extra_config": {},
-      "wren_project": "D:\\code_work_space\\llm\\nl2sql\\src\\agent\\workspace\\aix_project",
+      "wren_project": "",
+      "password_configured": true
+    },
+    {
+      "name": "Chinook_AutoIncrement",
+      "db_type": "mysql",
+      "host": "mysql-master",
+      "port": 3306,
+      "database": "Chinook_AutoIncrement",
+      "user": "aoi-dev",
+      "password": "enc:Ouowip695N8gMoZQbL5Ns1a073vpW0F5hUtKACmt7HsQ4nBXbBvQZA==",
+      "extra_config": {},
+      "wren_project": "",
       "password_configured": true
     }
   ]

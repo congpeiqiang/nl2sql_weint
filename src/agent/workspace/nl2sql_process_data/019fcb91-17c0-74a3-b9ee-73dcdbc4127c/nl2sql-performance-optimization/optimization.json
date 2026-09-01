@@ -1,6 +1,0 @@
-{
-  "sql": "SELECT ROUND(AVG(t.average_rating), 2) AS avg_rating\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 1990 AND 1999\n  AND t.start_year IS NOT NULL\n  AND t.average_rating IS NOT NULL",
-  "optimized_sql": null,
-  "issues": [],
-  "summary": "共发现 0 个性能问题。SQL 已经是优化状态：单表聚合查询，明确指定了聚合列（非 SELECT *），WHERE 条件精确过滤了类型、年份和 NULL 值，返回单行聚合结果无需 LIMIT。无需优化。"
-}

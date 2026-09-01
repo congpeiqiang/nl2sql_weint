@@ -1,0 +1,13 @@
+{
+  "sql": "SELECT d.primary_name AS director_name, a.primary_name AS actor_name, COUNT(*) AS collaboration_count, ROUND(AVG(t.average_rating), 2) AS avg_rating FROM principals pd JOIN titles t ON pd.title_id = t.id AND t.title_type = 'movie' JOIN principals pa ON pa.title_id = t.id AND pa.category_id IN ('actor', 'actress') JOIN names d ON pd.name_id = d.id JOIN names a ON pa.name_id = a.id WHERE pd.category_id = 'director' AND t.num_votes > 5000 AND t.average_rating IS NOT NULL GROUP BY d.id, d.primary_name, a.id, a.primary_name HAVING COUNT(*) >= 3 AND AVG(t.average_rating) >= 7.5 ORDER BY collaboration_count DESC, avg_rating DESC",
+  "optimized_sql": null,
+  "issues": [
+    {
+      "rule": "no_limit",
+      "severity": "low",
+      "message": "SQL 中未写 LIMIT 子句",
+      "suggestion": "合规设计：按用户 run_sql LIMIT 规范，LIMIT 由 run_sql 的 limit 参数控制（服务端自动追加默认 cap 1000 行），SQL 内不写 LIMIT 以避免语法冲突。执行时传入 limit 参数即可。"
+    }
+  ],
+  "summary": "共发现 0 个高风险性能问题（SELECT * / 笛卡尔积 / 无ON连接均未命中）；1 个 low 级提示（无 LIMIT）为 run_sql 规范要求，无需修改。SQL 保持原样执行。"
+}

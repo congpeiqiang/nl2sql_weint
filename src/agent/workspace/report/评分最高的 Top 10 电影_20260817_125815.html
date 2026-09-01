@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "series": [
+    {
+      "data": [
+        9,
+        9,
+        8.9,
+        8.8,
+        8.8,
+        8.8,
+        8.8,
+        8.7,
+        8.7,
+        8.7
+      ],
+      "type": "bar"
+    }
+  ],
+  "title": {
+    "left": "center",
+    "text": "评分最高的 Top 10 电影"
+  },
+  "tooltip": {
+    "trigger": "axis"
+  },
+  "xAxis": {
+    "data": [
+      "Punjab '95",
+      "Attack on Titan: The Last Attack",
+      "David Attenborough: A Life on Our Planet",
+      "Inception",
+      "The Silence of Swastika",
+      "The Phantom of the Opera at the Royal Albert Hall",
+      "C/o Kancharapalem",
+      "#Home",
+      "Demon Slayer: Kimetsu no Yaiba - Mt. Natagumo Arc",
+      "777 Charlie"
+    ],
+    "name": "电影名称",
+    "type": "category"
+  },
+  "yAxis": {
+    "name": "评分",
+    "type": "value"
+  }
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

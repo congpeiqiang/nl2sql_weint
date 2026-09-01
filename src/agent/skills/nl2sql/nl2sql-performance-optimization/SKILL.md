@@ -1,4 +1,5 @@
 ---
+version: 0.1.0
 name: nl2sql-performance-optimization
 description: "触发：SQL生成成功且dry_run验证通过后，在正式执行前进行性能优化检查。策略A中使用。基于性能规则集检测SQL中的性能隐患（SELECT *、无LIMIT、笛卡尔积、函数包裹列、NOT IN等），并给出优化建议。策略B简单查询可选。策略C不经过此步骤。"
 ---
@@ -19,14 +20,17 @@ SQL-of-Thought 流水线性能优化环节。在 SQL 生成成功、dry_run 验�
 - **输出路径**: `/workspace/nl2sql_process_data/{thread_id}/nl2sql-performance-optimization/optimization.json`
 - **自动隔离**: 每个会话（thread_id）使用独立的存储目录
 
-## 输入数据读取
+## 输入
 
-- 必须调用 read_file 读取 `/workspace/nl2sql_process_data/{thread_id}/nl2sql-sql-generation/sql.sql`（待优化的 SQL）
-- 可选调用 read_file 读取 `/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`（了解表结构，辅助判断索引/列）
+- 优先从对话上下文中获取 sql-generation 输出的 SQL
+- 若上下文中找不到，则 read_file `/workspace/nl2sql_process_data/{thread_id}/nl2sql-sql-generation/sql.sql` 作为 fallback
+- 可选：从上下文或 read_file 获取 schema-linking 的 Schema（辅助判断索引/列）
 
 ## 输出
 
-- 必须调用 write_file 写入 `/workspace/nl2sql_process_data/{thread_id}/nl2sql-performance-optimization/optimization.json`，格式：
+- 在回复末尾输出优化结果 JSON（````json` 代码块）
+- 仅在数据 >15KB 时 write_file 到 `/workspace/nl2sql_process_data/{thread_id}/nl2sql-performance-optimization/optimization.json` 作为 fallback
+- 格式：
 
 ```json
 {

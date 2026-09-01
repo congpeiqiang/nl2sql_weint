@@ -1,8 +1,0 @@
-查询计划：统计 Comedy 类型的电影数量
-
-1. 从 titles 表（别名 t）出发，筛选 title_type = 'movie' 的作品（电影）
-2. 通过 titles_genres（别名 tg）关联：tg.title_id = t.id，获取作品的类型关联
-3. 通过 genres（别名 g）关联：g.id = tg.genre_id，获取类型名称
-4. 筛选类型为 comedy：g.id = 'comedy'
-5. 对满足条件的电影去重计数：COUNT(DISTINCT t.id)
-6. 返回电影数量（单行单列结果）

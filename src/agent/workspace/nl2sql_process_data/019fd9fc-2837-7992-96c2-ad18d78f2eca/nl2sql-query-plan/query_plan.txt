@@ -1,9 +1,0 @@
-查询计划：找出评分 >= 8.5 但投票数 < 5000 的电影，按评分降序排列
-
-1. 从 titles 表（别名 t）查询电影数据
-2. 筛选 title_type = 'movie'（只保留电影类型）
-3. 筛选 average_rating >= 8.5（评分不低于8.5）
-4. 筛选 num_votes < 5000（投票数少于5000）
-5. 选择字段：primary_title（电影名）、average_rating（评分）、num_votes（投票数）
-6. 按 average_rating DESC 排序（评分降序）
-7. 通过 run_sql 的 limit 参数控制返回行数（SQL 中不写 LIMIT）

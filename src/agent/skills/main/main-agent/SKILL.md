@@ -177,7 +177,7 @@ description: "触发条件：用户发起任意对话；主智能体需要进行
 用户请求数据查询
   → 主智能体委派 nl2sql 子智能体
   → nl2sql 返回查询结果（数据表格）
-  → 主智能体读取 report-export 技能（/workspace/skills/main/report-export/SKILL.md）
+  → 主智能体读取 report-export 技能（/shared/skills/main/report-export/SKILL.md）
   → 主智能体按模板整理 Markdown 报告
   → 主智能体调用 write_file 写入 /workspace/report/
   → 主智能体告知用户文件路径
@@ -185,12 +185,13 @@ description: "触发条件：用户发起任意对话；主智能体需要进行
 
 ### 触发条件
 
-当用户表达以下意图时，主智能体在拿到 nl2sql 结果后激活 report-export 技能：
-- "下载报告" / "导出为 Markdown" / "生成分析报告"
-- "保存结果" / "把结果写成文件" / "生成 md 文件"
-- "export report" / "save as markdown"
-- 或主智能体自主判断需要持久化保存结果时
+主智能体在拿到 nl2sql 结果后，**评估数据特征和用户意图**判断是否激活 report-export 技能：
+
+- 用户明确要求 → 强制激活："下载报告" / "导出为 Markdown" / "生成分析报告"
+- 用户明确要求 → 强制激活："保存结果" / "把结果写成文件" / "生成 md 文件"
+- 用户明确要求 → 强制激活："export report" / "save as markdown"
+- 未明确要求时，仅当数据适合结构化呈现且生成报告有实际价值（多维度、较大量数据、分析结论复杂）才激活；简单计数、单值结果直接展示，不生成报告
 
 ### 模板使用
 
-报告模板定义在 `/workspace/skills/main/report-export/SKILL.md` 中，主智能体直接读取使用。
+报告模板定义在 `/shared/skills/main/report-export/SKILL.md` 中，主智能体直接读取使用。

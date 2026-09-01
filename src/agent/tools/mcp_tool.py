@@ -85,6 +85,19 @@ def _load_mcp_servers(servers: Dict[str, Any], server_type: str = "unknown") -> 
                         )
                     )
 
+                # Wren 语义层工具注入 project_path，供 wrap_tool 快速路径使用
+                # （get_context / recall_queries 在主进程直接调用 wren API，
+                #  绕过 MCP 子进程 + MemoryStore 420MB 嵌入模型加载）
+                if name.startswith("wrenai_"):
+                    from agent.utils.semantic_db import get_detector, wrenai_server_name
+                    _det = get_detector()
+                    for _t in tools:
+                        for _db in _det.discover():
+                            _proj = _det.project_path_for(_db)
+                            if _proj and name == wrenai_server_name(_db):
+                                _t._wren_project_path = str(_proj)
+                                break
+
                 wrapped = [wrap_tool(t) for t in tools]
                 all_tools.extend(wrapped)
                 _mcp_server_results[name] = "ok"
@@ -162,17 +175,51 @@ def _get_sub_server_config() -> Dict[str, Any]:
         if server_name in servers:
             _logger.warning("[mcp] wrenai server 名冲突: %r 跳过 %r", server_name, db_name)
             continue
+
+        # 从 db_config 同步连接信息到 Wren profile，通过 --profile 直传。
+        # 绕过 ~/.wren/profiles.yml 的全局 active profile 兜底——否则未在
+        # wren_project.yml 中 pin profile 的项目会继承全局 active profile，
+        # 导致连接到错误的数据源（如 active=chinook 指向 clickhouse）。
+        # profile 命名 wren_mcp_<db_name>，add_profile 不切换 active（已有 active
+        # 时保留），幂等覆写（连接信息变了自动更新）。
+        profile_name = None
+        args = ["serve", "mcp", "--project", project]
+        try:
+            from mcp_server.db_mcp_server.db.core.db_config_store import get_store
+            from wren.profile import add_profile
+
+            cfg = get_store().get(db_name)
+            profile_dict: Dict[str, Any] = {
+                "datasource": cfg.db_type,
+                "host": cfg.host,
+                "port": cfg.port,
+                "database": cfg.database,
+                "user": cfg.user,
+            }
+            if cfg.password:
+                profile_dict["password"] = cfg.password
+            profile_name = f"wren_mcp_{wrenai_server_name(db_name)}"
+            add_profile(profile_name, profile_dict)
+            args.extend(["--profile", profile_name])
+        except Exception as e:  # noqa: BLE001
+            _logger.warning(
+                "[mcp] %s: 同步 Wren profile 失败 (%s)，回退全局 active profile",
+                db_name, e,
+            )
+
         servers[server_name] = {
             "transport": "stdio",
             "command": settings.WREN_BIN_PATH,
-            "args": [
-                "serve", "mcp",
-                "--project", project
-            ],
+            "args": args,
             "env": {
                 **_UTF8_ENV,
                 "WREN_LOG_LEVEL": "ERROR",
                 "PYTHONUNBUFFERED": "1",
+                # Wren recall_queries 检索后端（grep / lancedb），由 settings 控制。
+                # 默认 grep（token-overlap，毫秒级），避免 LanceDBIndex 每次重建
+                # MemoryStore 加载 420MB 嵌入模型的开销，以及 knowledge/sql/ 为空时
+                # LanceDB 空表 search hang 至超时的问题。
+                "WREN_MEMORY_BACKEND": settings.WREN_MEMORY_BACKEND,
             }
         }
 

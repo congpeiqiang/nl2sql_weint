@@ -1,5 +1,0 @@
-1. 从 titles 表筛选 title_type = 'movie' 的行（只查询电影）
-2. 进一步筛选 start_year BETWEEN 1990 AND 1999 的行（1990年代）
-3. 排除 average_rating IS NULL 的行（确保评分数据有效）
-4. 对筛选后的所有行计算 average_rating 的平均值（AVG聚合）
-5. 返回单个结果：1990年代电影的平均评分

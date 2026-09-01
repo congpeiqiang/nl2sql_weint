@@ -1,0 +1,29 @@
+{
+  "question": "查询调温数据",
+  "db_name": "clickhouse-aix",
+  "strategy": "full",
+  "hits": [
+    {
+      "model": "aix_crystal_comm_data",
+      "temperature_related_columns": [
+        "main_vac_t1_temp (主真空管1温度℃)",
+        "main_vac_t2_temp (主真空管2温度℃)",
+        "liq_lvl_pyro (液面高温计℃)",
+        "act_therm_field_temp (实际热场温度SP)",
+        "set_therm_field_temp (设定热场温度SP)",
+        "main_dist_water_temp (主分水器水温℃)",
+        "heat_shield_water_temp (热屏水温℃)",
+        "power_cab_temp (电源柜温度℃)",
+        "set_liq_lvl_temp (设定液面温度℃)",
+        "act_liq_lvl_temp (实际液面温度℃)"
+      ],
+      "other_key_columns": ["device_code", "collect_time", "puller_batch_no", "ingot_no", "proc_stage", "work_order_no"]
+    },
+    {
+      "model": "aix_crystal_record_data",
+      "note": "工艺记录表（content/value 键值记录，含 proc_stage 工艺阶段），可能承载'调温'操作记录"
+    }
+  ],
+  "instructions": "知识库 instructions 仅为模板（无业务规则定义'调温'术语口径）",
+  "note": "温度列集中在 aix_crystal_comm_data；aix_crystal_record_data 可能含调温操作记录；二者语义互斥，术语'调温'口径不明"
+}

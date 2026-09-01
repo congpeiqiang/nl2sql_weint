@@ -1,0 +1,5 @@
+1. 从 aix_crystal_record_data 表读取调温操作记录（无 JOIN，MDL 中无表间关系）
+2. 筛选条件：content = '调温'（该表 content 字段为操作/事件名称，'调温' 为其取值之一）
+3. 选择展示列：device_code(设备编码)、collect_time(采集时间)、operation_time(操作时间)、puller_batch_no(炉次编号)、ingot_no(棒次编号)、proc_stage(工艺阶段)、work_order_no(工单编号)、content(内容)、value(值)、color(颜色)
+4. 排序：按 collect_time DESC（最新在前）
+5. 不写 LIMIT 子句，由 run_sql 的 limit 参数控制返回行数

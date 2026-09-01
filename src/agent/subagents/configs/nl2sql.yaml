@@ -49,10 +49,11 @@ tools:
   - describe_schema     # 返回完整 MDL Schema 的纯文本描述
   - list_stored_queries # 枚举 knowledge/sql/ 中存储的 NL→SQL 对
   - list_knowledge      # 列出 knowledge/ 目录下的知识文件
+  - get_all_knowledge   # 一次读取 metrics/glossary/caveats 全部知识文件
 
 # 技能路径（由主智能体 SkillsMiddleware 加载，子智能体自动继承）
 skills:
-  - /workspace/skills/nl2sql/
+  - /shared/skills/nl2sql/
 
 # ============================================================
 # 系统提示词

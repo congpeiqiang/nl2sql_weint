@@ -1,7 +1,0 @@
-查询计划：1990年代上映的电影平均评分
-
-1. 从 titles 表（别名 t）中筛选 title_type = 'movie' 的电影
-2. 进一步筛选上映年份在 1990 到 1999 之间（1990年代）：t.start_year BETWEEN 1990 AND 1999
-3. 处理 NULL：确保 t.average_rating IS NOT NULL（避免 NULL 参与聚合）
-4. 对筛选后的电影计算平均评分：AVG(t.average_rating)
-5. 返回单个聚合结果（整体平均评分，无需 GROUP BY）

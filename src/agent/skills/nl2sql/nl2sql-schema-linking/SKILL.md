@@ -1,4 +1,5 @@
 ---
+version: 0.1.0
 name: nl2sql-schema-linking
 description: "触发：识别查询所需的表/列/关系。输入：问题，前一个技能nl2sql-knowledge-loader的输出保存的内容。输出：裁剪后的精确Schema。跳过：策略C。"
 ---
@@ -16,39 +17,33 @@ SQL-of-Thought 流水线第2步。根据业务知识和用户问题，自行调�
 
 ## 输入
 
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/knowledge-loader/knowledge.json`
+- 优先从对话上下文中获取前序 Skill（knowledge-loader）的输出（JSON 块）
+- 若上下文中找不到，则 read_file `/workspace/nl2sql_process_data/{thread_id}/knowledge-loader/knowledge.json` 作为 fallback
 
 ## 输出
 
-- 必须调用 write_file 写入 `/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`: 表结构、字段、主键、外键、JOIN 关系
+- 在回复末尾输出结构化 JSON（````json` 代码块），供编排器传递给下游 skill
+- 仅在数据 >15KB 时 write_file 到 `/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json` 作为 fallback
 
 ## 执行步骤
 
-### 步骤1：获取所有的表
+### 步骤 1: Schema 发现（并行调用 MCP 工具）
 
-调用 `list_models()` 获取所有语义模型及其列数
+同时调用以下工具：
 
-### 步骤2：获取表结构
+1. **`describe_schema()`** — 获取所有模型 Schema 的纯文本描述
+2. **`get_context(question=用户问题)`** — 语义检索与问题相关的 Schema 片段
+3. **`get_mdl()`** — 获取表之间的关联关系（JOIN conditions）
 
-调用 `describe_model(name1)` 获取表结构详情
+### 步骤 2: 按需详查（并行）
 
-调用 `describe_schema`获取所有模型 Schema 的纯文本描述
+根据步骤 1 的结果，对命中的相关表并行调用 `describe_model(name)` 获取详细列信息。
 
-### 步骤 3: 获取表关系
+- `describe_model` 必须在 `describe_schema` / `get_context` 之后（先确定哪些模型相关，再详查）
 
-调用 `get_mdl()` 获取表之间的关联关系
+### 步骤 3: 过滤与输出
 
-### 步骤 4: 字段过滤
-
-调用 `get_context`语义检索与问题相关的 Schema 片段
-
-只保留与当前查询相关的字段
-
-### 步骤 5: 输出到文件系统
-
-#### 输出文件: `/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`
-
-- 样例如下
+只保留与当前查询相关的字段，在回复末尾输出 JSON：
 
 ```
 ​```json
@@ -99,11 +94,11 @@ SQL-of-Thought 流水线第2步。根据业务知识和用户问题，自行调�
 - 错误信息: `{"error": "Schema 提取失败", "detail": "表 orders 不存在"}`
 - 若存在`/workspace/nl2sql_process_data/{thread_id}/error.json`,则追加
 
-## **并行策略**
+## 并行策略
 
-- `get_context` + `get_instructions` + `recall_queries` 必须并行（语义检索三件套）
-- 多个 `describe_model` 必须并行（按需详查多个模型）
-- `describe_model` 必须在 `get_context` 之后（先确定哪些模型相关，再详查）
+- `describe_schema` + `get_context` + `get_mdl` 并行（步骤 1）
+- 多个 `describe_model` 并行（步骤 2，按需详查）
+- `describe_model` 必须在 `describe_schema` / `get_context` 之后（先确定相关模型）
 
 ## 关键规则
 
@@ -111,4 +106,3 @@ SQL-of-Thought 流水线第2步。根据业务知识和用户问题，自行调�
 - 包含 JOIN 所需的 FOREIGN KEY 列（即使未提及）
 - 包含 PRIMARY KEY（用于去重/排序）
 - 遵守 get_instructions 中的约束（如数值范围、NULL处理）
-- 必须按顺序依次执行下方列出的所有工具，不得跳过任何一个。** 即使你认为某些工具返回的信息冗余或已从其他来源获知，也必须调用。每个工具提供不可替代的信息维度，跳过会导致 Schema 不完整或 SQL 生成错误。

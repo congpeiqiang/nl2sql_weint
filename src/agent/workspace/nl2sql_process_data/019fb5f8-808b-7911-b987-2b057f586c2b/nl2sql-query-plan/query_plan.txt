@@ -1,7 +1,0 @@
-1. 从 titles 表查询数据
-2. 筛选 title_type = 'movie'（只保留电影）
-3. 筛选 num_votes >= 50000（经典影片级别，高可信评分）
-4. 筛选 average_rating IS NOT NULL（排除无评分记录）
-5. 选择字段：primary_title（标题）、average_rating（评分）
-6. 按 average_rating DESC 排序（评分从高到低）
-7. 取前 10 行

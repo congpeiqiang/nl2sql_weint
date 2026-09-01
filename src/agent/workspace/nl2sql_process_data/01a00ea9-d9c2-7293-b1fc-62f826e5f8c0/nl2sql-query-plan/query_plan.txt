@@ -1,0 +1,44 @@
+# 查询计划：删除 "The Ballad of Conrad & Vernon" 影视剧记录
+
+## 目标
+删除 titles 表中标题为 "The Ballad of Conrad & Vernon" 的作品记录，及其在关联表中的全部引用记录。
+
+## 步骤
+
+### 第1步：确认目标记录（SELECT）
+- 在 titles 表（别名 t）中按 `primary_title = 'The Ballad of Conrad & Vernon'` 或 `original_title = 'The Ballad of Conrad & Vernon'` 查询
+- 返回列：t.id, t.title_type, t.primary_title, t.original_title, t.start_year, t.end_year
+- 目的：获取目标作品的唯一标识 titles.id，确认记录存在
+
+### 第2步：统计关联表引用（SELECT COUNT）
+- 对每个引用 titles.id 的关联表统计记录数：
+  - principals（title_id = 目标id）
+  - titles_genres（title_id = 目标id）
+  - titleakas（title_id = 目标id）
+  - episodes（id = 目标id 或 parent_id = 目标id）
+  - names_knownfortitles（title_id = 目标id）
+- 目的：确定需级联删除的范围，供最终报告
+
+### 第3步：删除关联记录（DELETE，子表优先）
+按以下顺序删除引用目标 titles.id 的记录：
+1. principals_characters：删除 principal_id ∈ (principals 表中 title_id = 目标id 的 id 集合)
+2. principals：删除 title_id = 目标id
+3. titleakas_titleakaattributes：删除 titleaka_id ∈ (titleakas 表中 title_id = 目标id 的 id 集合)
+4. titleakas_titleakatypes：删除 titleaka_id ∈ (titleakas 表中 title_id = 目标id 的 id 集合)
+5. titleakas：删除 title_id = 目标id
+6. titles_genres：删除 title_id = 目标id
+7. episodes：删除 id = 目标id 或 parent_id = 目标id
+8. names_knownfortitles：删除 title_id = 目标id
+
+### 第4步：删除主记录（DELETE）
+- 删除 titles 表中 id = 目标id 的记录
+
+### 第5步：验证删除结果（SELECT）
+- 再次查询 titles 确认目标记录已不存在
+- 再次查询各关联表确认引用已清理
+- 汇总各表实际删除行数，输出最终报告
+
+## 关键规则
+- 严格按子表→主表顺序删除，避免外键约束冲突
+- titles.id 为 VARCHAR（tt 开头），用等值匹配
+- 标题匹配优先 primary_title，回退 original_title；若存在多条匹配需逐一处理（预期唯一）

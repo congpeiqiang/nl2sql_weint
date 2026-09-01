@@ -1,0 +1,8 @@
+{
+  "clear": true,
+  "reason": "OK",
+  "original_question": "1990 年代上映的电影平均评分是多少？",
+  "db_name": "imdb",
+  "issues": [],
+  "assumption": "电影=title_type='movie'；1990年代=start_year BETWEEN 1990 AND 1999（或 FLOOR(start_year/10)*10=1990，业务规则第五条）；平均评分=AVG(average_rating)。get_context 超时，但 get_instructions 成功，业务规则足以判定清晰。"
+}

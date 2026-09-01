@@ -1,0 +1,40 @@
+{
+  "database": "Chinook_Aliyun",
+  "db_type": "postgres",
+  "question": "列出 chinook 数据库里每个国家客户的平均消费额，按平均消费额降序取前10个国家的名称和金额",
+  "tables": [
+    {
+      "table": "customer",
+      "alias": "c",
+      "columns": [
+        {"name": "customerid", "type": "INTEGER", "role": "JOIN key / 分组键"},
+        {"name": "country", "type": "VARCHAR", "role": "分组维度（国家）"}
+      ],
+      "primary_key": "customerid"
+    },
+    {
+      "table": "invoice",
+      "alias": "i",
+      "columns": [
+        {"name": "customerid", "type": "INTEGER", "role": "JOIN key（外键 → customer.customerid）"},
+        {"name": "total", "type": "DOUBLE", "role": "金额指标（单笔发票总额）"}
+      ],
+      "primary_key": "invoiceid"
+    }
+  ],
+  "relationships": [
+    {
+      "type": "one-to-many",
+      "from": "customer.customerid",
+      "to": "invoice.customerid",
+      "cardinality": "1 customer : N invoices"
+    }
+  ],
+  "excluded_tables": ["invoiceline", "track", "album", "artist", "employee", "genre", "mediatype", "playlist", "playlisttrack"],
+  "excluded_reason": "invoice.total 已包含发票总额，无需关联 invoiceline 累加明细；其余表与人均消费额无关",
+  "notes": [
+    "59 名客户全部存在发票（customers_without_invoice=0），LEFT JOIN 与 INNER JOIN 结果等价",
+    "24 个国家",
+    "指标定义：客户平均消费额 = AVG(每个客户的 SUM(invoice.total))，按国家分组"
+  ]
+}

@@ -17,10 +17,11 @@ except Exception:  # 无 langgraph 环境时容错（本项目必然有，此分
 
 _log = logging.getLogger(__name__)
 
-# Must match agent.py workspace_dir exactly
-WORKSPACE_DIR = Path(
-    Path(__file__).parent.parent / "workspace"
-).resolve()
+# 由 WorkspaceManager 动态解析（支持多工作区切换）
+def _get_workspace_dir() -> Path:
+    from agent.workspace_manager import get_workspace_manager
+    return get_workspace_manager().active_workspace
+
 
 _CHART_ERROR_MSG = "图表生成失败，请检查数据格式。"
 
@@ -120,7 +121,7 @@ def _save_echarts_html_to_workspace(html: str, option_json: str) -> str:
     import re as _re
     from datetime import datetime
     try:
-        report_dir = WORKSPACE_DIR / "report"
+        report_dir = _get_workspace_dir() / "report"
         report_dir.mkdir(parents=True, exist_ok=True)
 
         # 尝试从 option 标题提取图表名，否则用时间戳
@@ -269,7 +270,7 @@ def _move_echarts_image_to_workspace(src_path: str) -> str:
             _log.warning(f"[ECHARTS] 源图片不存在，跳过移动: {src_path}")
             return src_path
 
-        report_dir = WORKSPACE_DIR / "report"
+        report_dir = _get_workspace_dir() / "report"
         report_dir.mkdir(parents=True, exist_ok=True)
 
         # 保留原文件名（uuid.png），避免重名冲突
@@ -311,7 +312,7 @@ def _save_svg_to_workspace(svg: str) -> str:
             return ""
         clean_svg = m.group(0)
 
-        report_dir = WORKSPACE_DIR / "report"
+        report_dir = _get_workspace_dir() / "report"
         report_dir.mkdir(parents=True, exist_ok=True)
 
         # 尝试从 SVG 标题提取图表名，否则用时间戳
@@ -536,7 +537,11 @@ def _sanitize_semiotic_result(result: Any, is_chart: bool) -> Any:
 
 
 def _inject_db_name(tool_name: str, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
-    """将前端选择的 db_name 从 LangGraph configurable 注入到 dbmcp 直连工具调用中。"""
+    """将前端选择的 db_name 从 LangGraph configurable 强制注入到 dbmcp 直连工具调用中。
+
+    始终用 configurable.db_name 覆盖 LLM 传入的值——LLM 可能从对话历史中
+    取到旧的 db_name（如切库后仍传上一次选的库名），必须以后端权威值为准。
+    """
     # 仅 dbmcp 直连工具需要 db_name（按 db_name 路由到对应库的 runner）。
     # wrenai 语义层工具已绑定专属 server（工具名带库名前缀 wrenai_<库名>_），
     # 不注入 db_name——避免多余参数/语义歧义；图表等工具同样跳过。
@@ -547,23 +552,26 @@ def _inject_db_name(tool_name: str, args: tuple, kwargs: dict) -> tuple[tuple, d
     if "run_sql" not in tool_name and "get_db_info" not in tool_name:
         return args, kwargs
 
-    # 检查参数中是否已有 db_name
-    if args and len(args) == 1 and isinstance(args[0], dict):
-        if args[0].get("db_name"):
-            return args, kwargs
-    if kwargs.get("db_name"):
-        return args, kwargs
-
     # 从 LangGraph config 中读取 db_name（get_config 已在模块顶部导入）
+    # 始终覆盖——LLM 传的 db_name 可能来自对话历史中的旧值，不可信。
     try:
         if _lg_get_config is not None:
             config = _lg_get_config()
             db_name = config.get("configurable", {}).get("db_name", "")
             if db_name:
+                # 读取 LLM 原始传入的值用于日志比对
+                old_name = ""
                 if args and len(args) == 1 and isinstance(args[0], dict):
+                    old_name = args[0].get("db_name", "")
                     args = ({**args[0], "db_name": db_name},)
                 else:
+                    old_name = kwargs.get("db_name", "")
                     kwargs = {**kwargs, "db_name": db_name}
+                if old_name and old_name != db_name:
+                    _log.warning(
+                        "[DB_ROUTE] 强制覆盖 db_name: LLM 传 '%s' → configurable '%s' (tool=%s)",
+                        old_name, db_name, tool_name,
+                    )
     except Exception:
         pass
 
@@ -745,6 +753,130 @@ def _get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
     return _TOOL_EXECUTOR
 
 
+def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
+    """Wren memory 工具快速路径——绕过 MCP 子进程和 MemoryStore。
+
+    当 WREN_MEMORY_BACKEND=grep 时，get_context / recall_queries 在 MCP 子进程中
+    会创建 MemoryStore（加载 420MB 嵌入模型），对空知识库或小型 schema 导致 hang 至
+    120s 超时。此函数在主进程中直接调用 wren Python API，毫秒级返回。
+
+    前置条件：工具对象上需有 ``_wren_project_path`` 属性（由 mcp_tool.py 注入）。
+
+    Returns:
+        快速路径结果（与 MCP 返回格式一致），或 None 表示走原始 MCP 路径。
+    """
+    project_path = getattr(tool, "_wren_project_path", None)
+    if project_path is None:
+        return None
+
+    backend = os.environ.get("WREN_MEMORY_BACKEND", "").strip().lower()
+    if backend != "grep":
+        return None
+
+    # ── get_context：小 schema 返回全文，跳过 MemoryStore ──
+    if tool.name.endswith("_get_context"):
+        try:
+            from wren.context import build_json
+            from wren.memory.schema_indexer import describe_schema
+
+            manifest = build_json(Path(project_path))
+            schema_text = describe_schema(manifest)
+            _log.info(
+                "[WREN FAST-PATH] %s → full schema (%d chars), 跳过 MemoryStore",
+                tool.name, len(schema_text),
+            )
+            artifact = {
+                "strategy": "full",
+                "schema": schema_text,
+                "note": "WREN_MEMORY_BACKEND=grep: full schema returned.",
+            }
+            # MCP response_format='content_and_artifact' 要求 (content_str, artifact) 二元组
+            return (json.dumps(artifact, ensure_ascii=False), artifact)
+        except Exception as e:
+            _log.warning("[WREN FAST-PATH] %s 快速路径失败，回退 MCP: %s", tool.name, e)
+            return None
+
+    # ── recall_queries：空知识库短路返回 [] ──
+    if tool.name.endswith("_recall_queries"):
+        try:
+            from wren.memory.markdown import load_query_pairs
+
+            pairs = load_query_pairs(Path(project_path))
+            if not pairs:
+                _log.info(
+                    "[WREN FAST-PATH] %s → empty knowledge/sql, 跳过 MemoryStore",
+                    tool.name,
+                )
+                artifact = {"matches": []}
+                return (json.dumps(artifact, ensure_ascii=False), artifact)
+            # 有数据时走原始 MCP 路径（由 WREN_MEMORY_BACKEND=grep env 控制 GrepIndex）
+        except Exception as e:
+            _log.warning("[WREN FAST-PATH] %s 快速路径失败，回退 MCP: %s", tool.name, e)
+        return None
+
+    # ── list_stored_queries：直接读 markdown，跳过 MemoryStore ──
+    if tool.name.endswith("_list_stored_queries"):
+        try:
+            from wren.memory.markdown import load_query_pairs
+
+            pairs = load_query_pairs(Path(project_path))
+            source = kwargs.get("source")
+            if source:
+                pairs = [p for p in pairs if p.get("source", "user") == source]
+            limit = kwargs.get("limit")
+            if limit is not None:
+                pairs = pairs[:limit]
+            queries = [
+                {
+                    "nl_query": p["nl"],
+                    "sql_query": p["sql"],
+                    "datasource": p.get("datasource", ""),
+                    "tags": p.get("tags", ""),
+                    "source": p.get("source", "user"),
+                    "path": p.get("path"),
+                }
+                for p in pairs
+            ]
+            _log.info(
+                "[WREN FAST-PATH] %s → %d pairs from markdown, 跳过 MemoryStore",
+                tool.name, len(queries),
+            )
+            artifact = {"queries": queries}
+            return (json.dumps(artifact, ensure_ascii=False), artifact)
+        except Exception as e:
+            _log.warning("[WREN FAST-PATH] %s 快速路径失败，回退 MCP: %s", tool.name, e)
+            return None
+
+    # ── store_query：仅写 markdown，跳过 LanceDB 索引 ──
+    if tool.name.endswith("_store_query"):
+        try:
+            from wren.memory.markdown import write_query_markdown
+
+            tags_str = kwargs.get("tags")
+            tag_list = (
+                [t.strip() for t in tags_str.split(",") if t.strip()]
+                if tags_str else None
+            )
+            md_path = write_query_markdown(
+                Path(project_path),
+                kwargs.get("nl_query", ""),
+                kwargs.get("sql_query", ""),
+                datasource=kwargs.get("datasource"),
+                tags=tag_list,
+            )
+            _log.info(
+                "[WREN FAST-PATH] %s → wrote %s, 跳过 LanceDB 索引",
+                tool.name, md_path,
+            )
+            artifact = {"path": str(md_path)}
+            return (json.dumps(artifact, ensure_ascii=False), artifact)
+        except Exception as e:
+            _log.warning("[WREN FAST-PATH] %s 快速路径失败，回退 MCP: %s", tool.name, e)
+            return None
+
+    return None
+
+
 def wrap_tool(tool: Any) -> Any:
     """Wrap a langchain BaseTool to auto-resolve virtual paths in arguments.
 
@@ -780,6 +912,10 @@ def wrap_tool(tool: Any) -> Any:
             # （"Unexpected keyword argument: outputType='option'"），导致子 agent 所有查询工具失效。
             if is_chart:
                 new_kwargs = _pack_chart_props(new_kwargs)
+            # ── Wren memory 工具快速路径（绕过 MCP + MemoryStore）──
+            fast = _wren_fast_path(tool, new_kwargs)
+            if fast is not None:
+                return fast
             timeout = _tool_timeout_for(tool.name)
             try:
                 if timeout is not None:
@@ -818,6 +954,10 @@ def wrap_tool(tool: Any) -> Any:
             # 仅图表工具注入 outputType（与同步路径一致），DB 工具不注入。
             if is_chart:
                 new_kwargs = _pack_chart_props(new_kwargs)
+            # ── Wren memory 工具快速路径（绕过 MCP + MemoryStore）──
+            fast = _wren_fast_path(tool, new_kwargs)
+            if fast is not None:
+                return fast
             _log.warning(
                 f"[_arun] {tool.name} FINAL: component={new_kwargs.get('component')}, "
                 f"props_keys={list(new_kwargs.get('props', {}).keys()) if isinstance(new_kwargs.get('props'), dict) else 'N/A'}, "

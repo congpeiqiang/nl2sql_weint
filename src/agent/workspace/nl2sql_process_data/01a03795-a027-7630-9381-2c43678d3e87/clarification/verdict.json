@@ -1,0 +1,8 @@
+{
+  "clear": true,
+  "reason": "OK",
+  "original_question": "列出所有专辑的标题及其对应艺术家的姓名",
+  "db_name": "Chinook_Weint",
+  "issues": [],
+  "assumption": "查询 Album 表的 Title 和 Artist 表的 Name，通过 ArtistId 关联"
+}

@@ -1,0 +1,61 @@
+{
+  "tables": [
+    {
+      "name": "album",
+      "columns": []
+    },
+    {
+      "name": "artist",
+      "columns": []
+    },
+    {
+      "name": "customer",
+      "columns": []
+    },
+    {
+      "name": "employee",
+      "columns": []
+    },
+    {
+      "name": "genre",
+      "columns": []
+    },
+    {
+      "name": "invoice",
+      "columns": []
+    },
+    {
+      "name": "invoiceline",
+      "columns": []
+    },
+    {
+      "name": "mediatype",
+      "columns": []
+    },
+    {
+      "name": "playlist",
+      "columns": []
+    },
+    {
+      "name": "playlisttrack",
+      "columns": []
+    },
+    {
+      "name": "track",
+      "columns": []
+    }
+  ],
+  "relations": [],
+  "field_mappings": {
+    "表名称": {"table": "information_schema.tables", "field": "table_name"},
+    "表数量": {"table": "information_schema.tables", "field": "COUNT(*)"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "db_type": "postgres",
+    "db_name": "Chinook_Aliyun",
+    "source": "dbmcp_get_db_info（直连通道，非语义层）",
+    "note": "查询目标为数据库元数据（表数量+表名称），需查询 PostgreSQL 系统目录 information_schema.tables，过滤 table_schema='public'"
+  }
+}

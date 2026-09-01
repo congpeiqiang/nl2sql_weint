@@ -9,8 +9,9 @@
     GET    /api/db-configs/{name}       单条（脱敏）
     DELETE /api/db-configs/{name}       删除
     POST   /api/db-configs/{name}/test  连通性测试
-    GET    /api/wren-projects           磁盘可用 Wren 项目（前端下拉数据源）
     GET    /healthz                     存活检查
+
+（GET /api/wren-projects 已迁至 wren_semantic.py，返回语义库丰富元信息）
 """
 from __future__ import annotations
 
@@ -23,8 +24,6 @@ from api._common import json_response, parse_body
 from mcp_server.db_mcp_server.db.core.db_config_store import DBConfig, get_store
 
 _logger = logging.getLogger(__name__)
-
-store = get_store()
 
 
 # ── 连通性测试（轻量：直连驱动，不依赖 runner 类）──────────────
@@ -95,16 +94,16 @@ def _masked_with_semantic(cfg: dict) -> dict:
 def _scan_wren_projects() -> list[dict]:
     """扫描磁盘可用的 Wren 项目（含 wren_project.yml 的目录）。
 
-    来源：1) 默认 agent workspace 下的一级子目录；2) .env 的 WREN_PROJECT_PATH
+    来源：1) 活跃工作区下的一级子目录；2) .env 的 WREN_PROJECT_PATH
     自身（无论位置）。返回 [{path, name}]，按 path 去重，绝对路径。
     """
     from pathlib import Path
+    from agent.workspace_manager import get_workspace_manager
 
     found: dict[str, str] = {}
 
-    # 1) workspace 下一级子目录（本文件位于 src/api/，parents[2] 即仓库根；
-    #    原位于 src/mcp_server/db_mcp_server/ 时为 parents[3]，迁移后已调整）
-    workspace = Path(__file__).resolve().parents[2] / "src" / "agent" / "workspace"
+    # 1) 活跃工作区下一级子目录
+    workspace = get_workspace_manager().semantic_dir
     if workspace.is_dir():
         for sub in sorted(workspace.iterdir()):
             if not sub.is_dir():
@@ -114,7 +113,7 @@ def _scan_wren_projects() -> list[dict]:
             if (sub / "wren_project.yml").is_file():
                 found[str(sub.resolve())] = sub.name
 
-    # 2) 默认项目自身（可能不在 workspace 下）
+    # 2) 默认项目自身（可能不在工作区下）
     try:
         from agent.settings.setting import settings
         p = settings.WREN_PROJECT_PATH
@@ -130,14 +129,14 @@ def _scan_wren_projects() -> list[dict]:
 
 # ── 路由 ─────────────────────────────────────────────────
 async def list_configs(request: Request):
-    items = [_masked_with_semantic(d) for d in store.list_configs(masked=True)]
+    items = [_masked_with_semantic(d) for d in get_store().list_configs(masked=True)]
     return json_response({"databases": items})
 
 
 async def get_config(request: Request):
     name = request.path_params["name"]
     try:
-        cfg = store.get(name)
+        cfg = get_store().get(name)
     except KeyError:
         return json_response({"error": f"数据库 '{name}' 不存在"}, status=404)
     return json_response(_masked_with_semantic(cfg.to_mapping(masked=True)))
@@ -150,7 +149,7 @@ async def upsert_config(request: Request):
         return json_response({"error": "name 必填"}, status=400)
     try:
         cfg = DBConfig.from_mapping(data)
-        store.upsert(cfg)
+        get_store().upsert(cfg)
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
@@ -166,7 +165,7 @@ async def upsert_config(request: Request):
 
 async def delete_config(request: Request):
     name = request.path_params["name"]
-    ok = store.delete(name)
+    ok = get_store().delete(name)
     if not ok:
         return json_response({"error": f"数据库 '{name}' 不存在"}, status=404)
     try:
@@ -186,7 +185,7 @@ async def test_config(request: Request):
     else:
         # 测试已保存的配置
         try:
-            cfg = store.get(name)
+            cfg = get_store().get(name)
         except KeyError:
             return json_response({"error": f"数据库 '{name}' 不存在"}, status=404)
     ok, msg = _test_connection(cfg)
@@ -197,17 +196,15 @@ async def healthz(request: Request):
     return json_response({"ok": True, "service": "db-config-api"})
 
 
-async def wren_projects(request: Request):
-    return json_response({"projects": _scan_wren_projects()})
-
-
 # ── 路由表（custom_app.py 聚合）──────────────────────────
+# 注：GET /api/wren-projects 已迁至 wren_semantic.py（语义库管理模块），
+# 返回更丰富的语义库元信息（git/构建状态/关联库）。_scan_wren_projects 保留
+# 在此供 wren_semantic 复用（磁盘扫描基准）。
 routes: list[BaseRoute] = [
     Route("/api/db-configs", list_configs, methods=["GET"]),
     Route("/api/db-configs", upsert_config, methods=["POST"]),
     Route("/api/db-configs/{name}", get_config, methods=["GET"]),
     Route("/api/db-configs/{name}", delete_config, methods=["DELETE"]),
     Route("/api/db-configs/{name}/test", test_config, methods=["POST"]),
-    Route("/api/wren-projects", wren_projects, methods=["GET"]),
     Route("/healthz", healthz, methods=["GET"]),
 ]

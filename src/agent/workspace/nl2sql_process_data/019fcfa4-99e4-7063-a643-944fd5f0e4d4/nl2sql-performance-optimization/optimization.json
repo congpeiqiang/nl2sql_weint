@@ -1,6 +1,0 @@
-{
-  "sql": "SELECT AVG(t.average_rating) AS avg_rating\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 1990 AND 1999\n  AND t.average_rating IS NOT NULL",
-  "optimized_sql": "SELECT AVG(t.average_rating) AS avg_rating\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 1990 AND 1999\n  AND t.average_rating IS NOT NULL",
-  "issues": [],
-  "summary": "共发现 0 个性能问题。该查询为单表聚合查询，无 SELECT *、无笛卡尔积、无子查询、无 NOT IN、无 DISTINCT、无 LIKE 通配符。LIMIT 规则不适用（聚合查询返回单行结果）。无需优化。"
-}

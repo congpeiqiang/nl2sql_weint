@@ -1,0 +1,8 @@
+{
+  "clear": true,
+  "reason": "OK",
+  "original_question": "查询炉台D330等径阶段的温度数据（包括温度随时间的变化记录，如有时间字段请返回）",
+  "db_name": "clickhouse-aix",
+  "issues": [],
+  "assumption": "炉台D330映射到 device_code='D330'；等径阶段映射到 proc_stage 过滤（具体取值在SQL生成前通过数据探查确认）；温度数据返回模型 aix_crystal_comm_data 中的主要温度字段（act_therm_field_temp 实际热场温度、act_liq_lvl_temp 实际液面温度、liq_lvl_pyro 液面高温计等），并按 collect_time 时间排序返回温度随时间的变化记录。"
+}

@@ -1,1 +1,0 @@
-test ; dir "D:\code_work_space\llm\nl2sql\src\agent\workspace\report\test_echo.txt" 

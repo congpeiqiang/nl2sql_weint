@@ -6,11 +6,16 @@
 3. 合并：主智能体原始 todos + 分隔符 + 子智能体 todos
 4. 写回主智能体 state → 前端 TasksFilesSidebar 自动更新
 5. 子智能体完成后，清除子智能体部分，只保留主智能体原始 todos
+
+追踪集成：在子智能体进度/完成/错误等关键节点写入 EventStore（统一轨迹日志）。
 """
 import asyncio
 import logging
+import os as _os_module
 import re
 import threading
+import time as _time_module
+from pathlib import Path
 from typing import Optional
 
 _logger = logging.getLogger(__name__)
@@ -29,10 +34,51 @@ if not _logger.handlers:
 # 用进程级锁串行化所有 keyed 字段写入，避免竞态。
 _SYNC_WRITE_LOCK = threading.Lock()
 
+# ── 活跃同步线程注册表（P1-3）─────────────────────────────────
+# sub_thread_id → 正在运行的 sync 守护线程。SQL 审批恢复端点在续跑子 run 前
+# 检查对应 watcher 是否还活着；若已退出（如等待审批超上限），重新 launch 一个，
+# 保证子任务完成后 async_tasks 终态/进度同步不丢。
+_ACTIVE_LOOPS: dict[str, threading.Thread] = {}
+_ACTIVE_LOOPS_LOCK = threading.Lock()
+
+
+def is_sync_alive(sub_thread_id: str) -> bool:
+    """该子任务的 sync watcher 线程是否仍在运行。"""
+    with _ACTIVE_LOOPS_LOCK:
+        t = _ACTIVE_LOOPS.get(sub_thread_id)
+    return t is not None and t.is_alive()
+
+
+def _get_workspace_manager():
+    """延迟导入 WorkspaceManager（避免模块级循环依赖）。"""
+    from agent.workspace_manager import get_workspace_manager
+    return get_workspace_manager()
+
 # ── 标记常量 ────────────────────────────────────────────────────
 # 用于识别哪些 todo 是同步注入的子智能体进度
 _SUBAGENT_MARKER = "🔍"
 _SUBAGENT_PREFIX = "└ "  # 树状缩进，HTML 中可见
+
+# ── run 终态（P1-7）─────────────────────────────────────────────
+# deepagents 的终态集包含 cancelled/timeout/interrupted（见
+# async_subagents._TERMINAL_STATUSES）。此前只认 success/error，
+# 被取消的任务会在超时兜底后被覆写成 error（cancelled 被盖掉）。
+_RUN_DONE_STATUSES = ("success", "error", "cancelled", "timeout", "interrupted")
+# 终态 → 最终步骤头的展示文案
+_DONE_LABELS = {
+    "success": "已完成",
+    "error": "执行失败",
+    "cancelled": "已取消",
+    "timeout": "超时终止",
+    "interrupted": "已中断",
+}
+
+# ── P1-3 SQL 审批等待 ─────────────────────────────────────────
+# 子 run 被审批闸门 interrupt 时状态为 "interrupted"，但这是「暂停等用户」，
+# 不是终态：不能写终态 async_tasks、不能清 active_queries、不能退出循环。
+# 等待期间把 HITL payload 中转到主线程 async_tasks[task].awaiting_approval，
+# 前端据此渲染审批卡。等待超上限才按 timeout 兜底收尾。
+_AWAIT_APPROVAL_TIMEOUT = 7200  # 等待审批上限 2h（超了按 timeout 强制收尾）
 
 
 # 步骤耗时后缀格式，如 " (3s)"、" (1m30s)"、" (5s...)"
@@ -72,6 +118,8 @@ def launch_sync(
         daemon=True,
         name=f"subagent-sync-{sub_thread_id[:8]}",
     )
+    with _ACTIVE_LOOPS_LOCK:
+        _ACTIVE_LOOPS[sub_thread_id] = t
     t.start()
     _logger.info(
         "[sync] 启动同步: main=%s, sub=%s, agent=%s",
@@ -100,6 +148,9 @@ def _run_sync_loop(
         _logger.error("[sync] 同步循环异常: %s", e)
     finally:
         loop.close()
+        with _ACTIVE_LOOPS_LOCK:
+            if _ACTIVE_LOOPS.get(sub_thread_id) is threading.current_thread():
+                del _ACTIVE_LOOPS[sub_thread_id]
 
 
 # ── 核心异步同步循环 ────────────────────────────────────────────
@@ -160,6 +211,28 @@ async def _async_sync_loop(
     client = get_client(url=_api_url)
     # 等待子智能体的 run 创建完成
     await asyncio.sleep(3)
+
+    # ── 初始化 EventStore（追踪集成） ──
+    _trace_store = None
+    try:
+        from agent.trace.event_store import EventStore
+        from agent.trace.event_log import EventType
+        wm = _get_workspace_manager()
+        _trace_db = os.path.join(str(wm.active_workspace), "traces.sqlite")
+        _trace_store = EventStore(_trace_db)
+        _trace_store.open()
+        # 记录子智能体启动事件
+        _trace_store.insert_event_sync(
+            thread_id=sub_thread_id,
+            event_type=EventType.SUBAGENT_SPAWN,
+            agent_type="nl2sql_agent",
+            parent_thread_id=main_thread_id,
+            task_id=sub_thread_id,
+            data={"description": task.get("description", "") if task else ""},
+        )
+    except Exception as e:
+        _logger.debug("[sync] EventStore init failed: %s", e)
+
     last_sub_todos: Optional[list] = None  # 上一次同步的子智能体 todos
     query_title: Optional[str] = None       # 本任务标题（首次提取）
     sub_agent_done = False
@@ -170,10 +243,15 @@ async def _async_sync_loop(
     active_queries_written = False  # 是否已写入 active_queries=true 到 state
     active_queries_cleared = False  # 是否已写入 active_queries=false 到 state
     async_tasks_written = False  # 是否已写入 async_tasks 终止态（主线程 in-flight 时会多次被拒，需重试）
+    # ── P1-3 SQL 审批等待状态 ──
+    approval_pending = False          # 子 run 正停在审批 interrupt 上
+    approval_relayed = False          # awaiting_approval 已写入主线程 async_tasks
+    approval_clear_written = False    # 恢复后已清除 awaiting_approval（写入新条目）
+    approval_wait_start: Optional[float] = None
     completion_write_retries = 0  # async_tasks 写入失败重试次数
     completion_started_at: Optional[float] = None  # 进入完成分支的时间点（重试上限判定起点）
     POST_COMPLETE_MAX_CYCLES = 20           # 完成后继续监控 10s (20 × 0.5s) 让耗时稳定
-    STALE_RUN_TIMEOUT = 300                 # 子 run 运行时长上限：超过视为卡死，强制结束（兜底）
+    STALE_RUN_TIMEOUT = 600                 # 子 run 运行时长上限 10min（P1-7，对齐 guards timeout-policy）：超过视为卡死，强制结束（兜底）
     COMPLETE_WRITE_MAX_SECONDS = 300        # 完成态写入重试上限：主线程持续 in-flight 时放弃（防僵尸线程）
 
     # 主智能体步骤耗时追踪（保留原逻辑，仅用于日志/展示，不写回 state）
@@ -198,18 +276,149 @@ async def _async_sync_loop(
                         break
                     continue  # 继续等待，不退出
                 wait_for_run_cycles = 0  # 重置
+
+                # ── P1-8 取消优先检查（用户点了前端「停止」→ POST /api/threads/{task_id}/cancel）──
+                # 主线程 async_tasks 已被标记 cancelled 时：直接跳过一切等待分支
+                # （审批中继/超时兜底），按终态收尾。否则任务正停在 SQL 审批闸门时，
+                # run 状态是 success（top-level graph suppress interrupt），取消端点
+                # cancel run 是 no-op，sync 下一轮仍会把 awaiting_approval 重新中继
+                # 回主线程 → 审批卡死而复生。
+                if (
+                    await _read_task_status(client, main_thread_id, sub_thread_id)
+                    == "cancelled"
+                ):
+                    _logger.info(
+                        "[sync] 任务 %s 已被用户取消，按终态收尾", sub_thread_id[:8]
+                    )
+                    run_status = "cancelled"
+                    payload = None
+                    approval_pending = False
+                    approval_relayed = True
+                else:
+                    # ── P1-3 SQL 审批：审批闸门暂停不体现在 run 状态上 ──
+                    # 子 agent 是独立 top-level graph（client.runs.create 后台 run），
+                    # interrupt() 抛的 GraphInterrupt 被 langgraph 内部抑制（_loop.py 对
+                    # top-level graph suppress interrupt → 后台 run 状态显示 "success"），
+                    # 但 interrupt 已写入线程 state（tasks[].interrupts，next 指向
+                    # HumanInTheLoopMiddleware.after_model）。因此审批检测必须读 state，
+                    # 不能只看 run_status —— 否则 "success" 会被直接判终态、审批卡永不出现。
+                    payload = await _extract_approval_payload(client, sub_thread_id)
+
+                if payload is not None:
+                    # 等待审批中：中继 payload 到主线程供前端渲染审批卡，不做终态处理
+                    if not approval_pending:
+                        approval_pending = True
+                        approval_wait_start = time.monotonic()
+                        _logger.info("[sync] 任务 %s 等待 SQL 审批", sub_thread_id[:8])
+                    if not approval_relayed:
+                        try:
+                            base = dict(task or {})
+                            base["task_id"] = sub_thread_id
+                            base["agent_name"] = agent_name
+                            base["status"] = "running"
+                            base["awaiting_approval"] = payload
+                            base["last_updated_at"] = time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                            )
+                            await asyncio.to_thread(
+                                _sync_update_state,
+                                main_thread_id,
+                                {"async_tasks": {sub_thread_id: base}},
+                            )
+                            approval_relayed = True
+                            _logger.info(
+                                "[sync] 已中继审批请求到 async_tasks[%s]",
+                                sub_thread_id[:8],
+                            )
+                        except Exception as e:
+                            _logger.debug(
+                                "[sync] 写 awaiting_approval 失败(将重试): %s", str(e)[:80]
+                            )
+                    # 等待超上限 → 放弃，按 timeout 收尾（兜底防僵尸等待）
+                    if (
+                        approval_wait_start is not None
+                        and (time.monotonic() - approval_wait_start)
+                        > _AWAIT_APPROVAL_TIMEOUT
+                    ):
+                        _logger.warning(
+                            "[sync] SQL 审批等待超过 %ds，强制结束 (timeout)",
+                            _AWAIT_APPROVAL_TIMEOUT,
+                        )
+                        try:
+                            latest = await _get_latest_run(client, sub_thread_id)
+                            if latest and latest.get("run_id"):
+                                await client.runs.cancel(
+                                    thread_id=sub_thread_id,
+                                    run_id=latest["run_id"],
+                                )
+                        except Exception as e:  # noqa: BLE001
+                            _logger.warning("[sync] 取消待审批 run 失败: %s", e)
+                        approval_pending = False
+                        run_status = "timeout"
+                    else:
+                        continue  # 保持等待，本轮不做终态处理
+                elif approval_pending:
+                    # 之前等待审批，现在 run 重新运行/结束 → 用户已决策，清除审批标记。
+                    # 写成功才置 approval_pending=False，失败下轮重试。
+                    try:
+                        latest = await _get_latest_run(client, sub_thread_id)
+                        base = dict(task or {})
+                        base["task_id"] = sub_thread_id
+                        base["agent_name"] = agent_name
+                        base["status"] = "running"
+                        if latest and latest.get("run_id"):
+                            base["run_id"] = latest["run_id"]
+                        base["last_updated_at"] = time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                        )
+                        # 不带 awaiting_approval → keyed 合并整条替换，等同清除
+                        await asyncio.to_thread(
+                            _sync_update_state,
+                            main_thread_id,
+                            {"async_tasks": {sub_thread_id: base}},
+                        )
+                        approval_clear_written = True
+                        approval_pending = False
+                        # 重置 relay 标记：同一子任务可能被审批多次（如先拦截全表
+                        # SELECT、批准后子 agent 又生成 DELETE 再次触发审批）。若不
+                        # 复位，第二次审批的 payload 会被 `if not approval_relayed`
+                        # 跳过、永不中继到前端 → 任务卡死在「查询执行」。
+                        approval_relayed = False
+                        _logger.info(
+                            "[sync] 审批已决策，任务 %s 继续 (run_id=%s)",
+                            sub_thread_id[:8],
+                            base.get("run_id"),
+                        )
+                    except Exception as e:
+                        _logger.warning(
+                            "[sync] 写审批后 async_tasks 失败(将重试): %s", str(e)[:100]
+                        )
+
                 # 运行时长保护：子 run 一直 running 且超过上限，视为卡死，
-                # 强制按 error 处理，确保 active_queries 最终翻转、前端恢复。
+                # 强制按 timeout 处理（P1-7 失败分类：不再冒充 error），
+                # 确保 active_queries 最终翻转、前端恢复。
                 # （正常情况下 run_sql 等工具自身有超时，不会走到这一步，这是兜底。）
                 if run_status == "running" and (
                     time.monotonic() - loop_start
                 ) > STALE_RUN_TIMEOUT:
                     _logger.warning(
-                        "[sync] 子 run 运行超过 %ds，视为卡死，强制结束",
+                        "[sync] 子 run 运行超过 %ds，视为卡死，强制结束（分类为 timeout）",
                         STALE_RUN_TIMEOUT,
                     )
-                    run_status = "error"
-                if run_status in ("success", "error"):
+                    run_status = "timeout"
+                    # 真实 kill：取消卡死的子 run，避免其永远占用服务端资源
+                    try:
+                        _stale_run_id = (task or {}).get("run_id")
+                        if _stale_run_id:
+                            await client.runs.cancel(
+                                thread_id=sub_thread_id, run_id=_stale_run_id
+                            )
+                            _logger.info(
+                                "[sync] 已取消超时子 run: %s", sub_thread_id[:8]
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        _logger.warning("[sync] 取消超时子 run 失败: %s", e)
+                if run_status in _RUN_DONE_STATUSES:
                     sub_agent_done = True
                     _logger.info(
                         "[sync] 子智能体 %s，进入标题守护+通知模式",
@@ -339,6 +548,19 @@ async def _async_sync_loop(
                         total,
                         len(current_main_todos),
                     )
+                    # 追踪：记录进度事件
+                    if _trace_store:
+                        try:
+                            _trace_store.insert_event_sync(
+                                thread_id=sub_thread_id,
+                                event_type=EventType.SUBAGENT_PROGRESS,
+                                agent_type="nl2sql_agent",
+                                parent_thread_id=main_thread_id,
+                                task_id=sub_thread_id,
+                                data={"completed": completed, "total": total, "step": steps[-1]["content"] if steps else ""},
+                            )
+                        except Exception as _e:
+                            _logger.debug("[sync] trace progress failed: %s", _e)
 
             # ── 4. 子智能体完成后：写最终步骤 + async_tasks + active_queries=false ──
             # 注意：主线程在 in-flight run（前一个任务的自动续跑/用户消息处理）期间，
@@ -360,11 +582,13 @@ async def _async_sync_loop(
                         len(final_sub_todos) if final_sub_todos else 0,
                     )
                     task_prefix = sub_thread_id[:8]
+                    # P1-7：按终态展示（已取消/超时终止/执行失败…），不再一律「已完成」
+                    done_label = _DONE_LABELS.get(run_status, "已完成")
                     if final_sub_todos:
                         completed_steps = [
                             {
                                 "id": f"__subagent_header_{task_prefix}__",
-                                "content": f"{_SUBAGENT_MARKER} {agent_name} 执行进度 (已完成)",
+                                "content": f"{_SUBAGENT_MARKER} {agent_name} 执行进度 ({done_label})",
                                 "status": "completed",
                             }
                         ]
@@ -389,6 +613,20 @@ async def _async_sync_loop(
                 # 写 async_tasks 单 key（基于传入 task 字典 + run_status，无读-改-写竞态）。
                 # 失败持续重试，直到主线程 in-flight run 结束写入成功，或超上限放弃。
                 if not async_tasks_written:
+                    # P1-7 取消善后：用户已用 cancel_async_task 取消的任务
+                    # （state 里已是 cancelled），sync 检测到的任何终态都不得覆盖
+                    # （此前超时兜底会把 cancelled 盖成 error）。
+                    if run_status != "cancelled":
+                        _existing = await _read_task_status(
+                            client, main_thread_id, sub_thread_id
+                        )
+                        if _existing == "cancelled":
+                            async_tasks_written = True
+                            _logger.info(
+                                "[sync] 任务 %s 已被用户取消，保留 cancelled，不写入 %s",
+                                sub_thread_id[:8], run_status,
+                            )
+                if not async_tasks_written:
                     try:
                         base = dict(task or {})
                         base["task_id"] = sub_thread_id
@@ -405,6 +643,19 @@ async def _async_sync_loop(
                             "[sync] 写 async_tasks[%s] 状态=%s (重试 %d 次)",
                             sub_thread_id[:8], run_status, completion_write_retries,
                         )
+                        # 追踪：记录子智能体完成事件
+                        if _trace_store:
+                            try:
+                                _trace_store.insert_event_sync(
+                                    thread_id=sub_thread_id,
+                                    event_type=EventType.SUBAGENT_COMPLETE,
+                                    agent_type="nl2sql_agent",
+                                    parent_thread_id=main_thread_id,
+                                    task_id=sub_thread_id,
+                                    data={"status": run_status},
+                                )
+                            except Exception as _e:
+                                _logger.debug("[sync] trace complete failed: %s", _e)
                     except Exception as e:
                         completion_write_retries += 1
                         # 限频告警：首次与每第 10 次失败记 WARNING，避免主线程长时间
@@ -437,6 +688,24 @@ async def _async_sync_loop(
                 # async_tasks + active_queries=false 都落地后，进入固定宽限期再退出
                 if async_tasks_written and active_queries_cleared:
                     post_complete_cycles += 1
+                    # 每 4 个周期（2s）检查一次终态是否被 auto-continue run 中断回退覆盖。
+                    # 场景：sync 写入终态 → 前端触发 auto-continue → auto-continue run 被中断
+                    # → LangGraph 回退到该 run 开始前的 checkpoint → 若 checkpoint 不含 sync
+                    # 的写入（竞态窗口），终态丢失，UI 表现为进度条卡死。
+                    if post_complete_cycles % 4 == 0:
+                        try:
+                            current_status = await _read_task_status(
+                                client, main_thread_id, sub_thread_id
+                            )
+                            if current_status is not None and current_status not in _RUN_DONE_STATUSES:
+                                _logger.warning(
+                                    "[sync] 终态被回退！当前 async_tasks=%s，重新写入终态=%s",
+                                    current_status, run_status,
+                                )
+                                async_tasks_written = False
+                                active_queries_cleared = False
+                        except Exception as _e:
+                            _logger.warning("[sync] 终态回退检查失败: %s", _e)
                     if post_complete_cycles >= POST_COMPLETE_MAX_CYCLES:
                         _logger.info(
                             "[sync] 退出: cycles=%d", post_complete_cycles
@@ -470,6 +739,60 @@ async def _get_run_status(client, thread_id: str) -> Optional[str]:
         return runs[0].get("status", "unknown")
     except Exception as e:
         _logger.warning("[sync] get_run_status failed: %s", e)
+        return None
+
+
+async def _get_latest_run(client, thread_id: str) -> Optional[dict]:
+    """获取线程上最新 run（含 run_id，P1-3 恢复后刷新 async_tasks.run_id 用）。"""
+    try:
+        runs = await client.runs.list(thread_id=thread_id, limit=1)
+        if not runs:
+            return None
+        return runs[0]
+    except Exception as e:
+        _logger.warning("[sync] get_latest_run failed: %s", e)
+        return None
+
+
+async def _extract_approval_payload(client, sub_thread_id: str) -> Optional[dict]:
+    """子线程处于 interrupt 等待时，提取 HITL 审批 payload（P1-3）。
+
+    返回 {"action_requests", "review_configs", "interrupt_id"}；
+    非审批类 interrupt（无 action_requests）返回 None。
+    """
+    try:
+        state = await client.threads.get_state(thread_id=sub_thread_id)
+        for task in state.get("tasks") or []:
+            for intr in task.get("interrupts") or []:
+                value = intr.get("value")
+                if isinstance(value, dict) and value.get("action_requests"):
+                    return {
+                        "action_requests": value.get("action_requests"),
+                        "review_configs": value.get("review_configs"),
+                        "interrupt_id": intr.get("id"),
+                    }
+        return None
+    except Exception as e:
+        _logger.warning("[sync] extract_approval_payload failed: %s", e)
+        return None
+
+
+async def _read_task_status(
+    client, main_thread_id: str, task_id: str
+) -> Optional[str]:
+    """读主线程 state 中 async_tasks[task_id] 的当前状态（P1-7 取消善后）。
+
+    用于在 sync 写入终态前判断：该任务是否已被用户取消（cancelled）。
+    """
+    try:
+        state = await client.threads.get_state(thread_id=main_thread_id)
+        tasks = (state.get("values") or {}).get("async_tasks") or {}
+        entry = tasks.get(task_id)
+        if isinstance(entry, dict):
+            return entry.get("status")
+        return None
+    except Exception as e:
+        _logger.warning("[sync] read_task_status failed: %s", e)
         return None
 
 
@@ -769,8 +1092,9 @@ async def _notify_main_agent_continue(
         #    这样新 run 会看到这条新消息并触发 LLM 处理
         continue_content = (
             f"[系统通知] {agent_name} 子智能体已完成查询任务。"
-            "请立即继续执行后续步骤：推荐并渲染图表、生成分析报告。"
-            "不要等待用户指示。"
+            "请评估数据特征和用户意图：若数据有可视化价值或用户要求图表，"
+            "则推荐并渲染图表；若数据适合报告或用户要求报告，则生成分析报告。"
+            "简单查询结果直接展示即可，不要等待用户指示。"
         )
         _log.info("[sync] 注入通知消息并创建新 run")
 

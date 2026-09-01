@@ -1,8 +1,0 @@
-1. 从 names 表（别名 n）出发，通过 principals 表（别名 p）关联到 titles 表（别名 t）
-2. JOIN 条件：p.name_id = n.id（参与者→人物），p.title_id = t.id（参与者→作品）
-3. 筛选条件：p.category_id IN ('actor', 'actress')（演员定义，包含男女演员）
-4. 筛选条件：t.title_type = 'movie'（只统计电影，排除电视剧/短片等）
-5. 按演员分组：GROUP BY n.id, n.primary_name
-6. 计算每位演员参演电影数量：COUNT(DISTINCT p.title_id) AS movie_count
-7. 按参演电影数量降序排序：ORDER BY movie_count DESC
-8. 取前 10 位演员（LIMIT 10）

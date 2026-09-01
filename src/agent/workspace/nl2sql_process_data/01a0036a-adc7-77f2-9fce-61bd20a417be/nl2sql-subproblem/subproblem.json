@@ -1,0 +1,13 @@
+{
+  "SELECT": "collect_time (采集时间), melt_bright (熔接亮度), shoulder_rel_bright (放肩亮度), proc_stage (工艺阶段), puller_batch_no (炉次编号), ingot_no (棒次编号)",
+  "FROM": "aix_crystal_comm_data",
+  "JOIN": null,
+  "WHERE": [
+    "device_code = 'D330'",
+    "proc_stage = '调温'"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": "collect_time DESC",
+  "LIMIT": "通过 run_sql limit 参数控制"
+}

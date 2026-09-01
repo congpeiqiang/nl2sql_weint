@@ -1,6 +1,0 @@
-{
-  "sql": "SELECT\n  t.start_year AS 年份,\n  COUNT(DISTINCT t.id) AS 电影产量,\n  ROUND(\n    (COUNT(DISTINCT t.id) - LAG(COUNT(DISTINCT t.id)) OVER (ORDER BY t.start_year)) * 100.0\n    / NULLIF(LAG(COUNT(DISTINCT t.id)) OVER (ORDER BY t.start_year), 0),\n    2\n  ) AS 同比增长率\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 2000 AND 2023\n  AND t.start_year IS NOT NULL\nGROUP BY t.start_year\nORDER BY t.start_year ASC",
-  "optimized_sql": null,
-  "issues": [],
-  "summary": "共发现 0 个性能问题。SQL 已明确列出所需列，无 SELECT *；聚合查询（GROUP BY）按年份分组仅返回约24行，无需 LIMIT；无 JOIN 笛卡尔积风险；无子查询、函数包裹列、NOT IN、LIKE 前缀通配符、OR 条件等问题。SQL 性能良好，无需优化。"
-}

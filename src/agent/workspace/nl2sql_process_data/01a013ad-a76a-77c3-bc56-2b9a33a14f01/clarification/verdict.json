@@ -1,0 +1,8 @@
+{
+  "clear": true,
+  "reason": "OK",
+  "original_question": "评分最高的 10 部电视剧系列是哪些？显示标题和评分",
+  "db_name": "imdb",
+  "issues": [],
+  "assumption": "电视剧系列指 title_type='tvSeries'；评分指 average_rating；按评分降序取前10；按业务规则加 num_votes > 10000 过滤保证可信度"
+}

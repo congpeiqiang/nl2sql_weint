@@ -1,0 +1,7 @@
+1. 确认查询：从 titles 表筛选 primary_title = 'The Ballad of Conrad & Vernon' 的行
+   - SELECT id, primary_title, title_type, start_year FROM titles WHERE primary_title = 'The Ballad of Conrad & Vernon'
+   - 目的：确认目标记录是否存在、有几条（同名可能多条）
+2. 执行删除：DELETE FROM titles WHERE primary_title = 'The Ballad of Conrad & Vernon'
+   - 单表删除，无 JOIN；主键 id 为 VARCHAR，无需数学运算
+3. 回显：返回 DELETE 影响的行数（受影响记录数）
+4. 可选校验：删除后可再次 SELECT 确认记录已不存在

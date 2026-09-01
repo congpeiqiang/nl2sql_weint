@@ -1,0 +1,23 @@
+{
+  "question": "统计 aix_crystal_record_data 表中 content='调温' 的记录，按设备（device_code）分组统计各设备的调温次数，并展示调温次数最高的设备。",
+  "db_name": "clickhouse-aix",
+  "strategy": "full",
+  "context": {
+    "hit_model": "aix_crystal_record_data",
+    "relevant_columns": [
+      {"name": "id", "type": "VARCHAR", "desc": "主键uuid"},
+      {"name": "device_code", "type": "VARCHAR", "desc": "设备编码"},
+      {"name": "content", "type": "VARCHAR", "desc": "内容"},
+      {"name": "value", "type": "VARCHAR", "desc": "值"},
+      {"name": "color", "type": "VARCHAR", "desc": "颜色"},
+      {"name": "collect_time", "type": "TIMESTAMP", "desc": "采集时间-松瓷服务器时间"},
+      {"name": "operation_time", "type": "TIMESTAMP", "desc": "采集时间-炉台的操作时间，上位机时间"},
+      {"name": "created_at", "type": "TIMESTAMP", "desc": "创建时间"}
+    ],
+    "note": "语义检索命中 aix_crystal_record_data 模型；无时间范围/实体名缺失，过滤条件 content='调温' 明确给出。"
+  },
+  "instructions": {
+    "content": "# Business rules\n\nAdd custom rules or guidelines for LLM-based query generation here.",
+    "has_custom_rules": false
+  }
+}

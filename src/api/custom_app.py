@@ -14,13 +14,45 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from starlette.applications import Starlette  # noqa: E402
+from starlette.middleware import Middleware  # noqa: E402
 from starlette.routing import BaseRoute  # noqa: E402
 
+import api.auto_title  # noqa: E402
 import api.db_config  # noqa: E402
+import api.langfuse_metadata  # noqa: E402
+import api.message_feedback  # noqa: E402
+import api.model_config  # noqa: E402
+import api.sql_approval  # noqa: E402
+import api.task_cancel  # noqa: E402
+import api.thread_compact  # noqa: E402
+import api.thread_export  # noqa: E402
+import api.thread_fork  # noqa: E402
+import api.thread_search  # noqa: E402
+import api.workspace  # noqa: E402
+import api.wren_semantic  # noqa: E402
+import api.trace_routes  # noqa: E402
 
 ROUTES: list[BaseRoute] = [
     *api.db_config.routes,
+    *api.message_feedback.routes,
+    *api.auto_title.routes,
+    *api.model_config.routes,
+    *api.sql_approval.routes,
+    *api.task_cancel.routes,
+    *api.thread_compact.routes,
+    *api.thread_export.routes,
+    *api.thread_fork.routes,
+    *api.thread_search.routes,
+    *api.workspace.routes,
+    *api.wren_semantic.routes,
+    *api.trace_routes.routes,
     # 后期新增：import api.<name> + 展开 *api.<name>.routes
 ]
 
-app = Starlette(routes=ROUTES)
+# M2 监控增强：langgraph server 会提取 custom_app 的 user_middleware 全局应用
+# （langgraph_api/server.py），对 run 创建端点注入 Langfuse config.metadata。
+# 纯 ASGI 中间件，不缓冲响应（不破坏 /runs/stream 的 SSE）。
+app = Starlette(
+    routes=ROUTES,
+    middleware=[Middleware(api.langfuse_metadata.LangfuseMetadataMiddleware)],
+)

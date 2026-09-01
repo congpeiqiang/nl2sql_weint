@@ -1,0 +1,32 @@
+{
+  "tables": [
+    {
+      "name": "album",
+      "columns": [
+        {"name": "albumid", "type": "integer", "pk": true, "nullable": false},
+        {"name": "title", "type": "character varying", "pk": false, "nullable": false},
+        {"name": "artistid", "type": "integer", "fk": true, "nullable": false}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "album",
+      "from_field": "artistid",
+      "to": "artist",
+      "to_field": "artistid"
+    }
+  ],
+  "field_mappings": {
+    "专辑ID": {"table": "album", "field": "albumid"},
+    "专辑标题": {"table": "album", "field": "title"},
+    "艺术家ID": {"table": "album", "field": "artistid"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "db_type": "postgres",
+    "db_name": "Chinook_Aliyun",
+    "note": "未在语义层建模，通过 dbmcp 直连获取 information_schema 结构"
+  }
+}

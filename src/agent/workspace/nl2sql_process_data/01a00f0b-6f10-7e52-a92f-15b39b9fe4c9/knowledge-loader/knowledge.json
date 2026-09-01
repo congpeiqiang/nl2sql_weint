@@ -1,0 +1,53 @@
+{
+  "user_intent": {
+    "original_question": "查询当前数据库中有多少个表，列出所有表的名称",
+    "domain": "database_metadata",
+    "keywords": ["表", "表数量", "表名称", "表清单"],
+    "intent_type": "query_table_list_and_count"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["表名称"]
+  },
+  "metrics": [],
+  "business_rules": [],
+  "field_mappings": {
+    "表名称": "information_schema.tables.table_name"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "数据库连接信息",
+      "content": "Chinook_Aliyun 为 PostgreSQL 数据库（db_type=postgres），未在语义层建模，需通过 dbmcp 直连工具执行查询。"
+    },
+    {
+      "topic": "表清单",
+      "content": "dbmcp_get_db_info 返回 11 张表：album, artist, customer, employee, genre, invoice, invoiceline, mediatype, playlist, playlisttrack, track"
+    }
+  ],
+  "context_summary": {
+    "main_tables": [],
+    "main_fields": ["table_name"],
+    "filter_conditions": ["table_schema = 'public'"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-08-16T09:45:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 0,
+      "knowledge": 0
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 1,
+      "knowledge": 2
+    },
+    "note": "Chinook_Aliyun 无语义层建模（无 wren_project），无业务知识文件；知识内容来自 dbmcp_get_db_info 直连信息"
+  }
+}

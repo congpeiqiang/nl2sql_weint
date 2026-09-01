@@ -1,0 +1,8 @@
+{
+  "clear": true,
+  "reason": "OK",
+  "original_question": "数据库中有多少部电视剧系列？",
+  "db_name": "imdb",
+  "issues": [],
+  "assumption": "电视剧系列 = title_type = 'tvSeries'，简单 COUNT 查询"
+}

@@ -1,4 +1,5 @@
 ---
+version: 0.1.0
 name: nl2sql-subproblem
 description: "触发：策略A流水线第3步。将问题分解为子句级子问题（SELECT列表/JOIN/WHERE/GROUP BY/HAVING/ORDER BY）。输出结构化JSON。策略B或策略C跳过此步骤。"
 ---
@@ -19,12 +20,16 @@ SQL-of-Thought 流水线第3步。**仅在策略A（复杂查询）中执行。*
 
 ## 输入
 
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/knowledge-loader/knowledge.json`
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`
+- 优先从对话上下文中获取前序 Skill 的输出（knowledge-loader 的 JSON、schema-linking 的 JSON）
+- 若上下文中找不到，则 read_file 对应文件作为 fallback：
+  - `/workspace/nl2sql_process_data/{thread_id}/knowledge-loader/knowledge.json`
+  - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`
 
 ## 输出
 
-- 必须调用 write_file 写入`/workspace/nl2sql_process_data/{thread_id}/nl2sql-subproblem/subproblem.json`结构化JSON，每个子句一个键值对, 样例如下
+- 在回复末尾输出结构化 JSON（````json` 代码块），供编排器传递给下游 skill
+- 仅在数据 >15KB 时 write_file 到 `/workspace/nl2sql_process_data/{thread_id}/nl2sql-subproblem/subproblem.json` 作为 fallback
+- 样例如下
 
 ```json
 {

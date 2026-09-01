@@ -1,0 +1,11 @@
+{
+  "SELECT": "albumid, title, artistid（用于确认 albumid 最大的那条记录）",
+  "FROM": "album",
+  "JOIN": {},
+  "WHERE": "无（先取全表最大 albumid）；DELETE 时 WHERE albumid = (最大 albumid)",
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": "albumid DESC（取最大的一条）",
+  "LIMIT": "1 条（通过 run_sql 的 limit 参数控制，SQL 中不写 LIMIT）",
+  "ACTION": "DELETE FROM album WHERE albumid = (SELECT MAX(albumid) FROM album)——仅删除 albumid 最大的一条"
+}

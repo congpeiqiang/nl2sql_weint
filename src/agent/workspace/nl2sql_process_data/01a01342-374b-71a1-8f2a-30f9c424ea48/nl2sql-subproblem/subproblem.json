@@ -1,0 +1,10 @@
+{
+  "SELECT": "primary_title, average_rating",
+  "FROM": "titles",
+  "JOIN": {},
+  "WHERE": "title_type = 'tvSeries'",
+  "GROUP_BY": "",
+  "HAVING": "",
+  "ORDER_BY": "average_rating DESC",
+  "LIMIT": "10"
+}

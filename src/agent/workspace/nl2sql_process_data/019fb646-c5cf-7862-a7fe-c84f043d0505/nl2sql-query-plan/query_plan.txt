@@ -1,7 +1,0 @@
-1. 从 names 表筛选 primary_name = 'Christopher Nolan' 的人物记录
-2. 通过 principals.name_id = names.id 连接到 principals 表
-3. 在 principals 中筛选 category_id = 'director'（导演）
-4. 通过 principals.title_id = titles.id 连接到 titles 表
-5. 在 titles 中筛选 title_type = 'movie'（电影）
-6. 对 titles.average_rating 计算 AVG 聚合，得到平均评分
-7. 返回平均评分结果

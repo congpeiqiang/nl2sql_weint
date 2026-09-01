@@ -1,0 +1,12 @@
+{
+  "OPERATION": "DELETE",
+  "SELECT_CONFIRM": "确认待删除记录：SELECT albumid, title, artistid FROM album（随机取 1 行）",
+  "FROM": {"table": "album"},
+  "JOIN": null,
+  "WHERE": "albumid = <随机选中的 albumid 值>（唯一主键，保证只删除一条）",
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": "ORDER BY random()（用于随机选取）",
+  "LIMIT": "通过 run_sql limit 参数控制为 1（SQL 中不写 LIMIT 子句）",
+  "VERIFY": "删除后 SELECT COUNT(*) FROM album 验证行数由 347 减为 346，并确认被删 albumid 不再存在"
+}

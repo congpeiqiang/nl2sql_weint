@@ -1,0 +1,24 @@
+{
+  "stamp": "20260823T124129",
+  "queries": "exp_queries.json",
+  "labels": {
+    "production": {
+      "count": 2,
+      "sql_biz_correct_score": null,
+      "sql_valid_score": 1.0,
+      "sql_exec_success": 1.0,
+      "schema_match_score": 1.0,
+      "no_sql_ratio": 0.0,
+      "exec_fail_ratio": 0.0
+    },
+    "prod-a": {
+      "count": 2,
+      "sql_biz_correct_score": null,
+      "sql_valid_score": 1.0,
+      "sql_exec_success": 1.0,
+      "schema_match_score": 1.0,
+      "no_sql_ratio": 0.0,
+      "exec_fail_ratio": 0.0
+    }
+  }
+}

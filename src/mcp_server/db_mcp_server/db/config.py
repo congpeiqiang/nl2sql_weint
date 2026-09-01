@@ -72,6 +72,10 @@ class McpSqlConfig:
         target_name = db_name or dbs[0]["name"]
         target = next((d for d in dbs if d["name"] == target_name), None)
         if not target:
+            # 大小写容错（与 db_config_store.get 同口径，2026-08-23）：避免
+            # 大小写不同名在 .env 兜底路径误报「未配置」触发串库级联
+            target = next((d for d in dbs if d["name"].lower() == target_name.lower()), None)
+        if not target:
             available = [d["name"] for d in dbs]
             raise ValueError(
                 f"数据库 '{db_name}' 未配置。可用: {available}"

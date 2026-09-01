@@ -17,57 +17,71 @@
 ## 整体架构
 
 ```
-+----------------------------------------------------------------------------+
-|                           Agent Layer (主Agent)                              |
-|  main_agent.py (11阶段初始化流水线)                                          |
-|  config.py / schema.py / middleware_config.py                                |
-+----------------------------------------------------------------------------+
-|                           Middleware Stack (7层)                             |
-|  context_injection -> skills_sync -> user_skills_restore ->                  |
-|  tools_summarization -> memory_update -> sql_feedback ->                     |
-|  query_router                                                                |
-+----------------------------------------------------------------------------+
-|                           Skills 技能系统                                    |
-|  +---------------------+   +----------------------------------------+       |
-|  | 通用技能             |   | WrenAI NL2SQL Skill                    |       |
-|  | (分析/图表/搜索等)   |   |  +----------------------------------+ |       |
-|  |                     |   |  | Model Layer: 语义模型             | |       |
-|  |                     |   |  | View Layer: 指标/维度             | |       |
-|  |                     |   |  | SQL Gen Layer: Text2SQL           | |       |
-|  |                     |   |  | Execution Layer: 执行             | |       |
-|  |                     |   |  | Training Pipe: 标注流水线          | |       |
-|  |                     |   |  +----------------------------------+ |       |
-|  +---------------------+   +----------------------------------------+       |
-+----------------------------------------------------------------------------+
-|                           Tools 工具层                                      |
-|  mcp_client.py / sql_executor.py / chart_generator.py                       |
-|  web_search / hitl_tools / assign_skill                                     |
-+----------------------------------------------------------------------------+
-|                     MCP Server (NL2SQL 业务接口)                             |
-|  +----------------------------------------------------------------------+  |
-|  |  db_metadata_tools.py    - 表结构/关系发现                             |  |
-|  |  model_management_tools.py - 语义模型 CRUD                            |  |
-|  |  nl2sql_tools.py         - NL->SQL->执行->返回                         |  |
-|  |  training_data_tools.py  - 标注数据管理                                |  |
-|  |  feedback_tools.py       - 反馈收集                                    |  |
-|  +----------------------------------------------------------------------+  |
-+----------------------------------------------------------------------------+
-|                           Sandbox (数据隔离沙箱)                            |
-|  - 每个用户的 SQL 查询在隔离沙箱中执行                                      |
-|  - 只读数据库连接 / 资源限制 / 超时控制                                    |
-+----------------------------------------------------------------------------+
-|                           WrenAI Engine (外部服务)                          |
-|  - 语义模型解析 -> SQL 生成                                                |
-|  - 通过 HTTP API 集成                                                      |
-+----------------------------------------------------------------------------+
-|                           API 层 (FastAPI)                                  |
-|  web_main.py / agent_loader.py                                             |
-|  api/chat.py (SSE流式) / api/nl2sql.py (专用端点)                          |
-+----------------------------------------------------------------------------+
-|                           Memory / 持久化层                                  |
-|  MongoDB: 会话历史 / SQL 查询缓存 / 标注数据 / 反馈记录                     |
-|  StoreBackend: 用户技能和偏好持久化                                        |
-+----------------------------------------------------------------------------+
+┌──────────────────────────────────────────────────────────────────────┐
+│                    前端 (Next.js + TypeScript)                       │
+│                POST /threads/{id}/runs (SSE 流式)                    │
+└──────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                   LangGraph API Server (port 2026)                    │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  graphs:                                                      │   │
+│  │    chat_agent    → src/agent/main_agent.py:agent               │   │
+│  │    nl2sql_agent  → src/agent/graphs/nl2sql_agent.py:agent     │   │
+│  │                                                                │   │
+│  │  checkpointer:                                                │   │
+│  │    → src/agent/checkpoint/checkpointer_factory.py:checkpointer │   │
+│  │      (AsyncSqliteSaver，按工作区隔离)                          │   │
+│  │                                                                │   │
+│  │  custom_app:                                                   │   │
+│  │    → src/api/custom_app.py (合并自定义 API 路由)               │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                     主 Agent (chat_agent)                             │
+│            意图识别 → 异步委派子 Agent → 结果汇总                     │
+│                                                                      │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────────────────────┐   │
+│  │ Semiotic MCP│  │  技能系统     │  │  SubAgentMiddleware       │   │
+│  │ (图表渲染)  │  │  (按需加载)   │  │  (异步子 Agent 管理)      │   │
+│  └─────────────┘  └──────────────┘  └───────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                  NL2SQL 子 Agent (nl2sql_agent)                       │
+│               SQL-of-Thought 流水线 + 分类法纠错                      │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  SkillsMiddleware → 自动加载 /workspace/skills/nl2sql/       │   │
+│  │  SkillDataMiddleware → 中间数据读写                            │   │
+│  │  SQL 审批闸门 → 写操作/DDL 拦截                                │   │
+│  │  ProgressTrackerMiddleware → 步骤进度追踪                     │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  MCP 工具:                                                    │   │
+│  │    WrenAI MCP (18 个工具) → 语义层/SQL 执行/Schema 检索       │   │
+│  │    DB MCP Server → 直连数据库（10 种引擎）                    │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                多工作区隔离（WorkspaceManager）                       │
+│                                                                      │
+│  按工作区隔离: checkpoint/ feedback/ db_config/ semantic/ report/    │
+│  全局共享:     memory/ skills/                                       │
+└──────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                    目标数据库 (MySQL/PG/ClickHouse/...)               │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -75,269 +89,163 @@
 ## 项目目录结构
 
 ```
-nl2sql-harness/
-+-- src/
-|   +-- agent/                              # Agent 核心
-|   |   +-- main_agent.py                   # 主 Agent 入口 (11阶段初始化流水线)
-|   |   +-- config.py                       # 全局配置 (模型/沙箱/MongoDB/WrenAI)
-|   |   +-- schema.py                       # 数据结构 Schema
-|   |   +-- env_utils.py                    # 环境变量读取
-|   |   +-- middleware_config.py            # 子 Agent 中间件工厂
-|   |   +-- memory/
-|   |   |   +-- AGENTS.md                   # 主 Agent 通用行为准则
-|   |   |   +-- prompts.py                  # 主 Agent system_prompt
-|   |   +-- backends/
-|   |   |   +-- sandbox_setup.py            # 沙箱创建 + 数据库播种
-|   |   |   +-- custom_opensandbox.py       # 沙箱后端封装 (含只读DB)
-|   |   +-- middlewares/                    # 中间件栈 (7层)
-|   |   |   +-- context_injection.py        # 1. 注入用户上下文 + 数据库Schema
-|   |   |   +-- skills_sync.py              # 2. 技能同步 (含WrenAI模型同步)
-|   |   |   +-- user_skills_restore.py      # 3. StoreBackend 恢复持久化技能
-|   |   |   +-- tools_summarization.py      # 4. 工具摘要封装
-|   |   |   +-- memory_update.py            # 5. 自动更新查询历史/数据域偏好
-|   |   |   +-- sql_feedback.py             # 6. NL2SQL 反馈闭环
-|   |   |   +-- query_router.py             # 7. 查询路由 (NL->哪个Skill)
-|   |   +-- subagents/                      # 子 Agent 配置
-|   |   |   +-- loader.py                   # YAML 配置加载
-|   |   |   +-- configs/
-|   |   |       +-- data_analyst.yaml       # 数据分析子Agent (调WrenAI)
-|   |   |       +-- data_steward.yaml       # 数据管理员 (模型维护/标注)
-|   |   |       +-- sql_reviewer.yaml       # SQL 审核子Agent
-|   |   +-- tools/
-|   |       +-- mcp_client.py               # MCP 多服务器连接
-|   |       +-- sql_executor.py             # SQL 执行器 (沙箱隔离)
-|   |       +-- hitl_tools.py               # Human-in-the-Loop: SQL确认/修正
-|   |       +-- chart_generator.py          # 图表生成 (SQL结果->可视化)
-|   |       +-- assign_skill.py             # 技能分配
-|   |       +-- download_sandbox_file.py    # 沙箱文件下载到本地
-|   |
-|   +-- skills/                             # 技能资源
-|   |   +-- main/skill-management/          # 技能生命周期管理
-|   |   +-- nl2sql/                         # WrenAI NL2SQL 技能
-|   |   |   +-- SKILL.md                    # 技能描述: 调用时机/参数/注意事项
-|   |   |   +-- model_definitions/          # 语义模型定义 (YAML)
-|   |   |   |   +-- erp_sales.yaml          # 销售域语义模型
-|   |   |   |   +-- erp_inventory.yaml      # 库存域语义模型
-|   |   |   |   +-- erp_finance.yaml        # 财务域语义模型
-|   |   |   +-- view_definitions/           # 指标/维度定义 (WrenAI View层)
-|   |   |   |   +-- revenue_views.yaml
-|   |   |   |   +-- inventory_views.yaml
-|   |   |   +-- sql_templates/              # SQL 模板 + few-shot 样本
-|   |   |   |   +-- aggregation_patterns.md
-|   |   |   |   +-- join_patterns.md
-|   |   |   +-- training_data/              # 标注数据集
-|   |   |       +-- nl2sql_pairs.jsonl
-|   |   +-- common/
-|   |   |   +-- data_dictionary.md          # 数据字典
-|   |   |   +-- sql_style_guide.md          # SQL 书写规范
-|   |   +-- data/
-|   |       +-- schema-discovery/           # 数据库Schema自动发现
-|   |       +-- query-cache/                # SQL 查询缓存策略
-|   |
-|   +-- wrenai_engine/                      # WrenAI 核心封装
-|   |   +-- __init__.py
-|   |   +-- wrenai_client.py                # WrenAI API 客户端包装
-|   |   +-- semantic_model.py               # 语义模型管理 (CRUD)
-|   |   +-- sql_generator.py                # SQL 生成器 (调用WrenAI语义层)
-|   |   +-- sql_validator.py                # SQL 验证器 (语法+语义+安全)
-|   |   +-- result_interpreter.py           # 结果解释 (自然语言转述SQL结果)
-|   |   +-- training_pipeline.py            # 标注数据->微调/优化流水线
-|   |   +-- feedback_collector.py           # 用户反馈收集 (喜欢/不喜欢/修正SQL)
-|   |
-|   +-- mcp_server/                         # MCP Server (NL2SQL 业务接口代理)
-|   |   +-- server_main.py                  # MCP 服务入口
-|   |   +-- tools/
-|   |       +-- db_metadata_tools.py         # 数据库元数据: get_schema/list_tables
-|   |       +-- model_management_tools.py    # 语义模型管理: create/update/list_models
-|   |       +-- nl2sql_tools.py             # NL2SQL 核心: ask/explain/refine
-|   |       +-- training_data_tools.py      # 标注数据 CRUD
-|   |       +-- feedback_tools.py           # 反馈收集
-|   |
-|   +-- api_view/                           # FastAPI 层 (纯后端接口)
-|   |   +-- web_main.py                     # FastAPI 入口 (lifespan/路由/CORS)
-|   |   +-- agent_loader.py                 # Agent 懒加载 + MongoDB 管理
-|   |   +-- web_config.py                   # API 元信息
-|   |   +-- api/
-|   |       +-- chat.py                     # SSE 流式对话 (含NL2SQL流式返回)
-|   |       +-- nl2sql.py                   # NL2SQL 专用端点 (非流式)
-|   |       +-- models.py                   # 语义模型管理 API
-|   |       +-- training.py                 # 标注数据 API
-|   |       +-- history.py                  # 历史会话管理 (MongoDB CRUD)
-|   |
-|   +-- test/
-|       +-- test_nl2sql_pipeline.py         # 端到端 NL2SQL 测试
-|       +-- test_wrenai_client.py           # WrenAI 客户端单元测试
-|       +-- test_data/sample_queries.json   # 测试数据集
-|
-+-- config/                                 # 配置目录
-|   +-- agent.yaml                          # Agent 主配置
-|   +-- wrenai.yaml                         # WrenAI 配置 (端点/模型/语义模型路径)
-|   +-- databases.yaml                      # 目标数据库连接配置
-|   +-- sandbox.yaml                        # 沙箱配置
-|
-+-- scripts/                                # 运维脚本
-|   +-- init_semantic_models.py             # 初始化语义模型
-|   +-- bootstrap_db.py                     # 播种测试数据
-|   +-- train_pipeline.py                   # 标注数据->微调流水线
-|
-+-- requirements.txt
-+-- Dockerfile
-+-- docker-compose.yml                      # 含 WrenAI 服务编排
-+-- README.md
+nl2sql/
+├── start_server.py                # 服务启动脚本（读取 graph.json）
+├── graph.json                     # LangGraph 图注册（start_server.py 使用）
+├── langgraph.json                 # LangGraph 图注册（langgraph dev 使用）
+├── pyproject.toml                 # 项目依赖
+├── .env                           # 环境配置
+├── README.md                      # 项目说明
+├── ARCHITECTURE.md                # 本文档
+│
+├── docs/                          # 文档和参考资料
+│   ├── agent优化记录/              # 架构优化方案
+│   ├── chinook数据库-aliyun/       # Chinook 测试数据
+│   └── 论文SQL-of-Thought/        # 论文 PDF + 中文翻译
+│
+└── src/
+    ├── agent/                     # Agent 核心
+    │   ├── main_agent.py          # 主智能体（意图路由 + 异步委派）
+    │   ├── graphs/                # Agent 图定义
+    │   │   └── nl2sql_agent.py    # NL2SQL 子智能体（SQL-of-Thought 流水线）
+    │   ├── checkpoint/            # 持久化层
+    │   │   └── checkpointer_factory.py # 自定义 Checkpointer（AsyncSqliteSaver）
+    │   ├── workspace_manager/     # 多工作区管理
+    │   │   ├── __init__.py        # 重导出（向后兼容）
+    │   │   ├── manager.py         # WorkspaceManager 单例
+    │   │   └── workspaces.json    # 工作区注册表
+    │   ├── workspace/             # 默认工作区数据目录
+    │   │   ├── checkpoint/        # Checkpoint 数据库
+    │   │   ├── feedback/          # 用户反馈
+    │   │   ├── db_config.json     # 数据库连接配置
+    │   │   ├── model_config.json  # 模型配置
+    │   │   ├── memory/            # 共享记忆
+    │   │   ├── skills/            # 技能定义
+    │   │   ├── report/            # 生成报告
+    │   │   └── tmp/               # 临时文件
+    │   ├── llms/                  # LLM 模型
+    │   │   └── model.py           # 模型工厂（DeepSeek/GLM/Kimi）
+    │   ├── tools/                 # 工具层
+    │   │   └── mcp_tool.py        # MCP 多服务器客户端
+    │   ├── prompt/                # 系统提示词
+    │   │   ├── MAIN_AGENT_PROMPT.md
+    │   │   └── NL2SQL_SYSTEM_PROMPT.md
+    │   ├── subagents/             # 子 Agent 管理
+    │   │   ├── configs/           # 子 Agent 配置（YAML）
+    │   │   │   └── nl2sql.yaml
+    │   │   ├── loader.py          # YAML 配置加载
+    │   │   ├── track_progress.py  # 进度追踪中间件
+    │   │   ├── check_progress.py  # 异步任务状态检查
+    │   │   ├── sync_launcher.py   # 同步启动器
+    │   │   └── sync_subagent_todos.py # 子 Agent 任务同步
+    │   ├── skills/                # 技能定义（SKILL.md）
+    │   │   ├── main/              # 主智能体技能
+    │   │   └── nl2sql/            # NL2SQL 技能（7 个）
+    │   ├── middlewares/           # 中间件
+    │   │   ├── write_todos.py     # Todo 写入协议
+    │   │   ├── sql_approval.py    # SQL 审批闸门
+    │   │   └── skill_data.py      # 技能数据管理
+    │   ├── feedback/              # 反馈存储
+    │   │   └── store.py           # 反馈 SQLite 存储
+    │   ├── memory/                # 长期记忆
+    │   │   └── ORCHESTRATOR.md    # 编排器行为准则
+    │   ├── backends/              # 沙箱后端
+    │   ├── settings/              # 配置与权限
+    │   │   ├── setting.py         # 全局配置
+    │   │   ├── file_permissions.py # 文件权限控制
+    │   │   └── model_config_store.py # 模型配置存储
+    │   └── utils/                 # 工具函数
+    │       ├── path_resolver.py   # 路径解析
+    │       └── semantic_db.py     # 语义库检测
+    │
+    ├── api/                       # 自定义 API 路由（合并进 LangGraph API）
+    │   ├── custom_app.py          # 组合根（注册所有路由）
+    │   ├── workspace.py           # 工作区管理 API
+    │   ├── db_config.py           # 数据库配置 API
+    │   ├── model_config.py        # 模型配置 API
+    │   ├── wren_semantic.py       # Wren 语义库管理 API
+    │   ├── message_feedback.py    # 用户反馈 API
+    │   ├── sql_approval.py        # SQL 审批 API
+    │   ├── thread_fork.py         # Thread 分支 API
+    │   ├── thread_search.py       # Thread 搜索 API
+    │   └── auto_title.py          # 自动标题 API
+    │
+    └── mcp_server/                # 独立 DB MCP 服务器
+        └── db_mcp_server/
+            ├── db_server.py       # FastMCP 服务入口
+            └── db/engine/         # 10 种数据库 Runner
 ```
 
 ---
 
 ## 关键设计决策
 
-### 1. WrenAI 作为 Skill 的工作流
+### 1. 多工作区隔离
 
 ```
-用户输入 -> 主 Agent -> Query Router 中间件判断意图
-                                |
-                        +-------+-------+
-                        v               v
-                  数据查询类问题     业务操作类问题
-                        |               |
-                        v               v
-                调用 nl2sql Skill    调用其他技能
-                        |
-                        v
-           wrenai_engine/sql_generator.py 处理
-               +- 匹配语义模型 (erp_sales.yaml / erp_finance.yaml)
-               +- 构造 WrenAI MDL (Modeling Definition Language) 请求
-               +- 调用 WrenAI API -> 返回 SQL
-               +- sql_validator 校验语法 + 安全规则
-               +- 沙箱执行 -> 结果 -> result_interpreter 转自然语言
-                        |
-                        v
-              主 Agent 整合结果 -> 返回用户
+多工作区（WorkspaceManager）
+├── 默认工作区: src/agent/workspace/（零配置回退）
+├── 共享资源:   src/agent/shared/（独立于工作区，可被 SHARED_RESOURCES_PATH 覆盖）
+├── 注册表:    src/agent/workspace_manager/workspaces.json
+├── 隔离项:     checkpoint/ feedback/ db_config.json/ semantic/
+│               report/ tmp/ nl2sql_process_data/ large_tool_results/
+└── 共享项:     memory/ skills/ model_config.json（model_config 可被工作区覆盖）
 ```
 
-### 2. Harness Engineering 映射
+- 切换工作区即时生效（DynamicFilesystemBackend 延迟解析 root_dir）
+- 所有 `get_store()` 函数追踪工作区路径，切换时自动重建
 
-| ERP_OPENCLAW 概念 | 本项目映射 |
-|---|---|
-| main_agent.py 11阶段初始化 | 同样保留，增加 WrenAI Client 初始化阶段 |
-| context_injection 中间件 | 注入 DB Schema + 数据字典到上下文 |
-| memory_update 中间件 | 更新 frequent_queries、用户偏好的数据域 |
-| **新增** sql_feedback 中间件 | **闭环反馈：用户反馈 -> 标注数据 -> 触发重训练** |
-| **新增** query_router 中间件 | **判断 NL 是"查询数据"还是"操作业务"，路由到不同 Skill** |
-| subagent procurement_analyst | -> data_analyst (调WrenAI做数据分析) |
-| subagent procurement_order | -> data_steward (管理语义模型/标注数据) |
-| 工具 chart_generator | 复用，输入从 SQL 结果改为 NL2SQL 执行结果 |
-| 工具 hitl_tools | -> SQL 确认/修正 HITL，关键 SQL 执行前让人确认 |
-| MCP 工具 suppliers_tools | -> nl2sql_tools (ask/explain/refine 三个核心) |
-| Sandbox 沙箱 | 只读数据库沙箱，每个请求独立连接，自动超时 |
-
-### 3. SQL 安全沙箱
-
-NL2SQL 项目最关键的安全层设计：
-
-```python
-# sandbox_setup.py 中的核心策略
-class SQLSandboxConfig:
-    read_only: True                    # 只读事务
-    statement_timeout: 30              # 单条SQL超时30秒
-    max_rows_returned: 1000            # 最大返回行数
-    allowed_schemas: ["public"]        # 只允许查询指定 schema
-    forbidden_patterns: [              # 禁止执行的 SQL 模式
-        "DROP", "ALTER", "TRUNCATE",
-        "INSERT", "UPDATE", "DELETE",
-        "CREATE", "GRANT", "EXECUTE"
-    ]
-    resource_limits: {
-        "max_memory_mb": 512,
-        "max_temp_tables": 0
-    }
-```
-
-### 4. 反馈闭环 (核心差异化点)
+### 2. SQL-of-Thought 流水线
 
 ```
-用户查询 -> NL2SQL -> 执行 -> 返回结果
-                         |
-                   用户反馈: 点赞/踩/修正SQL
-                         |
-                   feedback_collector.py
-                         |
-                   存储到 training_data/nl2sql_pairs.jsonl
-                         |
-                   training_pipeline.py (定时/手动触发)
-                         |
-                   优化 few-shot 样本 / 微调模型参数
-                         |
-                   下次查询效果提升
+用户输入 → 主 Agent → 意图路由
+                │
+        ┌───────┴───────┐
+        ▼               ▼
+  数据查询类        其他意图
+        │
+        ▼
+  NL2SQL 子 Agent
+  ├── Phase 0（可选）: WrenAI 语义层预处理
+  ├── Phase 1: Schema 知识准备
+  ├── Phase 2: 策略 A/B/C 流水线
+  │   ├── Schema Linking → Subproblem → Query Plan → SQL Generation → 执行
+  │   └── 快速通道: 跳过子问题分解
+  └── Phase 3: 分类法引导纠错（最多 3 次）
 ```
 
-### 5. WrenAI 概念映射到项目中
+### 3. VFS 复合后端
 
-| WrenAI 概念 | 项目中的位置 | 说明 |
-|---|---|---|
-| **Model** (语义模型) | skills/nl2sql/model_definitions/*.yaml | 描述业务对象和关系的 DSL |
-| **View** (指标/维度) | skills/nl2sql/view_definitions/*.yaml | 预定义的业务分析视角 |
-| **Metrics** (度量) | 嵌入在 View 定义中 | 聚合函数和计算字段 |
-| **SQL Generation** | wrenai_engine/sql_generator.py | 调用 WrenAI 语义解析 API |
-| **MDL** (建模语言) | MCP model_management_tools 管理 | 创建/更新/删除语义模型 |
+```
+CompositeBackend (最长前缀匹配)
+├── /workspace/memory/  → shared_memory_backend (共享)
+├── /workspace/skills/  → shared_skills_backend (共享)
+├── /workspace/         → workspace_data_backend (当前工作区)
+└── /                   → shared_code_backend (代码只读)
+```
+
+### 4. 双通道路由
+
+根据当前数据库是否在 Wren 语义层建模，动态注入通道路由：
+- **语义层通道**: 使用 `wrenai_<库名>_*` 工具链
+- **直连通道**: 使用 `dbmcp_*` 工具链
+
+### 5. SQL 安全控制
+
+- SQL 审批中间件：写操作/DDL/疑似全表拉取触发 HITL interrupt
+- 文件权限控制：声明式规则，默认 allow + 显式 deny 兜底
 
 ### 6. 技术栈
 
-```
-Python 3.11+                 # 与参考项目一致
-FastAPI + Uvicorn            # API 层
-Pydantic v2                  # Schema 定义
-WrenAI Engine / WrenAI SDK   # NL2SQL 核心
-OpenSandbox / E2B            # 沙箱执行环境
-MongoDB                      # 记忆/历史/缓存/标注数据
-Docker Compose               # 服务编排 (含 WrenAI Server)
-LangChain / LiteLLM          # Agent LLM 调用 (可选)
-SQLAlchemy 2.0 + asyncpg     # 数据库连接
-```
-
----
-
-## 实现路线图
-
-### Phase 1 - 骨架搭建 (1-2天)
-- 创建项目目录结构
-- 编写 config.py、schema.py、env_utils.py
-- 搭建 main_agent.py 初始化流水线 (空壳)
-- 搭建 web_main.py + FastAPI 基础框架
-- 编写 docker-compose.yml 编排 WrenAI Server
-
-### Phase 2 - WrenAI 集成核心 (2-3天)
-- 实现 wrenai_engine/wrenai_client.py - 封装 WrenAI API 调用
-- 实现 wrenai_engine/semantic_model.py - 语义模型 CRUD
-- 实现 wrenai_engine/sql_generator.py - 核心 SQL 生成逻辑
-- 实现 wrenai_engine/sql_validator.py - 安全校验
-- 定义首批语义模型 (model_definitions/*.yaml)
-
-### Phase 3 - MCP + Skill 系统 (2天)
-- 实现 mcp_server/server_main.py + 所有 MCP 工具
-- 编写 skills/nl2sql/SKILL.md - 技能定义
-- 集成 agent/tools/mcp_client.py
-- 实现 middlewares/query_router.py 查询路由
-
-### Phase 4 - 沙箱 + 安全 (1天)
-- 实现 backends/sandbox_setup.py - 只读沙箱
-- 实现 SQL 执行器 + 超时/限流/安全拦截
-
-### Phase 5 - 反馈闭环 (1-2天)
-- 实现 wrenai_engine/feedback_collector.py
-- 实现 middlewares/sql_feedback.py
-- 实现标注数据存储 + API
-- 实现 wrenai_engine/training_pipeline.py
-
-### Phase 6 - 优化 & 测试 (1天)
-- 端到端测试
-- few-shot 优化
-- HITL (Human-in-the-Loop) 交互完善
-
----
-
-## 待决策事项
-
-1. **WrenAI 部署方式** - 自部署 WrenAI Server 还是使用 WrenAI Cloud？
-2. **目标数据库** - MySQL / PostgreSQL / ClickHouse / 其他？
-3. **标注数据来源** - 有现成的 NL-SQL 标注数据，还是边用边积累？
-4. **SQL 输出形式** - 直接返回表格数据，还是 Agent 用自然语言解释后再展示？
+| 层次 | 技术 |
+|------|------|
+| LLM | DeepSeek / GLM / Kimi（via langchain） |
+| Agent 框架 | deepagents ≥ 0.6.12 |
+| 编排运行时 | LangGraph API ≥ 0.11.1（uvicorn） |
+| MCP 协议 | langchain-mcp-adapters + fastmcp |
+| 语义层 | WrenAI ≥ 0.13.0 |
+| 图表 | Semiotic MCP |
+| 数据库 | MySQL / PG / ClickHouse / SQLite 等 10 种 |
+| 持久化 | AsyncSqliteSaver（checkpoint）+ SQLite（feedback/config） |
+| 可观测性 | LangSmith tracing |
+| 前端 | Next.js + TypeScript + Tailwind CSS（独立项目） |

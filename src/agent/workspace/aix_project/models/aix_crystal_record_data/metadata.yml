@@ -1,0 +1,125 @@
+# aix_crystal_record_data table
+name: aix_crystal_record_data
+table_reference:
+  table: aix_crystal_record_data
+columns:
+- name: id
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 主键uuid
+- name: device_code
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 设备编码
+- name: ip
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: IP地址
+- name: collect_time
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 采集时间--松瓷服务器时间
+- name: operation_time
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 采集时间--炉台的操作时间，上位机时间
+- name: puller_batch_no
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 炉次编号
+- name: ingot_no
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 棒次编号
+- name: curr_furn_batch
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 当前炉次
+- name: proc_stage
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 工艺阶段
+- name: work_order_no
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 工单编号
+- name: curr_rod_count
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 当前棒数
+- name: content
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 内容
+- name: value
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 值
+- name: color
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 颜色
+- name: created_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: 创建时间
+- name: number
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: executed_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+cached: false

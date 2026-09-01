@@ -1,6 +1,0 @@
-{
-  "sql": "SELECT t.primary_title AS 片名, t.average_rating AS 评分\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.num_votes > 10000\n  AND t.average_rating IS NOT NULL\nORDER BY t.average_rating DESC",
-  "optimized_sql": "SELECT t.primary_title AS 片名, t.average_rating AS 评分\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.num_votes > 10000\n  AND t.average_rating IS NOT NULL\nORDER BY t.average_rating DESC",
-  "issues": [],
-  "summary": "共发现 0 个性能问题。SQL 已明确列出所需列，无 SELECT *，无笛卡尔积，无函数包裹列。LIMIT 通过 run_sql 参数控制（符合任务规范），无需在 SQL 中写 LIMIT。"
-}

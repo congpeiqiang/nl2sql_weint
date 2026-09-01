@@ -8,9 +8,12 @@ import agent.subagents.check_progress  # noqa: F401
 import agent.subagents.sync_launcher  # noqa: F401
 # 透传父 run 的 configurable 到异步子 agent run（前端选库 db_name 才能到达子 agent）
 import agent.middlewares.deepagents_async_config_patch
+# 修复 Windows/Py3.13 下 _resolve_path 的 `\\?\` 前缀误报越界（必须早于实例化导入）
+import agent.utils.filesystem_backend_patch  # noqa: F401
 
 from deepagents import create_deep_agent, AsyncSubAgent, DeepAgentState
-from deepagents.backends import FilesystemBackend, CompositeBackend, LocalShellBackend
+from deepagents.backends import FilesystemBackend, CompositeBackend
+from agent.backends.dynamic_workspace import DynamicFilesystemBackend, DynamicLocalShellBackend
 from deepagents.middleware import SkillsMiddleware
 from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from agent.llms.model import deepseek_model
@@ -21,17 +24,41 @@ from agent.middlewares.query_keywords import QueryKeywordsMiddleware
 from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
 from agent.middlewares.message_slimmer import MessageSlimmerMiddleware
 from agent.middlewares.current_db_context import CurrentDbContextMiddleware
+from agent.middlewares.token_meter import TokenMeterMiddleware, _accumulate_token_stats
+from agent.middlewares.trace_recorder import TraceRecorderMiddleware
+from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
+from agent.trace.langfuse_client import get_langfuse_callbacks, get_prompt_text
 from typing import Annotated
 from typing_extensions import NotRequired
 
-# base_dir = Path(r"D:\code_work_space\llm\nl2sql\src\agent").resolve()
 base_dir = Path(__file__).parent.resolve()
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompt" / "MAIN_AGENT_PROMPT.md"
 
+# ── 工作区管理器 ──────────────────────────────────────────
+from agent.workspace_manager import get_workspace_manager
+_wm = get_workspace_manager()
+_shared_memory_dir = _wm.shared_memory_dir
+_shared_skills_dir = _wm.shared_skills_dir
+
 
 def _build_system_prompt() -> str:
-    """根据 CHART_ENGINE 动态构建系统提示词，注入对应图表引擎规范"""
-    base = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    """根据 CHART_ENGINE 动态构建系统提示词，注入对应图表引擎规范。
+
+    M4 版本管理：base prompt 优先从 Langfuse `main_system_prompt`(production) 拉取，
+    失败回退本地文件（get_prompt_text 内部兜底）。{{CHART_SPEC}} 等占位符在拉回的
+    正文里原样保留，下面的替换逻辑不区分来源——Langfuse UI 编辑 → 打 production →
+    重启服务即生效；回滚 = 标签切旧版 或 LANGFUSE_PROMPT_ENABLED=0 强制本地。
+    """
+    # 本地兜底文件存在性防护（M4 评估后新增）：文件缺失时给空串而非抛 FileNotFoundError，
+    # 由 get_prompt_text 的 fallback 语义兜住；required_markers 校验 Langfuse 正文没把
+    # 图表占位符弄丢（否则下方 .replace() 静默 no-op，带着残缺 prompt 上线）。
+    local_fallback = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8") if _SYSTEM_PROMPT_PATH.is_file() else ""
+    base = get_prompt_text(
+        "main_system_prompt",
+        fallback=local_fallback,
+        required_markers=["{{CHART_SPEC}}", "{{CHART_ENGINE_NAME}}", "{{CHART_OUTPUT_FORMAT}}"],
+        min_chars=100,
+    )
     engine = settings.CHART_ENGINE.lower()
 
     # 读取对应引擎的图表规范
@@ -93,12 +120,30 @@ def dynamic_prompt(request: ModelRequest) -> str:
     return prompt
 
 
-file_backend = FilesystemBackend(root_dir=base_dir, virtual_mode=True)
-shell_backend = LocalShellBackend(root_dir=Path(base_dir) / "workspace", inherit_env=True, virtual_mode=True)
-composite_backend = CompositeBackend(default=shell_backend, routes={"/": file_backend})
+# VFS 后端设计（多工作区隔离）：
+# - "/shared/memory/" → shared_memory_backend（共享 memory）
+# - "/shared/skills/" → shared_skills_backend（共享 skills）
+# - "/workspace/"        → workspace_data_backend（当前工作区：report/tmp/process_data 等）
+# - "/"                  → shared_code_backend（代码文件：prompt/settings 等）
+shared_code_backend = FilesystemBackend(root_dir=base_dir, virtual_mode=True)
+shared_memory_backend = FilesystemBackend(root_dir=_shared_memory_dir, virtual_mode=True)
+shared_skills_backend = FilesystemBackend(root_dir=_shared_skills_dir, virtual_mode=True)
+# 动态工作区：每次操作前从 WorkspaceManager 重新解析 root_dir，切换工作区即时生效
+workspace_data_backend = DynamicFilesystemBackend(get_root_dir=lambda: _wm.active_workspace)
+shell_backend = DynamicLocalShellBackend(get_root_dir=lambda: _wm.active_workspace, inherit_env=True)
+
+composite_backend = CompositeBackend(
+    default=shell_backend,
+    routes={
+        "/shared/memory/": shared_memory_backend,
+        "/shared/skills/": shared_skills_backend,
+        "/workspace/": workspace_data_backend,
+        "/": shared_code_backend,
+    },
+)
 skills_middleware = SkillsMiddleware(
-    backend=file_backend,
-    sources=["/workspace/skills/main/"]
+    backend=shared_code_backend,
+    sources=["/shared/skills/main/"]
 )
 # 从运行时 context 读取前端传入的查询关键词，注入系统提示词，
 # 使 LLM 委派判断与前端拦截判断使用同一份关键词。
@@ -107,7 +152,7 @@ query_keywords_middleware = QueryKeywordsMiddleware()
 thinking_toggle_middleware = ThinkingToggleMiddleware()
 # 方案 B L1：工具结果进入 checkpoint 前瘦身——超大结果落盘截断（head+tail 预览 + 路径指针）、
 # 完全重复结果去重为小占位。阈值/开关见 MessageSlimmerMiddleware 构造参数。
-message_slimmer = MessageSlimmerMiddleware(backend=composite_backend)
+message_slimmer = MessageSlimmerMiddleware(backend=composite_backend, max_chars_before_truncate=8_000)
 # 把当前库名（configurable.db_name）注入最新用户消息，作为当轮最高优先级信号，
 # 防止 LLM 被对话历史/总结里过时的库名误导（切库后仍按旧库委派）。
 db_context_middleware = CurrentDbContextMiddleware()
@@ -141,6 +186,8 @@ class MainAgentState(DeepAgentState):
     query_header: NotRequired[dict]        # 查询标题（同步进程写入，不被 write_todos 覆盖）
     subagent_steps: NotRequired[list]      # 子智能体步骤（同步进程写入，不被 write_todos 覆盖）
     query_active: NotRequired[bool]        # 查询进行中标记（前端拦截二次查询依据）
+    # ── Token 计量（累积型：LLM 耗时、输入/输出/缓存/推理 token、步数）──
+    token_stats: Annotated[NotRequired[dict], _accumulate_token_stats]
 
 
 # ── Checkpointer ────────────────────────────────────────────────────
@@ -152,17 +199,39 @@ class MainAgentState(DeepAgentState):
 # _checkpoint_conn = sqlite3.connect(_CHECKPOINT_DB, check_same_thread=False)
 # _checkpointer = SqliteSaver(_checkpoint_conn)
 
+# 模型占位：无前端配置时 deepseek_model 为 None，用占位模型避免 create_deep_agent
+# 走废弃默认模型（claude-sonnet-4-6）。真实模型由 ThinkingToggleMiddleware 每次请求
+# 按 configurable 重建；未配置模型时前端已拦截，此占位不会被真正调用。
+_agent_model = deepseek_model
+if _agent_model is None:
+    from langchain_openai import ChatOpenAI
+
+    _agent_model = ChatOpenAI(
+        api_key="__unconfigured__",
+        base_url="http://127.0.0.1:0",
+        model="__unconfigured__",
+        temperature=0,
+    )
+
+trace_recorder = TraceRecorderMiddleware(
+    db_path=str(_wm.active_workspace / "traces.sqlite"),
+    agent_type="chat_agent",
+)
+
 agent = create_deep_agent(
-    model=deepseek_model,
+    model=_agent_model,
     tools=mcp_tools,
     subagents=[nl2sql_async],
-    memory=["/workspace/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
-    middleware=[skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, dynamic_prompt],
+    memory=["/shared/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
+    middleware=[skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent")],
     backend=composite_backend,
     permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写
     system_prompt=SYSTEM_PROMPT,
     state_schema=MainAgentState,
-).with_config({"recursion_limit": 500})
+).with_config({
+    "recursion_limit": 500,
+    "callbacks": get_langfuse_callbacks(),  # Langfuse 全链路埋点（M1 监控上线；LANGFUSE_ENABLE=false 时空列表）
+})
 
 
 print(f"[MainAgent] ready", flush=True)

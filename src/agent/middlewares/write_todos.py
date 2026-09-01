@@ -1,15 +1,16 @@
-"""WriteTodosProtocolMiddleware — 追加 write_todos 强制协议。
+"""WriteTodosProtocolMiddleware — 追加 write_todos 分级协议。
 
-背景：deepagents 基础栈的 `TodoListMiddleware` 会给最终 system prompt 追加默认指引
+deepagents 基础栈的 `TodoListMiddleware` 会给最终 system prompt 追加默认指引
 `WRITE_TODOS_SYSTEM_PROMPT`，其中明确写着 *"simple/few-step 请求不要用 write_todos"*。
-它追加在项目 system_prompt（「原则 9 进度追踪」的强要求）**之后**，而简单查询
-（如"查表数量"）恰好命中"可跳过"规则 → LLM 判定跳过 → 子线程 todos 为空 →
-前端进度条只能靠 `deriveStepsFromSubMessages` 兜底显示原始工具名（"保存中间结果"/"edit_file"）。
+此前为了前端进度条有数据，使用强硬协议文本压过默认指引，强制所有查询都执行 write_todos。
 
-本中间件必须放在子智能体 `middleware` 列表**末尾**：langchain 组合中间件时
-list 第一个是最外层（[factory.py:240](langchain/agents/factory.py) "first in list becomes
-outermost layer"），最内层后追加的 system 文本落在最终 system prompt 的**末尾**。
-故本协议文本成为最后一条指令，直接压过默认"可跳过"指引。
+但简单查询（策略 B/快速通道）仅为进度条调用 write_todos 会引入额外 LLM 轮次：
+一次 write_todos 初始化 + 1-2 次状态更新，在 qwen3.7-max 等不稳定时刻显著增加延迟。
+前端已有 `deriveStepsFromSubMessages` 兜底（从工具调用序列推导步骤），
+因此策略 B 可安全跳过 write_todos。
+
+本中间件放在子智能体 `middleware` 列表末尾，与 TodoListMiddleware 的默认指引
+兼容共存——策略 A/C 是强要求，策略 B 可跳过。
 
 本文件由 nl2sql_agent.py 引入；主智能体（chat_agent）已有稳定的委派/图表/报告 todos，
 不需要本协议。
@@ -19,22 +20,21 @@ from __future__ import annotations
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import SystemMessage
 
-# 协议文本（追加到 system prompt 末尾；措辞必须压过 TodoListMiddleware 的
-# "simple/few-step 请求不要用"默认说明）
+# 协议文本（追加到 system prompt 末尾；与 TodoListMiddleware 默认指引兼容共存，
+# 而非覆盖——策略 A/C 要求 write_todos，策略 B 可跳过）
 WRITE_TODOS_PROTOCOL = """\
-## `write_todos` 强制协议（必须遵守——覆盖上面"简单任务可跳过"的默认说明）
+## `write_todos` 分级使用指引
 
-在本 NL2SQL 流水线中，`write_todos` 不是可选项，而是硬性要求，**无论问题看起来多简单**（如"有多少张表"）：
+本 NL2SQL 流水线中 `write_todos` 按策略分级使用：
 
-1. **开工前先初始化**：执行任何查询步骤之前，必须先调用一次 `write_todos` 创建完整步骤列表，
-   条目与本次实际经过的流水线阶段一一对应（策略 A 用系统提示词「原则 9」示例的列表；
-   策略 B/C 列出实际经过的阶段）。即使全程只有 1-2 步也必须创建。
-2. **完成一步立即更新**：每完成一个步骤，立刻调用 `write_todos` 将该步置为 `completed`、
-   下一步置为 `in_progress`。禁止攒到流程结束才批量更新。
-3. **content 用阶段名**：todos 的 content 用可读阶段名（如 `Knowledge Loader`、`Schema Linking`、
-   `SQL生成与验证`、`查询执行`），与「原则 9」示例一致，供前端进度条展示。
-
-违反上述任何一条都视为流程缺陷。"""
+1. **策略 A（标准流水线）/ C（Cube 通道）**：步骤多（7-8 步），必须开工前初始化完整步骤列表，
+   每步完成时立即更新。content 用阶段名（如 `Knowledge Loader`、`Schema Linking`、
+   `SQL生成与验证`、`查询执行`）。
+2. **策略 B（快速通道，单表/简单筛选/计数）**：步骤少（≤3 步），可跳过 write_todos——
+   系统会自动从工具调用序列推导进度，无需手动维护。
+3. **禁止为"了解流程"而 read_file 读取 SKILL.md**：系统提示词已包含完整流程，
+   直接开始执行 Step 0。
+"""
 
 
 class WriteTodosProtocolMiddleware(AgentMiddleware):

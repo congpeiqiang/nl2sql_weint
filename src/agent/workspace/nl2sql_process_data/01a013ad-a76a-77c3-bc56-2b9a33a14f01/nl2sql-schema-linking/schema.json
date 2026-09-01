@@ -1,0 +1,26 @@
+{
+  "tables": [
+    {
+      "name": "titles",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "description": "IMDb 唯一作品标识 (tt开头7-8位字符串)"},
+        {"name": "title_type", "type": "VARCHAR", "description": "作品类型: movie/short/tvEpisode/tvSeries/tvMovie/tvMiniSeries/tvSpecial/video/videoGame"},
+        {"name": "primary_title", "type": "VARCHAR", "description": "主要标题 (通常为原始语言标题)"},
+        {"name": "average_rating", "type": "DOUBLE", "description": "IMDb加权平均评分(1.0-10.0)"},
+        {"name": "num_votes", "type": "INTEGER", "description": "用户投票总数"}
+      ]
+    }
+  ],
+  "relations": [],
+  "field_mappings": {
+    "标题": {"table": "titles", "field": "primary_title"},
+    "评分": {"table": "titles", "field": "average_rating"},
+    "电视剧系列": {"table": "titles", "field": "title_type", "value": "tvSeries"},
+    "投票数": {"table": "titles", "field": "num_votes"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "note": "单表查询，仅需 titles 表，无需 JOIN"
+  }
+}

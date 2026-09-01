@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "backgroundColor": "#fff",
+  "title": {
+    "text": "熔接工序采样趋势（D534 / 工单30919652）",
+    "left": "center",
+    "top": "2%"
+  },
+  "tooltip": {
+    "trigger": "axis"
+  },
+  "legend": {
+    "data": [
+      "熔接亮度",
+      "熔液深度"
+    ],
+    "top": "10%"
+  },
+  "grid": {
+    "left": 80,
+    "right": 60,
+    "top": 80,
+    "bottom": 50
+  },
+  "xAxis": {
+    "type": "category",
+    "data": [
+      "12:43:37",
+      "12:43:39",
+      "12:43:41",
+      "12:43:43",
+      "12:43:45",
+      "12:43:47",
+      "12:43:49",
+      "12:43:51",
+      "12:43:53",
+      "12:43:55",
+      "12:43:57",
+      "12:43:59",
+      "12:44:01",
+      "12:44:03",
+      "12:44:05",
+      "12:44:07",
+      "12:44:09",
+      "12:44:11",
+      "12:44:13",
+      "12:44:15"
+    ]
+  },
+  "yAxis": [
+    {
+      "type": "value",
+      "name": "熔接亮度",
+      "min": 60,
+      "max": 61
+    },
+    {
+      "type": "value",
+      "name": "熔液深度(mm)",
+      "min": 612,
+      "max": 614
+    }
+  ],
+  "series": [
+    {
+      "name": "熔接亮度",
+      "type": "line",
+      "data": [
+        60.4,
+        60.4,
+        60.4,
+        60.4,
+        60.4,
+        60.41,
+        60.42,
+        60.43,
+        60.44,
+        60.45,
+        60.46,
+        60.47,
+        60.48,
+        60.49,
+        60.5,
+        60.5,
+        60.5,
+        60.5,
+        60.5,
+        60.5
+      ],
+      "smooth": true
+    },
+    {
+      "name": "熔液深度",
+      "type": "line",
+      "yAxisIndex": 1,
+      "data": [
+        612.8,
+        612.8,
+        612.8,
+        612.8,
+        612.8,
+        612.79,
+        612.78,
+        612.77,
+        612.76,
+        612.75,
+        612.74,
+        612.73,
+        612.72,
+        612.71,
+        612.7,
+        612.7,
+        612.7,
+        612.7,
+        612.7,
+        612.7
+      ],
+      "smooth": true
+    }
+  ]
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

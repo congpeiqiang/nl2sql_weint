@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "backgroundColor": "#fff",
+  "title": {
+    "text": "可信宝藏片 Top 10（评分≥8.5 & 1000≤投票<5000）",
+    "subtext": "按宝藏指数排序（评分/LOG10(投票+1)）",
+    "left": "center",
+    "top": "2%"
+  },
+  "tooltip": {
+    "trigger": "axis",
+    "axisPointer": {
+      "type": "shadow"
+    },
+    "formatter": "{b}<br/>宝藏指数: {c}<br/>评分: {a}<br/>投票数: {d}"
+  },
+  "legend": {
+    "data": [
+      "宝藏指数"
+    ],
+    "top": "10%"
+  },
+  "grid": {
+    "left": 320,
+    "right": 50,
+    "top": 80,
+    "bottom": 50
+  },
+  "xAxis": {
+    "type": "value",
+    "name": "宝藏指数"
+  },
+  "yAxis": {
+    "type": "category",
+    "inverse": true,
+    "data": [
+      "One/4",
+      "Vinara O Vema",
+      "Laggam Time",
+      "Oka Court Case",
+      "Love Oh Love",
+      "Golden Opulence: 500 Years of Luxury in Anatolia",
+      "Vidhrohi",
+      "Bad Girlz",
+      "Krishna Leela",
+      "Janam"
+    ]
+  },
+  "series": [
+    {
+      "name": "宝藏指数",
+      "type": "bar",
+      "data": [
+        3.22,
+        3.17,
+        3.16,
+        2.92,
+        2.91,
+        2.89,
+        2.83,
+        2.81,
+        2.81,
+        2.78
+      ],
+      "itemStyle": {
+        "color": "#d4a017"
+      },
+      "label": {
+        "show": true,
+        "position": "right",
+        "formatter": "{c}"
+      }
+    }
+  ]
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

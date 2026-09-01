@@ -1,0 +1,7 @@
+[
+  {
+    "question": "统计 chinook_aliyun 数据库 artists 表的艺术家数量",
+    "db_name": "chinook_aliyun",
+    "source_trace_id": "a74882ef451b7f1f882cf2a55cb0a6f2"
+  }
+]

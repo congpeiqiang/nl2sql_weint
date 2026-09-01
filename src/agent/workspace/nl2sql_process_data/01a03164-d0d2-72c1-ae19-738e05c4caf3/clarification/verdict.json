@@ -1,0 +1,8 @@
+{
+  "clear": true,
+  "reason": "OK",
+  "original_question": "查询参演了最多不同类型电影的演员 Top 10，显示演员名和涉及的电影类型数",
+  "db_name": "imdb",
+  "issues": [],
+  "assumption": "1) 演员 = principals.category_id IN ('actor','actress')（业务规则二）；2) 电影 = titles.title_type='movie'（业务规则九）；3) 涉及的电影类型数 = 该演员参演过的电影去重后的 genre 数量（通过 titles_genres 关联）；4) Top 10 按类型数降序。"
+}

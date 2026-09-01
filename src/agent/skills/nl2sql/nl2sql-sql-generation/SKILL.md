@@ -1,4 +1,5 @@
 ---
+version: 0.1.0
 name: nl2sql-sql-generation
 description: "触发：根据查询计划生成SQL。策略A：输入业务知识+Schema+子问题详情+查询计划。策略B：输入业务知识+Schema→直接输出SQL。生成后必须 dry_run(sql) 验证。唯一生成SQL的skill。"
 ---
@@ -7,7 +8,7 @@ description: "触发：根据查询计划生成SQL。策略A：输入业务知�
 
 ## 概述
 
-SQL-of-Thought 流水线流水线第2步。唯一生成 SQL 的skill。
+SQL-of-Thought 流水线第5步。唯一生成 SQL 的 skill。
 
 - **策略A**: 接收业务知识+Schema+子问题详情+查询计划 → dry_run 验证 → 修复
 - **策略B**: 接收 业务知识+Schema → 直接生成 SQL → dry_run 验证 → 修复
@@ -17,16 +18,19 @@ SQL-of-Thought 流水线流水线第2步。唯一生成 SQL 的skill。
 - **自动隔离**: 每个会话（thread_id）使用独立的存储目录
 - **依赖数据**: 根据策略读取不同的前置数据
 
-## 输入数据读取
+## 输入
 
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/knowledge-loader/knowledge.json`
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/nl2sql-subproblem/subproblem.json`
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/nl2sql-query-plan/query_plan.txt`
+- 优先从对话上下文中获取前序 Skill 的输出（knowledge-loader / schema-linking / subproblem / query-plan）
+- 若上下文中找不到，则 read_file 对应文件作为 fallback：
+  - `/workspace/nl2sql_process_data/{thread_id}/knowledge-loader/knowledge.json`
+  - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`
+  - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-subproblem/subproblem.json`
+  - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-query-plan/query_plan.txt`
 
 ## 输出
 
-- 必须调用 write_file 写入`/workspace/nl2sql_process_data/{thread_id}/nl2sql-sql-generation/sql.sql`经过 dry_run 验证的可执行 SQL
+- 在回复中直接输出经过 dry_run 验证的可执行 SQL
+- 仅在 SQL >15KB 时 write_file 到 `/workspace/nl2sql_process_data/{thread_id}/nl2sql-sql-generation/sql.sql` 作为 fallback
 
 ## 执行步骤
 

@@ -1,6 +1,0 @@
-{
-  "sql": "SELECT primary_title, average_rating\nFROM titles\nWHERE title_type = 'tvSeries'\n  AND num_votes > 10000\n  AND average_rating IS NOT NULL\nORDER BY average_rating DESC",
-  "optimized_sql": null,
-  "issues": [],
-  "summary": "共发现 0 个性能问题。SQL 已明确列出所需列，无 SELECT *，无笛卡尔积，无子查询，无函数包裹列，无 NOT IN，无 DISTINCT，无 LIKE 通配符，无 OR 条件，且有 ORDER BY。LIMIT 通过 run_sql 的 limit 参数控制（按用户规范不在 SQL 中写 LIMIT）。"
-}

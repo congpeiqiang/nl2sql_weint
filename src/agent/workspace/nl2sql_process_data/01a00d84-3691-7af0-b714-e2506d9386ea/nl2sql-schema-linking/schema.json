@@ -1,0 +1,38 @@
+{
+  "tables": [
+    {
+      "name": "aix_crystal_record_data",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": false, "desc": "主键uuid"},
+        {"name": "device_code", "type": "VARCHAR", "pk": false, "desc": "设备编码（分组维度）"},
+        {"name": "ip", "type": "VARCHAR", "pk": false},
+        {"name": "collect_time", "type": "TIMESTAMP", "pk": false, "desc": "采集时间-松瓷服务器时间"},
+        {"name": "operation_time", "type": "TIMESTAMP", "pk": false, "desc": "采集时间-炉台操作时间"},
+        {"name": "puller_batch_no", "type": "VARCHAR", "pk": false},
+        {"name": "ingot_no", "type": "INTEGER", "pk": false},
+        {"name": "curr_furn_batch", "type": "VARCHAR", "pk": false},
+        {"name": "proc_stage", "type": "VARCHAR", "pk": false},
+        {"name": "work_order_no", "type": "VARCHAR", "pk": false},
+        {"name": "curr_rod_count", "type": "INTEGER", "pk": false},
+        {"name": "content", "type": "VARCHAR", "pk": false, "desc": "内容（过滤条件 content='调温'）"},
+        {"name": "value", "type": "VARCHAR", "pk": false, "desc": "值"},
+        {"name": "color", "type": "VARCHAR", "pk": false},
+        {"name": "created_at", "type": "TIMESTAMP", "pk": false},
+        {"name": "number", "type": "INTEGER", "pk": false},
+        {"name": "executed_at", "type": "TIMESTAMP", "pk": false}
+      ]
+    }
+  ],
+  "relations": [],
+  "field_mappings": {
+    "设备/设备编码": {"table": "aix_crystal_record_data", "field": "device_code"},
+    "内容": {"table": "aix_crystal_record_data", "field": "content"},
+    "值": {"table": "aix_crystal_record_data", "field": "value"}
+  },
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "data_source": "clickhouse",
+    "note": "MDL relationships 为空，无 JOIN；cubes 为空。单表查询。"
+  }
+}

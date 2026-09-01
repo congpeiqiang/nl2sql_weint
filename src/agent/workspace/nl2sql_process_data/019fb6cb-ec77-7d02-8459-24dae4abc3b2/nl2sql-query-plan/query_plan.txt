@@ -1,6 +1,0 @@
-1. 从 titles 表筛选 title_type='movie' 且 primary_title='The Matrix' 的行（定位电影）
-2. 通过 principals.title_id = titles.id 连接到 principals 表
-3. 在 principals 中筛选 category_id IN ('actor', 'actress')（只保留演员）
-4. 通过 principals.name_id = names.id 连接到 names 表
-5. SELECT names.primary_name（演员姓名）和 principals.ordering（角色排序）
-6. 按 principals.ordering ASC 排序（值越小越重要）

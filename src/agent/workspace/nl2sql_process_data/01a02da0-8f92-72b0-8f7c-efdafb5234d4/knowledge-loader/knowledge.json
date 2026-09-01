@@ -1,0 +1,61 @@
+{
+  "user_intent": {
+    "original_question": "列出 chinook 数据库里每个国家客户的平均消费额，按平均消费额降序取前10个国家的名称和金额",
+    "domain": "sales",
+    "keywords": ["国家", "客户", "平均消费额", "前10", "降序"],
+    "intent_type": "query_avg_spend_per_country"
+  },
+  "entities": {
+    "group_by": ["country"],
+    "metric": "avg customer spend",
+    "ordering": "avg spend DESC",
+    "limit_top_n": 10,
+    "fields_to_display": ["国家名称", "平均消费额"]
+  },
+  "metrics": [
+    {
+      "name": "客户平均消费额",
+      "aliases": ["人均消费额", "平均消费额"],
+      "formula": "AVG(每客户消费总额) = AVG(SUM(invoice.total) per customer)",
+      "related_tables": ["customer", "invoice"],
+      "aggregation": "AVG(SUM)"
+    }
+  ],
+  "business_rules": [],
+  "field_mappings": {
+    "国家": "customer.country",
+    "客户": "customer.customerid",
+    "消费额/消费金额": "invoice.total",
+    "客户ID": "customer.customerid"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表关系",
+      "content": "customer.customerid = invoice.customerid（一对多：一个客户多张发票）"
+    },
+    {
+      "topic": "字段说明",
+      "content": "invoice.total 为发票总额（DOUBLE），直接表示客户单笔消费金额；无需关联 invoiceline"
+    },
+    {
+      "topic": "数据说明",
+      "content": "知识库 rules/general.md 仅含模板示例，无 chinook 专属业务规则"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["customer", "invoice"],
+    "main_fields": ["customer.country", "customer.customerid", "invoice.customerid", "invoice.total"],
+    "join_conditions": ["customer.customerid = invoice.customerid"],
+    "group_by": ["customer.country"],
+    "order_by": ["AVG(customer_total) DESC"],
+    "limit": 10
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-01-01T00:00:00",
+    "total_queried": {"metrics": 0, "business_rules": 1, "field_mappings": 0, "knowledge": 1},
+    "filtered_saved": {"metrics": 1, "business_rules": 0, "field_mappings": 4, "knowledge": 2}
+  }
+}

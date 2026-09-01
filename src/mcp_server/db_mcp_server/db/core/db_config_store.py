@@ -33,12 +33,8 @@ _logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
 
-# 默认存储文件位置（相对仓库根，可被 .env 的 DB_CONFIG_PATH 覆盖）
-# 文件位于 src/mcp_server/db_mcp_server/db/core/ → parents[5] 即仓库根
-_DEFAULT_PATH = os.getenv(
-    "DB_CONFIG_PATH",
-    str(Path(__file__).resolve().parents[5] / "src" / "agent" / "workspace" / "db_config.json"),
-)
+# 默认存储文件位置：优先 .env 的 DB_CONFIG_PATH，否则由 WorkspaceManager 动态解析
+_DEFAULT_PATH = os.getenv("DB_CONFIG_PATH", "") or None  # None 表示由 WorkspaceManager 推导
 # 开发回退密钥（.env 未配 DB_CONFIG_SECRET 时使用，仅限本地开发）
 _DEV_FALLBACK_SECRET = "dev-only-db-config-secret-do-not-use-in-prod"
 
@@ -116,7 +112,14 @@ class DbConfigStore:
     """JSON 文件 + 密码加密的数据库配置存储。"""
 
     def __init__(self, path: Optional[str] = None, secret: Optional[str] = None) -> None:
-        self._path = Path(path or _DEFAULT_PATH)
+        if path:
+            self._path = Path(path)
+        elif _DEFAULT_PATH:
+            self._path = Path(_DEFAULT_PATH)
+        else:
+            # 由 WorkspaceManager 动态解析
+            from agent.workspace_manager import get_workspace_manager
+            self._path = get_workspace_manager().db_config_path
         self._path.parent.mkdir(parents=True, exist_ok=True)
         secret = secret or os.getenv("DB_CONFIG_SECRET", "") or _DEV_FALLBACK_SECRET
         if not os.getenv("DB_CONFIG_SECRET"):
@@ -160,14 +163,26 @@ class DbConfigStore:
             return out
 
     def get(self, db_name: str) -> DBConfig:
-        """按 name 取配置（密码已解密）。未找到抛 KeyError。"""
+        """按 name 取配置（密码已解密）。未找到抛 KeyError。
+
+        大小写容错（2026-08-23 串库路由修复）：精确匹配优先，未命中再按
+        忽略大小写匹配。背景：前端下拉传 store 原样名（如 `Chinook_Aliyun`），
+        但脚本/外部调用可能传大小写不同名（如 `chinook_aliyun`）——精确匹配
+        失败会落 .env 兜底报「未配置」，LLM 随即自行探索其它库触发串库级联。
+        统一返回 canonical 配置，下游路由（is_modeled / 工具 db_name）不受影响。
+        """
         with _LOCK:
             raw = self._read_raw()
-            for item in raw.get("databases", []):
-                cfg = DBConfig.from_mapping(item)
-                if cfg.name == db_name:
-                    cfg.password = self._cipher.decrypt(cfg.password)
-                    return cfg
+            items = [DBConfig.from_mapping(item) for item in raw.get("databases", [])]
+            exact = next((c for c in items if c.name == db_name), None)
+            if exact is not None:
+                exact.password = self._cipher.decrypt(exact.password)
+                return exact
+            lower = db_name.lower()
+            ci = next((c for c in items if c.name.lower() == lower), None)
+            if ci is not None:
+                ci.password = self._cipher.decrypt(ci.password)
+                return ci
             raise KeyError(f"数据库 '{db_name}' 未在 db_config.json 中配置")
 
     def get_all_decrypted(self) -> list[DBConfig]:
@@ -196,6 +211,19 @@ class DbConfigStore:
             raw = self._read_raw()
             dbs = raw.get("databases", [])
             existing = next((d for d in dbs if d.get("name") == cfg.name), None)
+            # 大小写容错唯一性（与 get 同口径，2026-08-23）：禁止新增仅大小写
+            # 不同的库名——get() 大小写容错下会两个库名解析歧义、前端下拉重复展示。
+            # 编辑既有库（精确同名）仍走 existing 更新；case-duplicate 直接拒绝。
+            if existing is None:
+                case_dup = next(
+                    (d for d in dbs if d.get("name", "").lower() == (cfg.name or "").lower()),
+                    None,
+                )
+                if case_dup is not None:
+                    raise ValueError(
+                        f"库名 '{cfg.name}' 与已有库 '{case_dup.get('name')}' 仅大小写不同，"
+                        "请使用已有名称或换名"
+                    )
             data = cfg.to_mapping(masked=False)
             # 密码：为空表示保留原密码；否则视为明文需加密
             if cfg.password:
@@ -215,12 +243,37 @@ class DbConfigStore:
             raw = self._read_raw()
             dbs = raw.get("databases", [])
             before = len(dbs)
-            raw["databases"] = [d for d in dbs if d.get("name") != db_name]
+            # 与 get() 同口径（大小写容错）：upsert 已禁止 case-duplicate，故最多一条匹配
+            lower = db_name.lower()
+            raw["databases"] = [
+                d for d in dbs
+                if d.get("name") != db_name and d.get("name", "").lower() != lower
+            ]
             if len(raw["databases"]) == before:
                 return False
             self._write_raw(raw)
             _logger.info("[db_config] 删除数据库 '%s'", db_name)
             return True
+
+    def set_wren_project(self, db_name: str, wren_project: str) -> bool:
+        """仅更新某库的 wren_project 字段（不触碰连接信息/密码）。
+
+        语义库管理（新增/删除语义库）用：把一个库关联到 Wren 项目目录，或置空
+        解绑。相比读整条再 upsert，这里只 patch 单字段，避免误覆盖 host/port 等。
+        未找到该库返回 False。
+        """
+        with _LOCK:
+            raw = self._read_raw()
+            lower = db_name.lower()
+            for item in raw.get("databases", []):
+                if item.get("name") == db_name or item.get("name", "").lower() == lower:
+                    item["wren_project"] = wren_project
+                    self._write_raw(raw)
+                    _logger.info(
+                        "[db_config] '%s' 的 wren_project → %r", db_name, wren_project
+                    )
+                    return True
+            return False
 
     # ── 密钥一致性 ─────────────────────────────────────
     def _ensure_consistent(self) -> None:
@@ -279,14 +332,21 @@ class DbConfigStore:
         return added
 
 
-# 单例（供 agent 进程与 API 进程共用同一文件）
+# 单例（供 agent 进程与 API 进程共用同一文件，支持工作区切换）
 _default_store: Optional[DbConfigStore] = None
+_default_store_path: Optional[str] = None  # 记录上次的工作区路径，变更时重建
 
 
 def get_store() -> DbConfigStore:
-    global _default_store
-    if _default_store is None:
-        _default_store = DbConfigStore()
+    global _default_store, _default_store_path
+    try:
+        from agent.workspace_manager import get_workspace_manager
+        current_path = str(get_workspace_manager().db_config_path)
+    except Exception:
+        current_path = str(_DEFAULT_PATH or "")
+    if _default_store is None or _default_store_path != current_path:
+        _default_store = DbConfigStore(path=current_path if current_path else None)
+        _default_store_path = current_path
         try:
             _default_store._ensure_consistent()
         except Exception as e:  # noqa: BLE001

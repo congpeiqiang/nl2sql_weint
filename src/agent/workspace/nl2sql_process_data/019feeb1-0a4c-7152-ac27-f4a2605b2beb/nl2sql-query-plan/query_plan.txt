@@ -1,7 +1,0 @@
-查询计划：列出时长大于 180 分钟的电影标题和片长，按片长降序排列
-
-1. 从 titles 表（别名 t）中筛选 title_type='movie' 的行（只查电影）
-2. 进一步筛选 runtime_minutes > 180 的行（片长大于180分钟）
-3. 选择列：t.primary_title（电影标题）、t.runtime_minutes（片长）
-4. 按 t.runtime_minutes DESC 排序（片长降序）
-5. 通过 run_sql 的 limit 参数控制返回行数（不写 LIMIT 子句）

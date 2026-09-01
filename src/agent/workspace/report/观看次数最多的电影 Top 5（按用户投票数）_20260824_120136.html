@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+<script>
+// CDN 兜底：主源加载失败时回退到备用源
+if (typeof echarts === 'undefined') {
+  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\/script>');
+}
+</script>
+</head>
+<body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<div id="chart" style="width:100vw;height:100vh;"></div>
+<script>
+(function() {
+  var option = {
+  "backgroundColor": "#fff",
+  "title": {
+    "text": "观看次数最多的电影 Top 5（按用户投票数）",
+    "left": "center",
+    "top": "2%"
+  },
+  "tooltip": {
+    "trigger": "axis",
+    "axisPointer": {
+      "type": "shadow"
+    },
+    "formatter": "{b}<br/>投票数：{c} 次"
+  },
+  "grid": {
+    "left": 260,
+    "right": 80,
+    "top": 60,
+    "bottom": 50
+  },
+  "xAxis": {
+    "type": "value",
+    "name": "投票数（次）"
+  },
+  "yAxis": {
+    "type": "category",
+    "data": [
+      "Shutter Island（禁闭岛）2010",
+      "Joker（小丑）2019",
+      "Django Unchained（被解救的姜戈）2012",
+      "The Dark Knight Rises（黑暗骑士崛起）2012",
+      "Inception（盗梦空间）2010"
+    ]
+  },
+  "series": [
+    {
+      "name": "投票数",
+      "type": "bar",
+      "data": [
+        1663105,
+        1707193,
+        1896015,
+        2007626,
+        2836660
+      ],
+      "itemStyle": {
+        "color": "#f7b500"
+      },
+      "label": {
+        "show": true,
+        "position": "right",
+        "formatter": "{c}"
+      }
+    }
+  ]
+};
+  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
+  chart.setOption(option);
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>

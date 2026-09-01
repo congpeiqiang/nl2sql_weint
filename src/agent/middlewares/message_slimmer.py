@@ -117,12 +117,14 @@ class MessageSlimmerMiddleware(AgentMiddleware):
         self._backend = backend
         self._max_chars_before_truncate = max_chars_before_truncate
 
-        # 超大工具结果落盘目录前缀，与 deepagents FilesystemMiddleware 一致：
-        # CompositeBackend 的 artifacts_root（默认 "/"）+ "large_tool_results"。
+        # 超大工具结果落盘目录前缀。
+        # CompositeBackend 的路由 {"/": file_backend} 会匹配所有以 "/" 开头的路径，
+        # 导致 "/large_tool_results" 落到 file_backend（src/agent/large_tool_results/）。
+        # 改为不以 "/" 开头的相对路径，CompositeBackend 不匹配任何路由，
+        # fallback 到 default（shell_backend），落盘到 workspace/large_tool_results/。
+        # 非 CompositeBackend 时保持原来 "/large_tool_results" 绝对路径。
         if isinstance(backend, CompositeBackend):
-            self._large_tool_results_prefix = (
-                f"{backend.artifacts_root.rstrip('/')}/large_tool_results"
-            )
+            self._large_tool_results_prefix = "large_tool_results"
         else:
             self._large_tool_results_prefix = "/large_tool_results"
 

@@ -1,0 +1,59 @@
+{
+  "tables": [
+    {
+      "name": "principals",
+      "alias": "pd (导演侧) / pa (演员侧)",
+      "columns": [
+        {"name": "id", "type": "INTEGER", "pk": true},
+        {"name": "title_id", "type": "VARCHAR", "fk": "titles.id"},
+        {"name": "name_id", "type": "VARCHAR", "fk": "names.id"},
+        {"name": "ordering", "type": "INTEGER", "note": "1=最主要"},
+        {"name": "category_id", "type": "VARCHAR", "note": "actor/actress/director/..."},
+        {"name": "job_id", "type": "VARCHAR", "fk": "jobs.code", "note": "不用此字段查导演"}
+      ],
+      "usage": "自关联两次：pd 筛选 category_id='director'（导演），pa 筛选 category_id IN ('actor','actress')（演员），通过同一 title_id 关联成对"
+    },
+    {
+      "name": "titles",
+      "alias": "t",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "note": "tt 开头字符串"},
+        {"name": "title_type", "type": "VARCHAR", "note": "必须='movie' 才是电影"},
+        {"name": "primary_title", "type": "VARCHAR"},
+        {"name": "average_rating", "type": "DOUBLE", "note": "IMDb 加权平均分 1.0-10.0"},
+        {"name": "num_votes", "type": "INTEGER", "note": "投票数，可信度指标"}
+      ],
+      "usage": "JOIN 条件 pd.title_id=t.id AND t.title_type='movie'；提供 average_rating 用于 AVG 聚合；num_votes>5000 过滤低可信评分"
+    },
+    {
+      "name": "names",
+      "alias": "d / a",
+      "columns": [
+        {"name": "id", "type": "VARCHAR", "pk": true, "note": "nm 开头字符串"},
+        {"name": "primary_name", "type": "VARCHAR", "note": "人物全名"}
+      ],
+      "usage": "d 关联 pd.name_id（导演名），a 关联 pa.name_id（演员名）"
+    }
+  ],
+  "relations": [
+    {"from": "principals", "from_field": "title_id", "to": "titles", "to_field": "id", "type": "MANY_TO_ONE"},
+    {"from": "principals", "from_field": "name_id", "to": "names", "to_field": "id", "type": "MANY_TO_ONE"}
+  ],
+  "field_mappings": {
+    "导演": {"table": "principals", "field": "category_id='director'"},
+    "演员": {"table": "principals", "field": "category_id IN ('actor','actress')"},
+    "电影": {"table": "titles", "field": "title_type='movie'"},
+    "导演名": {"table": "names", "field": "primary_name"},
+    "演员名": {"table": "names", "field": "primary_name"},
+    "平均评分": {"table": "titles", "field": "average_rating", "aggregation": "AVG"},
+    "合作次数": {"table": "principals/titles", "field": "COUNT(*)", "group": "按(director, actor)分组"},
+    "投票数": {"table": "titles", "field": "num_votes", "filter": "> 5000"}
+  },
+  "join_path": "principals pd JOIN titles t ON pd.title_id=t.id AND t.title_type='movie' JOIN principals pa ON pa.title_id=t.id AND pa.category_id IN ('actor','actress') JOIN names d ON pd.name_id=d.id JOIN names a ON pa.name_id=a.id",
+  "metadata": {
+    "phase": "schema_extracted",
+    "status": "success",
+    "data_source": "mysql",
+    "models_used": ["principals", "titles", "names"]
+  }
+}

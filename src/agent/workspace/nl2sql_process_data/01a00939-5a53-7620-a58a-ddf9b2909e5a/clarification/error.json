@@ -1,0 +1,4 @@
+{
+  "error": "澄清检查跳过",
+  "detail": "Chinook_Aliyun 未在语义层建模（无 wren_project），get_context/get_instructions 语义层工具不可用，判定 clear=true 继续流水线"
+}

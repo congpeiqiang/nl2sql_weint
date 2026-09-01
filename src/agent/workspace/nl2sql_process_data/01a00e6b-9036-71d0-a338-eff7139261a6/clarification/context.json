@@ -1,0 +1,13 @@
+{
+  "strategy": "full",
+  "question": "查询imdb数据库中'宝藏片'有哪些（评价高、投票数较多但相对不太为人所知的高质量电影）",
+  "hit_models": ["titles", "movie_analytics"],
+  "key_columns": ["titles.title_type", "titles.average_rating", "titles.num_votes", "titles.is_adult", "titles.primary_title", "titles.start_year", "titles.runtime_minutes"],
+  "relevant_rules": [
+    "排名类查询应加 num_votes > 10000 过滤（评分可信度规则）",
+    "高分定义为 average_rating >= 8.0（movie_analytics 的 rating_tier 高分(8-10)）",
+    "vote_tier: >=200000 极高热, >=50000 高热, >=10000 中等热度",
+    "title_type='movie' 为长片电影",
+    "评分和投票数已合并到 titles 表（average_rating, num_votes）"
+  ]
+}

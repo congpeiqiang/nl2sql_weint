@@ -453,8 +453,21 @@ nl2sql/
 └── src/
     ├── agent/                     # Agent 核心
     │   ├── main_agent.py          # 主智能体
-    │   ├── nl2sql_agent.py        # NL2SQL 子智能体
-    │   ├── checkpointer_factory.py # 自定义 Checkpointer（SqliteSaver）
+    │   ├── graphs/                # Agent 图定义
+    │   │   └── nl2sql_agent.py    # NL2SQL 子智能体
+    │   ├── checkpoint/            # 持久化
+    │   │   └── checkpointer_factory.py # 自定义 Checkpointer（AsyncSqliteSaver）
+    │   ├── workspace_manager/     # 多工作区管理
+    │   │   ├── __init__.py        # 重导出（向后兼容）
+    │   │   ├── manager.py         # WorkspaceManager 单例
+    │   │   └── workspaces.json    # 工作区注册表
+    │   ├── workspace/             # 默认工作区数据目录（checkpoint/feedback/report 等）
+    │   ├── shared/                # 共享资源（所有工作区共用）
+    │   │   ├── memory/            # 长期记忆（AGENTS.md / ORCHESTRATOR.md）
+    │   │   ├── skills/            # 技能定义（SKILL.md）
+    │   │   │   ├── main/          # 主智能体技能
+    │   │   │   └── nl2sql/        # NL2SQL 技能
+    │   │   └── model_config.json  # 模型配置（加密，gitignore）
     │   ├── llms/model.py          # LLM 模型工厂
     │   ├── tools/mcp_tool.py      # MCP 多服务器客户端
     │   ├── prompt/                # 系统提示词
@@ -464,12 +477,11 @@ nl2sql/
     │   │   ├── configs/nl2sql.yaml    # 子智能体配置
     │   │   ├── track_progress.py      # 进度追踪中间件
     │   │   └── check_progress.py      # check_async_task 增强补丁
-    │   ├── skills/                # 技能定义（SKILL.md）
-    │   │   ├── main/              # 主智能体技能
-    │   │   └── nl2sql/            # NL2SQL 技能（6 个）
     │   ├── backends/              # 沙箱后端
+    │   ├── middlewares/           # 中间件
+    │   ├── feedback/              # 反馈存储
     │   ├── utils/path_resolver.py # 工具包装器
-    │   └── workspace/             # 运行时工作空间
+    │   └── settings/              # 配置与权限
     │
     └── mcp_server/                # 独立 DB MCP 服务器
         └── db_mcp_server/
@@ -512,7 +524,7 @@ cp .env.example .env
 # 编辑 .env 填入 LLM API Key、数据库连接信息等
 ```
 
-### 启动
+### 后端启动
 
 ```bash
 python start_server.py
@@ -532,6 +544,29 @@ python start_server.py
 ```bash
 langgraph dev --port 2026
 ```
+
+### 前端启动
+
+前端位于独立仓库 `D:\code_work_space\llm\huice\008\harness-deep-agents-ui`，通过界面「设置」里的 Deployment URL 指向本后端（`http://localhost:2026`）。
+
+**开发模式**（日常开发）：
+
+```bash
+cd D:\code_work_space\llm\huice\008\harness-deep-agents-ui
+npm run dev        # http://localhost:3000，热更新，左下角有 Next.js「N」开发工具按钮
+```
+
+**生产模式**（查看效果 / 部署）：
+
+```bash
+npm run build      # 构建生产产物到 .next
+npm run start      # 默认 http://localhost:3000；撞端口用 npm run start -- -p 3001
+```
+
+> 注意：
+> - `next build` 会覆盖 `.next`，与 dev server 共用该目录，别同时 build 和 dev（或 build 后重启 dev）。
+> - 前端 `next.config.ts` 当前临时加了 `typescript.ignoreBuildErrors: true`，用于绕过 DLP 加密行遗留的 `@ts-expect-error` 类型错误；只影响 build，不影响 dev。
+> - 详见前端仓库 `docs/启动方式.md`。
 
 ## 配置
 
@@ -562,11 +597,11 @@ WREN_PROJECT_PATH=D:\path\to\wrenai_project
 {
   "graphs": {
     "chat_agent":   { "path": "./src/agent/main_agent.py:agent" },
-    "nl2sql_agent": { "path": "./src/agent/nl2sql_agent.py:agent" }
+    "nl2sql_agent": { "path": "./src/agent/graphs/nl2sql_agent.py:agent" }
   },
   "checkpointer": {
     "backend": "custom",
-    "path": "./src/agent/checkpointer_factory.py:checkpointer"
+    "path": "./src/agent/checkpoint/checkpointer_factory.py:checkpointer"
   },
   "env": ".env"
 }
@@ -583,16 +618,25 @@ WREN_PROJECT_PATH=D:\path\to\wrenai_project
 - `langgraph_api` 是纯异步运行时，checkpointer **必须实现异步方法**（`aput`、`aget_tuple` 等）。同步 `SqliteSaver` 会抛出 `NotImplementedError`，必须使用 `AsyncSqliteSaver`。
 - 如果使用自定义启动脚本（如 `start_server.py`），需要从 `graph.json` 读取 `checkpointer` 字段并设置 `LANGGRAPH_CHECKPOINTER` 环境变量，否则 API 层不会加载自定义 checkpointer。
 
-**checkpointer_factory.py 示例**（AsyncSqlite）：
+**checkpointer_factory.py 示例**（AsyncSqlite，支持多工作区）：
 
 ```python
 from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from agent.settings.setting import settings
 
-_CHECKPOINT_DB = str(Path(__file__).parent / "workspace" / "checkpoints.sqlite")
+def _resolve_checkpoint_path() -> str:
+    base = settings.CHECKPOINT_DB_PATH
+    if base:
+        return os.path.join(base, "checkpoints.sqlite")
+    from agent.workspace_manager import get_workspace_manager
+    wm = get_workspace_manager()
+    wm.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    return str(wm.checkpoint_dir / "checkpoints.sqlite")
+
+_CHECKPOINT_DB = _resolve_checkpoint_path()
 
 # 导出异步上下文管理器，langgraph_api 的 _yield_checkpointer() 会自动处理
-# AsyncSqliteSaver 会自动调用 setup() 创建数据库表
 checkpointer = AsyncSqliteSaver.from_conn_string(_CHECKPOINT_DB)
 ```
 

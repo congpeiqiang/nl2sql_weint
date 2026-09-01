@@ -22,6 +22,8 @@ import json
 import logging
 import os
 import re
+import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from langchain.agents.middleware import AgentMiddleware
@@ -54,6 +56,18 @@ TOOL_SKILL_MAP = {
 
 # 中间产物 VFS 前缀：{active_workspace}/nl2sql_process_data/{thread_id}/{skill}/...
 VFS_PROCESS_DATA_PREFIX = "/workspace/nl2sql_process_data/"
+
+# 服务端代写中间产物开关（NL2SQL_PROCESS_DATA_DUMP，默认开）：
+# 上下文优先设计下模型不一定 write_file，但 span 已捕获工具 input/output，
+# 这里在工具调用边界直接把中间产物落到磁盘，让 vfs_dir 指向的目录真实存在、
+# 可排查。走磁盘写不走模型，0 额外 LLM 往返，延迟影响≈毫秒级。
+_DUMP_ENABLED = (os.getenv("NL2SQL_PROCESS_DATA_DUMP", "1") or "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+# 单字段（input/output）大小上限：超过则只存截断标记 + 头部，防病理大结果撑爆磁盘
+_DUMP_MAX_BYTES = 8 * 1024 * 1024
+# 不 dump 的文件类工具（write_file/read_file 产物本身已落盘，不重复代写）
+_DUMP_SKIP_HEURISTIC = ("artifact-write", "artifact-read")
 
 # span output 截断阈值（与 MessageSlimmerMiddleware 读同一环境变量
 # LARGE_RESULT_TRUNCATE_CHARS，默认 8000）：超过才进 vfs 占位。
@@ -441,6 +455,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                               exec_thread=exec_thread, error=e)
             raise
         self._finish_span(span, result, tool_name, _tool_call_id(request))
+        self._dump_process_data(tool_name, args, result, thread_id, display, heuristic)
         self._maybe_score(tool_name, heuristic, args, result, ok=True, span=span,
                           exec_thread=exec_thread, error="")
         return result
@@ -465,6 +480,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                               exec_thread=exec_thread, error=e)
             raise
         self._finish_span(span, result, tool_name, _tool_call_id(request))
+        self._dump_process_data(tool_name, args, result, thread_id, display, heuristic)
         self._maybe_score(tool_name, heuristic, args, result, ok=True, span=span,
                           exec_thread=exec_thread, error="")
         return result
@@ -699,6 +715,44 @@ class LangfuseSpanMiddleware(AgentMiddleware):
         except Exception:  # noqa: BLE001
             pass
 
+    def _dump_process_data(self, tool_name: str, args: dict, result: Any,
+                           thread_id: str, skill: str, heuristic: str) -> None:
+        """服务端把中间产物落盘（0 模型开销，替代模型 write_file 的高成本方案）。
+
+        上下文优先设计下模型不一定 write_file，但工具调用边界 span 已捕获完整
+        input/output——这里直接代写为 process_data/{thread}/{skill}/{tool}-{seq}.json，
+        让 vfs_dir 指向的目录真实存在、可排查。纯磁盘写（毫秒级），失败仅 debug，
+        不影响工具执行。目录名/文件名与 span metadata 的 vfs_dir 同源（同一 display skill）。
+        """
+        if not _DUMP_ENABLED or not thread_id or not skill:
+            return
+        if heuristic in _DUMP_SKIP_HEURISTIC:
+            return  # 文件类工具产物本身已落盘，不重复
+        try:
+            root = _active_workspace_path()
+            if not root:
+                return
+            skill_dir = Path(root) / "nl2sql_process_data" / thread_id / skill
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            seq = 1
+            try:
+                seq = len([f for f in skill_dir.iterdir() if f.suffix == ".json"]) + 1
+            except Exception:  # noqa: BLE001
+                seq = 1
+            payload = {
+                "tool": tool_name,
+                "skill": skill,
+                "heuristic": heuristic,
+                "thread_id": thread_id,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "input": _cap_json(args, _DUMP_MAX_BYTES),
+                "output": _cap_json(_result_payload(result), _DUMP_MAX_BYTES),
+            }
+            blob = json.dumps(payload, ensure_ascii=False, default=str)
+            (skill_dir / f"{tool_name}-{seq}.json").write_text(blob, encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[langfuse_span] process_data dump 失败: %s", e)
+
 
 def _compact(data: Any, limit: int) -> Any:
     """截断大 dict/list，避免 span input 撑爆。"""
@@ -712,3 +766,37 @@ def _compact(data: Any, limit: int) -> Any:
     except Exception:  # noqa: BLE001
         return str(data)[:limit]
     return data
+
+
+def _cap_json(value: Any, limit: int) -> Any:
+    """值序列化后超限 → 替换为截断标记 + 头部（保持文件是合法 JSON）。"""
+    try:
+        s = json.dumps(value, ensure_ascii=False, default=str)
+        if len(s) <= limit:
+            return value
+        return {"_truncated": True, "size_chars": len(s), "head": s[:2000]}
+    except Exception:  # noqa: BLE001
+        return str(value)[:limit]
+
+
+def _active_workspace_path() -> str:
+    """读当前请求的 active workspace 磁盘路径。
+
+    优先读 config.metadata.workspace.path（LangfuseMetadataMiddleware 注入的
+    请求级权威值，磁盘路径）；无则回退 workspace_manager 的 active workspace。
+    """
+    try:
+        from langgraph.config import get_config as _lg_get_config
+        cfg = _lg_get_config()
+        if cfg:
+            ws = (cfg.get("metadata") or {}).get("workspace") or {}
+            p = ws.get("path") if isinstance(ws, dict) else ""
+            if p:
+                return str(p)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from agent.workspace_manager import get_workspace_manager
+        return str(get_workspace_manager().active_workspace)
+    except Exception:  # noqa: BLE001
+        return ""

@@ -1,6 +1,0 @@
-{
-  "sql": "SELECT \n  t.start_year AS year,\n  COUNT(*) AS movie_count,\n  ROUND((COUNT(*) - LAG(COUNT(*)) OVER (ORDER BY t.start_year)) * 100.0 / LAG(COUNT(*)) OVER (ORDER BY t.start_year), 2) AS growth_rate\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 2000 AND 2023\n  AND t.start_year IS NOT NULL\nGROUP BY t.start_year\nORDER BY t.start_year ASC",
-  "optimized_sql": "SELECT \n  t.start_year AS year,\n  COUNT(*) AS movie_count,\n  ROUND((COUNT(*) - LAG(COUNT(*)) OVER (ORDER BY t.start_year)) * 100.0 / LAG(COUNT(*)) OVER (ORDER BY t.start_year), 2) AS growth_rate\nFROM titles t\nWHERE t.title_type = 'movie'\n  AND t.start_year BETWEEN 2000 AND 2023\n  AND t.start_year IS NOT NULL\nGROUP BY t.start_year\nORDER BY t.start_year ASC",
-  "issues": [],
-  "summary": "共发现 0 个性能问题。SQL 已明确列出所需列（无 SELECT *），无 JOIN（无笛卡尔积风险），WHERE 条件未用函数包裹列（start_year BETWEEN 范围查询可用索引），聚合查询（GROUP BY）无需 LIMIT，且按任务规范通过 run_sql 的 limit 参数控制行数。SQL 无需优化。"
-}

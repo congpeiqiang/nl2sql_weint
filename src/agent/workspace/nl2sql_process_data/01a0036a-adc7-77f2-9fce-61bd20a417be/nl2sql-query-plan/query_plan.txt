@@ -1,0 +1,23 @@
+查询计划：炉台D330调温阶段页面亮度数据
+
+1. 从 aix_crystal_comm_data 表筛选数据
+   - 条件1: device_code = 'D330' (炉台D330)
+   - 条件2: proc_stage = '调温' (调温阶段)
+
+2. 选择需要返回的字段
+   - collect_time: 采集时间
+   - melt_bright: 熔接亮度
+   - shoulder_rel_bright: 放肩亮度
+   - proc_stage: 工艺阶段
+   - puller_batch_no: 炉次编号
+   - ingot_no: 棒次编号
+
+3. 按采集时间倒序排序
+   - ORDER BY collect_time DESC
+
+4. 通过 run_sql 的 limit 参数控制返回行数
+
+说明：
+- "页面亮度"在数据库中对应两个字段：melt_bright(熔接亮度) 和 shoulder_rel_bright(放肩亮度)
+- aix_crystal_record_data 表中没有"页面亮度"相关的 content 记录
+- 数据采样频率约为每2秒一条记录

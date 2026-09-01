@@ -1,0 +1,124 @@
+{
+  "user_intent": {
+    "original_question": "查询\"宝藏片\"有哪些？可能指评分高但相对冷门的电影（hidden gem），根据评分、投票数等指标分析哪些电影可被认为是宝藏片",
+    "domain": "imdb_movie_ratings",
+    "keywords": ["宝藏片", "评分高", "冷门", "hidden gem", "投票数", "average_rating", "num_votes"],
+    "intent_type": "query_hidden_gems"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "titles.title_type", "operator": "=", "value": "movie"},
+      {"field": "titles.average_rating", "operator": ">=", "value": 8.5},
+      {"field": "titles.num_votes", "operator": "<", "value": 5000}
+    ],
+    "fields_to_display": ["primary_title", "start_year", "average_rating", "num_votes"]
+  },
+  "metrics": [
+    {
+      "name": "宝藏片指数 (Hidden Gem Score)",
+      "aliases": ["宝藏片", "hidden gem", "被忽视的好片"],
+      "formula": "average_rating / LOG10(num_votes + 1)",
+      "threshold": "rating >= 8.5 AND votes < 5000",
+      "related_tables": ["titles"],
+      "aggregation": "none (per-row)"
+    },
+    {
+      "name": "平均评分",
+      "aliases": ["评分", "rating"],
+      "formula": "titles.average_rating",
+      "related_tables": ["titles"],
+      "aggregation": "per-row value, range 1.0-10.0"
+    },
+    {
+      "name": "投票数",
+      "aliases": ["票数", "votes", "num_votes"],
+      "formula": "titles.num_votes",
+      "related_tables": ["titles"],
+      "aggregation": "per-row value, 越高越可信"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "rule_gem_001",
+      "name": "宝藏片定义",
+      "condition": "titles.average_rating >= 8.5 AND titles.num_votes < 5000",
+      "source": "glossary/imdb_glossary.md + metrics/imdb_metrics.md (6.2)"
+    },
+    {
+      "id": "rule_type_001",
+      "name": "电影类型过滤",
+      "condition": "titles.title_type = 'movie'",
+      "source": "rules/general.md 一"
+    },
+    {
+      "id": "rule_votes_001",
+      "name": "评分可信度",
+      "condition": "num_votes >= 1000 基本可信；< 1000 评分偏差大；排名类查询推荐 num_votes > 10000（但宝藏片定义明确用 < 5000）",
+      "source": "rules/general.md 三"
+    }
+  ],
+  "field_mappings": {
+    "电影标题": "titles.primary_title",
+    "上映年份": "titles.start_year",
+    "评分": "titles.average_rating",
+    "投票数": "titles.num_votes",
+    "宝藏片指数": "titles.average_rating / LOG10(titles.num_votes + 1)"
+  },
+  "historical_qa_pairs": [
+    {
+      "id": "hqa_seed_001",
+      "original_question": "高分电影 Top N（含贝叶斯校正）",
+      "sql": "WITH global_avg AS (SELECT AVG(average_rating) AS avg_rating FROM titles WHERE title_type = 'movie' AND num_votes > 1000) SELECT t.primary_title, t.start_year, t.average_rating, t.num_votes, ROUND((t.num_votes * t.average_rating + 1000 * g.avg_rating) / (t.num_votes + 1000), 4) AS bayesian_rating FROM titles t CROSS JOIN global_avg g WHERE t.title_type = 'movie' AND t.num_votes > 1000 AND t.start_year >= 2000 AND t.average_rating IS NOT NULL ORDER BY bayesian_rating DESC LIMIT 20",
+      "intent_type": "top_rated_movies",
+      "similarity_score": 0.35
+    }
+  ],
+  "knowledge": [
+    {
+      "topic": "宝藏片定义",
+      "content": "宝藏片 = 被忽视的好片，定义：rating >= 8.5 AND votes < 5000；宝藏片指数 Hidden Gem Score = average_rating / LOG10(num_votes + 1)"
+    },
+    {
+      "topic": "评分可信度",
+      "content": "投票数 < 1000 评分偏差大不建议排名；>= 10000 较可信推荐排行榜；但宝藏片本身是\"高评分低关注\"，使用 votes < 5000 下限需注意可信度平衡"
+    },
+    {
+      "topic": "表关系",
+      "content": "titles 表包含 average_rating 和 num_votes 列（IMDb 反规范化），查询评分类需求单表即可；title_type = 'movie' 才是电影"
+    },
+    {
+      "topic": "NULL 处理",
+      "content": "start_year 可能为 NULL，建议 WHERE start_year IS NOT NULL；average_rating IS NOT NULL 需过滤"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["titles"],
+    "main_fields": ["titles.primary_title", "titles.start_year", "titles.average_rating", "titles.num_votes"],
+    "filter_conditions": [
+      "titles.title_type = 'movie'",
+      "titles.average_rating >= 8.5",
+      "titles.num_votes < 5000",
+      "titles.average_rating IS NOT NULL",
+      "titles.start_year IS NOT NULL"
+    ],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "business_rules": 1,
+      "metrics": 1,
+      "field_mappings": 1,
+      "knowledge": 4
+    },
+    "filtered_saved": {
+      "business_rules": 3,
+      "metrics": 3,
+      "field_mappings": 5,
+      "knowledge": 4
+    }
+  }
+}

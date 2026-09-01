@@ -1,0 +1,62 @@
+{
+  "user_intent": {
+    "original_question": "查询炉台D330等径阶段的温度数据（包括温度随时间的变化记录，如有时间字段请返回）",
+    "domain": "crystal_growth",
+    "keywords": ["炉台", "D330", "等径阶段", "温度", "时间"],
+    "intent_type": "query_temperature_timeseries"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [
+      {"field": "device_code", "operator": "=", "value": "D330", "desc": "炉台编号/设备编码"},
+      {"field": "proc_stage", "operator": "=", "value": "等径", "desc": "工艺阶段，具体取值待确认"}
+    ],
+    "fields_to_display": ["collect_time", "温度字段(act_therm_field_temp/act_liq_lvl_temp/liq_lvl_pyro等)", "proc_stage", "device_code"]
+  },
+  "metrics": [],
+  "business_rules": [],
+  "field_mappings": {
+    "炉台D330": "aix_crystal_comm_data.device_code = 'D330'",
+    "等径阶段": "aix_crystal_comm_data.proc_stage（工艺阶段，取值待确认）",
+    "采集时间": "aix_crystal_comm_data.collect_time (TIMESTAMP)",
+    "实际热场温度": "aix_crystal_comm_data.act_therm_field_temp",
+    "实际液面温度": "aix_crystal_comm_data.act_liq_lvl_temp",
+    "液面高温计": "aix_crystal_comm_data.liq_lvl_pyro",
+    "主真空管1温度": "aix_crystal_comm_data.main_vac_t1_temp",
+    "主真空管2温度": "aix_crystal_comm_data.main_vac_t2_temp"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "模型说明",
+      "content": "aix_crystal_comm_data 为晶体生长通用采集数据表，按设备+采集时间记录工艺参数，proc_stage 为工艺阶段（含等径等阶段），多个温度字段以℃为单位"
+    },
+    {
+      "topic": "字段说明",
+      "content": "collect_time 为采集时间(TIMESTAMP)，可用于温度随时间变化的时间序列排序"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["aix_crystal_comm_data"],
+    "main_fields": ["device_code", "collect_time", "proc_stage", "act_therm_field_temp", "act_liq_lvl_temp", "liq_lvl_pyro"],
+    "filter_conditions": ["device_code = 'D330'", "proc_stage = 等径阶段"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-29T00:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 1,
+      "field_mappings": 0,
+      "knowledge": 0
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 6,
+      "knowledge": 2
+    }
+  }
+}

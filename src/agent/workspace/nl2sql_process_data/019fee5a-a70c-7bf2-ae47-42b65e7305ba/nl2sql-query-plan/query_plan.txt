@@ -1,6 +1,0 @@
-1. 从 titles 表（别名 t）中筛选 title_type='movie' 的电影记录
-2. 过滤掉 average_rating 为 NULL 的记录（评分无效）
-3. 过滤掉 num_votes <= 10000 的记录（评分可信度过滤，排名类查询需 num_votes > 10000）
-4. 选择字段：t.primary_title（片名）、t.average_rating（评分）
-5. 按 t.average_rating DESC 降序排序（评分从高到低）
-6. 取前 10 行作为最终结果

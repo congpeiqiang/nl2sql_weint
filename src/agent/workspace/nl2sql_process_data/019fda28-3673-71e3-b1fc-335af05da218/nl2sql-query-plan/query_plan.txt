@@ -1,9 +1,0 @@
-查询计划：评分最高的 10 部电视剧系列（显示标题和评分）
-
-1. 从 titles 表查询数据
-2. 筛选 title_type = 'tvSeries'（电视剧系列）
-3. 应用评分可信度过滤：num_votes > 10000
-4. 排除无评分记录：average_rating IS NOT NULL
-5. 选择字段：primary_title（标题）、average_rating（评分）
-6. 按 average_rating DESC 排序（评分从高到低）
-7. 取前 10 行（通过 run_sql 的 limit 参数控制，不在 SQL 中写 LIMIT）

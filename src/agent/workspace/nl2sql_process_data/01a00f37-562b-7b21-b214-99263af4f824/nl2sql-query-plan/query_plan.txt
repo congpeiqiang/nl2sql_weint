@@ -1,0 +1,10 @@
+# 查询计划：artist 表记录总数
+
+目标：统计 Chinook_Aliyun（PostgreSQL）中 artist 表的行数，即艺术家数量。
+
+1. 数据源：artist 表（public schema，直连通道 dbmcp_run_sql，PostgreSQL 方言）
+2. 无需任何 JOIN / WHERE / GROUP BY —— 全表行数统计
+3. 聚合方式：COUNT(*)（对整表计数，等价于艺术家记录总数）
+4. 结果列：单一计数列（artist_count）
+5. SQL 中不写 LIMIT；返回行数由 run_sql 的 limit 参数控制（本查询仅返回 1 行）
+6. 执行前用 dry_run 验证 SQL 语法正确性

@@ -1,0 +1,53 @@
+{
+  "user_intent": {
+    "original_question": "从 Album 表中随机删除一条数据（注意：删除是不可逆操作，务必只删除一条记录；可先 SELECT 确认待删除记录，再执行 DELETE）",
+    "domain": "dml_delete",
+    "keywords": ["Album", "删除", "随机", "一条"],
+    "intent_type": "delete_random_record"
+  },
+  "entities": {
+    "target_table": "album",
+    "operation": "DELETE",
+    "scope": "random single row, irreversible",
+    "filters": [],
+    "fields_to_display": []
+  },
+  "metrics": [],
+  "business_rules": [],
+  "field_mappings": {},
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "知识库覆盖范围",
+      "content": "当前知识库仅包含 aix_project 与 imdb_project 的知识文件，无 Chinook_Aliyun 相关业务规则、指标、术语表或历史问答对，本步骤无可过滤加载的业务知识。"
+    },
+    {
+      "topic": "数据库类型",
+      "content": "Chinook_Aliyun 为 PostgreSQL 数据库，直连通道执行（dbmcp_run_sql）。"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["album"],
+    "main_fields": [],
+    "filter_conditions": [],
+    "time_range": null,
+    "notes": "DELETE 为不可逆操作，执行前必须先 SELECT 确认待删除记录，且必须保证只删除一条。"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 0,
+      "knowledge": 0
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 0,
+      "knowledge": 2
+    }
+  }
+}

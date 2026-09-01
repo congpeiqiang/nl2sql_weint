@@ -1,0 +1,35 @@
+{
+  "01a021f8-8b29-7b02-a2dc-355608b0cf55": {
+    "count": 93,
+    "names": [
+      "AnthropicPromptCachingMiddleware.awrap_model_call",
+      "AsyncSubAgentMiddleware.awrap_model_call",
+      "ChatDeepSeek",
+      "CurrentDbContextMiddleware.awrap_model_call",
+      "FilesystemMiddleware.awrap_model_call",
+      "FilesystemMiddleware.awrap_tool_call",
+      "MemoryMiddleware.awrap_model_call",
+      "MemoryMiddleware.before_agent",
+      "MessageSlimmerMiddleware.awrap_tool_call",
+      "PatchToolCallsMiddleware.before_agent",
+      "QueryKeywordsMiddleware.awrap_model_call",
+      "SkillsMiddleware.awrap_model_call",
+      "SkillsMiddleware.before_agent",
+      "SubAgentMiddleware.awrap_model_call",
+      "SummarizationMiddleware.awrap_model_call",
+      "ThinkingToggleMiddleware.awrap_model_call",
+      "TodoListMiddleware.after_model",
+      "TodoListMiddleware.awrap_model_call",
+      "TokenMeterMiddleware.awrap_model_call",
+      "chat_agent",
+      "dynamic_prompt.awrap_model_call",
+      "execute",
+      "model",
+      "read_file",
+      "tools",
+      "write_file"
+    ],
+    "start": "2026-08-21T01:38:52.674831+00:00",
+    "end": "2026-08-21T01:40:43.598811+00:00"
+  }
+}

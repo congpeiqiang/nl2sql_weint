@@ -17,14 +17,118 @@ import logging
 import re
 import time as _time
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Optional
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import InjectedToolArg
+from pydantic import BaseModel, Field
 
 _logger = logging.getLogger(__name__)
 
 _PATCHED = False
+
+
+# ── P1-7 增量读取（since/cursor）─────────────────────────────────────
+# check_async_task 加可选 `since` 游标：传上一次返回的 cursor，只回之后的新消息，
+# 避免每次都把子线程全部消息摘要塞进主 agent 上下文（对齐 dsh job_output 增量读取）。
+class CheckAsyncTaskSinceSchema(BaseModel):
+    """check_async_task 输入 schema（增加可选 since 游标）。"""
+
+    task_id: str = Field(
+        description="The exact task_id string returned by start_async_task. Pass it verbatim."
+    )
+    since: Optional[int] = Field(
+        default=None,
+        description=(
+            "Optional message cursor for incremental reads: pass the `cursor` value "
+            "returned by a previous check to get only messages added since then. "
+            "Omit for a normal full status check."
+        ),
+    )
+
+
+# 每条增量消息内容截断上限 / 单次最多返回条数（防大结果撑爆主 agent 上下文）
+_INCREMENTAL_MAX_CHARS = 800
+_INCREMENTAL_MAX_ITEMS = 20
+
+
+def _brief_message(msg) -> dict:
+    """把一条子线程消息压成精简 dict（role + 截断 content）。"""
+    if not isinstance(msg, dict):
+        return {"role": "unknown", "content": str(msg)[:_INCREMENTAL_MAX_CHARS]}
+    role = msg.get("role") or msg.get("type") or "unknown"
+    content = msg.get("content", "")
+    if not isinstance(content, str):
+        content = str(content)
+    return {"role": role, "content": content[:_INCREMENTAL_MAX_CHARS]}
+
+
+# ── 结果摘要化（P0：减少主 agent LLM 输入 token）─────────────────────
+_MAX_RESULT_CHARS = 2000      # 结果内容最大字符数
+_MAX_RESULT_ROWS = 20         # SQL 表格结果最多保留行数
+
+
+def _summarize_result(content: str) -> str:
+    """智能摘要子 agent 返回的结果内容，保留结构信息、截断数据行。
+
+    确保 LLM 能判断是否需要图表，同时避免 34k+ tokens 的 prompt 膨胀。
+    """
+    if len(content) <= _MAX_RESULT_CHARS:
+        return content
+
+    # ── 1. 检测 SQL 表格结果（Markdown 表格格式） ──
+    lines = content.split("\n")
+    table_lines = [l for l in lines if l.strip().startswith("|")]
+    if len(table_lines) >= 3:  # 至少有 header + separator + 1 行数据
+        header = table_lines[0]
+        sep = table_lines[1] if len(table_lines) > 1 else ""
+        data_rows = table_lines[2:]
+        kept = data_rows[:_MAX_RESULT_ROWS]
+        suffix = (
+            f"\n\n*(共 {len(data_rows)} 行数据，以上展示前 {len(kept)} 行；"
+            f"完整结果可通过 check_async_task 增量读取获取)*"
+        )
+        summary = header + "\n" + sep + "\n" + "\n".join(kept) + suffix
+        return summary
+
+    # ── 2. 检测 JSON 数组结果 ──
+    try:
+        data = json.loads(content)
+        if isinstance(data, list) and len(data) > 0:
+            kept = data[:_MAX_RESULT_ROWS]
+            summary = json.dumps(kept, ensure_ascii=False, indent=2)
+            summary += (
+                f"\n\n*(共 {len(data)} 条记录，以上展示前 {len(kept)} 条；"
+                f"完整结果可通过 check_async_task 增量读取获取)*"
+            )
+            return summary
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # ── 3. 普通文本：保留头尾 ──
+    head = content[:_MAX_RESULT_CHARS // 2]
+    tail = content[-(_MAX_RESULT_CHARS // 2):]
+    return f"{head}\n\n...({len(content)} 字符，中间已省略；完整结果可通过 check_async_task 增量读取获取)...\n\n{tail}"
+
+
+def _add_incremental(result: dict, thread_values: dict, since: Optional[int]) -> None:
+    """给 check 结果附加 cursor；since 给定时只回该游标之后的新消息。"""
+    messages = (
+        thread_values.get("messages", [])
+        if isinstance(thread_values, dict)
+        else []
+    )
+    result["cursor"] = len(messages)
+    if since is None:
+        return
+    try:
+        idx = max(int(since), 0)
+    except (TypeError, ValueError):
+        return
+    new_msgs = messages[idx:]
+    result["new_messages"] = [_brief_message(m) for m in new_msgs[:_INCREMENTAL_MAX_ITEMS]]
+    if len(new_msgs) > _INCREMENTAL_MAX_ITEMS:
+        result["new_messages_truncated"] = True
 
 
 def apply_patch():
@@ -51,9 +155,15 @@ def apply_patch():
         if run["status"] == "success":
             if messages:
                 last = messages[-1]
-                result["result"] = (
+                raw_content = (
                     last.get("content", "") if isinstance(last, dict) else str(last)
                 )
+                summarized = _summarize_result(raw_content)
+                result["result"] = summarized
+                result["result_size"] = {
+                    "chars": len(raw_content),
+                    "summarized": len(raw_content) > _MAX_RESULT_CHARS,
+                }
             else:
                 result["result"] = "(completed with no output messages)"
         elif run["status"] == "error":
@@ -61,6 +171,16 @@ def apply_patch():
             result["error"] = (
                 str(error_detail) if error_detail
                 else "The async subagent encountered an error."
+            )
+        elif run["status"] == "interrupted":
+            # P1-3：审批闸门暂停。前端会渲染审批卡，用户操作后自动恢复，
+            # 主 agent 无需处理（不要取消、不要重新委派）。
+            result["awaiting_user_approval"] = True
+            result["note"] = (
+                "The subagent is paused waiting for the user to approve a SQL "
+                "execution (approval card is shown in the frontend). It will "
+                "resume automatically once the user decides. Do NOT cancel or "
+                "re-delegate; just tell the user the task awaits their approval."
             )
         # running / 其他中间态：提取进度
         if messages:
@@ -110,6 +230,7 @@ def apply_patch():
         def _check_sync(
             task_id: str,
             runtime: Annotated[ToolRuntime, InjectedToolArg()],
+            since: Optional[int] = None,
         ):
             task = _mod._resolve_tracked_task(task_id, runtime)
             if isinstance(task, str):
@@ -136,12 +257,14 @@ def apply_patch():
             result = _mod._build_check_result(
                 run, task["thread_id"], thread_values
             )
+            _add_incremental(result, thread_values, since)
             return _mod._build_check_command(result, task, runtime.tool_call_id)
 
         # ── async ──
         async def _check_async(
             task_id: str,
             runtime: Annotated[ToolRuntime, InjectedToolArg()],
+            since: Optional[int] = None,
         ):
             task = _mod._resolve_tracked_task(task_id, runtime)
             if isinstance(task, str):
@@ -180,10 +303,19 @@ def apply_patch():
             result = _mod._build_check_result(
                 run, task["thread_id"], thread_values
             )
+            _add_incremental(result, thread_values, since)
             return _mod._build_check_command(result, task, runtime.tool_call_id)
 
         tool.func = _check_sync
         tool.coroutine = _check_async
+        # P1-7：暴露 since 游标参数 + 说明增量读取用法
+        tool.args_schema = CheckAsyncTaskSinceSchema
+        tool.description = (
+            "Check the status of an async subagent task. Returns the current status "
+            "and, if complete, the result. Every check also returns a `cursor` "
+            "(current message count); pass it back as `since` on a later check to "
+            "read only messages added since then (incremental reads)."
+        )
         return tool
 
     _mod._build_check_tool = _patched_build_check_tool

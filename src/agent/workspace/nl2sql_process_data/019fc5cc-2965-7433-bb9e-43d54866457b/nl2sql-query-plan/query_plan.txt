@@ -1,9 +1,0 @@
-查询计划：统计各电视剧系列（tvSeries）的剧集数量
-
-1. 从 titles 表（别名 t）筛选 title_type = 'tvSeries' 的行，即所有电视剧系列
-2. 通过 episodes 表（别名 e）关联：e.parent_id = t.id，将每个剧集关联到其所属的电视剧系列
-3. 按系列分组：GROUP BY t.id, t.primary_title
-4. 对每个系列统计剧集数量：COUNT(DISTINCT e.id) AS episode_count
-5. 选择输出字段：t.primary_title AS series_title, episode_count
-6. 按剧集数量降序排序：ORDER BY episode_count DESC
-7. 通过 run_sql 的 limit 参数控制返回行数（不写 LIMIT 子句）

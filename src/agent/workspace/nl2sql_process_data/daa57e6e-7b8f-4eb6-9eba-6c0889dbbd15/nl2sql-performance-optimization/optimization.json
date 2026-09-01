@@ -1,6 +1,0 @@
-{
-  "sql": "WITH yearly_counts AS (\n  SELECT\n    t.start_year AS year,\n    COUNT(DISTINCT t.id) AS movie_count\n  FROM titles t\n  WHERE t.title_type = 'movie'\n    AND t.start_year BETWEEN 2000 AND 2023\n    AND t.start_year IS NOT NULL\n  GROUP BY t.start_year\n)\nSELECT\n  year,\n  movie_count,\n  ROUND(\n    (movie_count - LAG(movie_count) OVER (ORDER BY year)) * 100.0 / NULLIF(LAG(movie_count) OVER (ORDER BY year), 0),\n    2\n  ) AS growth_rate\nFROM yearly_counts\nORDER BY year ASC",
-  "optimized_sql": null,
-  "issues": [],
-  "summary": "共发现 0 个性能问题。SQL 已明确列出所需列，无 SELECT *；聚合查询（GROUP BY）结果仅24行，无需 LIMIT；无 JOIN 笛卡尔积风险；CTE 结构清晰；COUNT(DISTINCT) 为必要去重。"
-}

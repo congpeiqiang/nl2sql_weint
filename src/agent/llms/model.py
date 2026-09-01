@@ -9,6 +9,235 @@ from langchain_core.language_models import ModelProfile
 
 logger = logging.getLogger(__name__)
 
+# 已知模型的上下文窗口（token 数）。用于自动填充 model_config 的 context_window，
+# 以及 create_model 的 ModelProfile。用户可在模型配置中覆盖这些值。
+# 数据来源：各模型官方文档/API 文档。
+KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # DeepSeek 系列
+    "deepseek-chat": 128_000,       # DeepSeek V3
+    "deepseek-reasoner": 128_000,   # DeepSeek R1
+    "deepseek-v3": 128_000,
+    "deepseek-r1": 128_000,
+    # Qwen 系列（通义千问）
+    "qwen3-235b-a22b": 131_072,
+    "qwen3-32b": 131_072,
+    "qwen3-235b-a22b-thinking": 131_072,
+    "qwen-max": 32_768,
+    "qwen-plus": 131_072,
+    "qwen-turbo": 1_000_000,
+    "qwen3-30b-a3b": 131_072,
+    "qwen3-14b": 131_072,
+    "qwen3-8b": 131_072,
+    "qwen3-4b": 131_072,
+    "qwen3-1.7b": 131_072,
+    "qwen3-0.6b": 131_072,
+    # GLM 系列（智谱）
+    "glm-4": 128_000,
+    "glm-4-plus": 128_000,
+    "glm-4-flash": 128_000,
+    "glm-4-air": 128_000,
+    "glm-4-long": 1_000_000,
+    "glm-4-airx": 128_000,
+    "glm-4-flashx": 128_000,
+    # Kimi 系列（月之暗面）
+    "kimi-k2": 128_000,
+    "kimi-k2.6": 128_000,
+    "kimi-k2.7-code": 128_000,
+    "kimi-moonshot-v1": 128_000,
+    # OpenAI 系列
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4": 8_192,
+    "gpt-3.5-turbo": 16_385,
+    # Anthropic 系列
+    "claude-3-5-sonnet": 200_000,
+    "claude-3-opus": 200_000,
+    "claude-3-haiku": 200_000,
+    "claude-3-sonnet": 200_000,
+    # 豆包系列
+    "doubao-pro-32k": 32_768,
+    "doubao-pro-128k": 128_000,
+    "doubao-lite-32k": 32_768,
+    "doubao-lite-128k": 128_000,
+}
+
+# 模糊匹配：模型 ID 包含这些关键词时，匹配对应窗口
+_FUZZY_WINDOW_PATTERNS: list[tuple[str, int]] = [
+    ("deepseek", 128_000),
+    ("qwen", 131_072),
+    ("glm", 128_000),
+    ("kimi", 128_000),
+    ("moonshot", 128_000),
+    ("gpt-4o", 128_000),
+    ("gpt-4", 8_192),
+    ("gpt-3.5", 16_385),
+    ("claude", 200_000),
+    ("doubao-pro", 128_000),
+    ("doubao-lite", 128_000),
+    ("doubao", 128_000),
+]
+
+# 已知模型的最大输出 token 数。用于自动填充 model_config 的 max_tokens。
+# 数据来源：各模型官方文档/API 文档。
+KNOWN_MODEL_MAX_TOKENS: dict[str, int] = {
+    # DeepSeek 系列
+    "deepseek-chat": 8_192,
+    "deepseek-reasoner": 8_192,
+    "deepseek-v3": 8_192,
+    "deepseek-r1": 8_192,
+    # Qwen 系列
+    "qwen3-235b-a22b": 8_192,
+    "qwen3-32b": 8_192,
+    "qwen3-235b-a22b-thinking": 8_192,
+    "qwen-max": 8_192,
+    "qwen-plus": 8_192,
+    "qwen-turbo": 8_192,
+    "qwen3-30b-a3b": 8_192,
+    "qwen3-14b": 8_192,
+    "qwen3-8b": 8_192,
+    "qwen3-4b": 8_192,
+    "qwen3-1.7b": 8_192,
+    "qwen3-0.6b": 8_192,
+    # GLM 系列
+    "glm-4": 4_096,
+    "glm-4-plus": 4_096,
+    "glm-4-flash": 4_096,
+    "glm-4-air": 4_096,
+    "glm-4-long": 4_096,
+    "glm-4-airx": 4_096,
+    "glm-4-flashx": 4_096,
+    # Kimi 系列
+    "kimi-k2": 8_192,
+    "kimi-k2.6": 8_192,
+    "kimi-k2.7-code": 8_192,
+    "kimi-moonshot-v1": 8_192,
+    # OpenAI 系列
+    "gpt-4o": 16_384,
+    "gpt-4o-mini": 16_384,
+    "gpt-4-turbo": 4_096,
+    "gpt-4": 4_096,
+    "gpt-3.5-turbo": 4_096,
+    # Anthropic 系列
+    "claude-3-5-sonnet": 8_192,
+    "claude-3-opus": 4_096,
+    "claude-3-haiku": 4_096,
+    "claude-3-sonnet": 4_096,
+    # 豆包系列
+    "doubao-pro-32k": 4_096,
+    "doubao-pro-128k": 4_096,
+    "doubao-lite-32k": 4_096,
+    "doubao-lite-128k": 4_096,
+}
+
+# 模糊匹配：模型 ID 包含这些关键词时，匹配对应 max_tokens
+_FUZZY_MAX_TOKENS_PATTERNS: list[tuple[str, int]] = [
+    ("deepseek", 8_192),
+    ("qwen", 8_192),
+    ("glm", 4_096),
+    ("kimi", 8_192),
+    ("moonshot", 8_192),
+    ("gpt-4o", 16_384),
+    ("gpt-4", 4_096),
+    ("gpt-3.5", 4_096),
+    ("claude", 8_192),
+    ("doubao", 4_096),
+]
+
+
+def resolve_max_tokens(model_id: str, user_override: int | None = None) -> int | None:
+    """解析模型的最大输出 token 数。
+
+    优先级：
+    1. user_override（用户在模型配置中显式设置的值）
+    2. KNOWN_MODEL_MAX_TOKENS 精确匹配
+    3. _FUZZY_MAX_TOKENS_PATTERNS 模糊匹配（模型 ID 包含关键词）
+    4. 返回 None（不设 max_tokens，由模型自行决定）
+
+    Args:
+        model_id: 模型 ID（如 "deepseek-chat"）
+        user_override: 用户在模型配置中覆盖的值（None 表示未设置）
+
+    Returns:
+        最大输出 token 数，None 表示不设置
+    """
+    if user_override is not None and user_override > 0:
+        return user_override
+
+    model_lower = (model_id or "").lower()
+
+    # 精确匹配
+    if model_lower in KNOWN_MODEL_MAX_TOKENS:
+        return KNOWN_MODEL_MAX_TOKENS[model_lower]
+
+    # 模糊匹配
+    for keyword, mt in _FUZZY_MAX_TOKENS_PATTERNS:
+        if keyword in model_lower:
+            return mt
+
+    return None
+
+
+def resolve_context_window(model_id: str, user_override: int | None = None) -> int:
+    """解析模型的上下文窗口大小。
+
+    优先级：
+    1. user_override（用户在模型配置中显式设置的值）
+    2. KNOWN_MODEL_CONTEXT_WINDOWS 精确匹配
+    3. _FUZZY_WINDOW_PATTERNS 模糊匹配（模型 ID 包含关键词）
+    4. 默认 120000
+
+    Args:
+        model_id: 模型 ID（如 "deepseek-chat"）
+        user_override: 用户在模型配置中覆盖的值（None 表示未设置）
+
+    Returns:
+        上下文窗口 token 数
+    """
+    if user_override is not None and user_override > 0:
+        return user_override
+
+    model_lower = (model_id or "").lower()
+
+    # 精确匹配
+    if model_lower in KNOWN_MODEL_CONTEXT_WINDOWS:
+        return KNOWN_MODEL_CONTEXT_WINDOWS[model_lower]
+
+    # 模糊匹配
+    for keyword, window in _FUZZY_WINDOW_PATTERNS:
+        if keyword in model_lower:
+            return window
+
+    return 120_000
+
+
+def resolve_context_window_source(model_id: str) -> str:
+    """判断 context_window 静态推断来源：'known'（已知表/模糊关键词命中）| 'default'（通用默认 120000）。
+
+    供模型配置探活接口标注来源；只判断来源，数值仍用 resolve_context_window。
+    """
+    model_lower = (model_id or "").lower()
+    if model_lower in KNOWN_MODEL_CONTEXT_WINDOWS:
+        return "known"
+    for keyword, _ in _FUZZY_WINDOW_PATTERNS:
+        if keyword in model_lower:
+            return "known"
+    return "default"
+
+
+def resolve_max_tokens_source(model_id: str) -> str:
+    """判断 max_tokens 静态推断来源：'known'（已知表/模糊关键词命中）| 'none'（未知，不设置）。
+
+    供模型配置探活接口标注来源；只判断来源，数值仍用 resolve_max_tokens。
+    """
+    model_lower = (model_id or "").lower()
+    if model_lower in KNOWN_MODEL_MAX_TOKENS:
+        return "known"
+    for keyword, _ in _FUZZY_MAX_TOKENS_PATTERNS:
+        if keyword in model_lower:
+            return "known"
+    return "none"
+
 
 def _detect_provider(model_name: str, base_url: str) -> str:
     """根据模型名和 base_url 判断供应商。"""
@@ -39,8 +268,8 @@ def _first_model_id(cfg) -> str:
     return ""
 
 
-def _resolve_llm_config(route: str | None = None, model_name: str | None = None) -> tuple[str, str, str]:
-    """解析本次调用使用的 (api_key, base_url, model)。
+def _resolve_llm_config(route: str | None = None, model_name: str | None = None) -> tuple[str, str, str, int | None, int | None, float | None]:
+    """解析本次调用使用的 (api_key, base_url, model, context_window_override, max_tokens_override, temperature_override)。
 
     优先读运行时模型配置 store（P1-8，model_config.json，前端可 CRUD、免重启生效）：
       - route 指定 provider → 用之；
@@ -48,6 +277,12 @@ def _resolve_llm_config(route: str | None = None, model_name: str | None = None)
       - model_name（前端显式选模型）在该 provider 模型列表里 → 覆盖默认模型；
     store 无可用配置（空/缺字段/异常）时返回空串三元组（不调用 LLM）。
     不再回退 .env 的 LLM_* —— 模型配置唯一来源是前端 CRUD 的 model_config.json。
+
+    Returns:
+        (api_key, base_url, model, context_window_override, max_tokens_override, temperature_override)
+        context_window_override: 模型配置中用户设置的值（None 表示未设置）
+        max_tokens_override: 模型配置中用户设置的最大输出 token（None 表示未设置）
+        temperature_override: 模型配置中用户设置的温度参数（None 表示未设置）
     """
     try:
         from agent.settings.model_config_store import get_store
@@ -72,12 +307,37 @@ def _resolve_llm_config(route: str | None = None, model_name: str | None = None)
                         "[model] model '%s' 不在 provider '%s' 模型列表，回退默认 %s",
                         model_name, cfg.name, resolved,
                     )
+            # 查找当前模型在配置中的覆盖值
+            cw_override = None
+            mt_override = None
+            temp_override = None
+            for m in cfg.models:
+                if isinstance(m, dict) and m.get("id") == resolved:
+                    cw = m.get("context_window")
+                    if cw is not None:
+                        try:
+                            cw_override = int(cw)
+                        except (TypeError, ValueError):
+                            pass
+                    mt = m.get("max_tokens")
+                    if mt is not None:
+                        try:
+                            mt_override = int(mt)
+                        except (TypeError, ValueError):
+                            pass
+                    temp = m.get("temperature")
+                    if temp is not None:
+                        try:
+                            temp_override = float(temp)
+                        except (TypeError, ValueError):
+                            pass
+                    break
             if cfg.api_key and cfg.base_url and resolved:
-                return cfg.api_key, cfg.base_url, resolved
+                return cfg.api_key, cfg.base_url, resolved, cw_override, mt_override, temp_override
             logger.warning("[model] provider '%s' 配置不完整，无可用模型", cfg.name)
     except Exception as e:  # noqa: BLE001
         logger.warning("[model] 读取模型配置 store 失败，无可用模型: %s", e)
-    return "", "", ""
+    return "", "", "", None, None, None
 
 
 def create_model(
@@ -103,7 +363,7 @@ def create_model(
         model_name: 显式指定的模型 id（P1-9 逐模型选择经 configurable.llm_model
             传入），覆盖 provider 的 default_model；None 用 default_model/第一个。
     """
-    api_key, base_url, resolved_model = _resolve_llm_config(route, model_name)
+    api_key, base_url, resolved_model, cw_override, mt_override, temp_override = _resolve_llm_config(route, model_name)
     if not (api_key and base_url and resolved_model):
         logger.error(
             "[model] 无可用模型配置（api_key/base_url/model 缺失），拒绝创建模型；"
@@ -111,19 +371,29 @@ def create_model(
         )
         return None
     provider = _detect_provider(resolved_model, base_url)
+    # 解析上下文窗口：用户覆盖 > 已知模型匹配 > 默认 120000
+    context_window = resolve_context_window(resolved_model, cw_override)
+    # 解析最大输出 token：用户覆盖 > 已知模型匹配 > None（不设限制）
+    max_tokens = resolve_max_tokens(resolved_model, mt_override)
+    # 解析温度：用户配置 > 默认 0
+    temperature = temp_override if temp_override is not None else 0.0
     logger.info(
-        "[model] provider=%s, model=%s, base_url=%s, enable_thinking=%s, route=%s, model_name=%s",
-        provider, resolved_model, base_url, enable_thinking, route, model_name,
+        "[model] provider=%s, model=%s, base_url=%s, enable_thinking=%s, "
+        "context_window=%d, max_tokens=%s, temperature=%s, route=%s, model_name=%s",
+        provider, resolved_model, base_url, enable_thinking,
+        context_window, max_tokens, temperature, route, model_name,
     )
 
     common_kwargs = dict(
         api_key=api_key,
         base_url=base_url,
         model=resolved_model,
-        temperature=0,
+        temperature=temperature,
         timeout=60,
         max_retries=3,
     )
+    if max_tokens is not None:
+        common_kwargs["max_tokens"] = max_tokens
 
     try:
         if provider == "deepseek":
@@ -166,7 +436,7 @@ def create_model(
             from langchain_openai import ChatOpenAI
             model = ChatOpenAI(**common_kwargs)
 
-        model.profile = ModelProfile(max_input_tokens=120000)
+        model.profile = ModelProfile(max_input_tokens=context_window)
         return model
 
     except ImportError as e:

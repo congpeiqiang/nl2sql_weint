@@ -1,0 +1,59 @@
+{
+  "task_type": "DELETE（含前置确认查询与后置验证）",
+  "target": "titles 表中名为 'The Ballad of Conrad & Vernon' 的记录及其关联记录",
+  "subproblems": {
+    "SUB1_CONFIRM": {
+      "type": "SELECT",
+      "description": "确认目标记录存在：按 primary_title = 'The Ballad of Conrad & Vernon'（回退 original_title）在 titles 表查询",
+      "SELECT": ["t.id", "t.title_type", "t.primary_title", "t.original_title", "t.start_year", "t.end_year", "t.runtime_minutes"],
+      "FROM": "titles t",
+      "WHERE": ["t.primary_title = 'The Ballad of Conrad & Vernon' OR t.original_title = 'The Ballad of Conrad & Vernon'"],
+      "purpose": "获取目标 titles.id，确认记录存在"
+    },
+    "SUB2_RELATED_CHECK": {
+      "type": "SELECT",
+      "description": "统计各关联表中引用该 titles.id 的记录数（用于决定删除范围与报告）",
+      "tables_to_check": [
+        {"table": "principals", "join_field": "title_id"},
+        {"table": "titles_genres", "join_field": "title_id"},
+        {"table": "titleakas", "join_field": "title_id"},
+        {"table": "episodes", "join_field": "parent_id", "note": "该作品作为父系列被剧集引用"},
+        {"table": "episodes", "join_field": "id", "note": "该作品自身是剧集"},
+        {"table": "names_knownfortitles", "join_field": "title_id"}
+      ],
+      "purpose": "确定需级联删除的关联记录数量"
+    },
+    "SUB3_DELETE_CHILDREN": {
+      "type": "DELETE",
+      "description": "按子表优先顺序删除关联记录（若存在）",
+      "order": [
+        "principals_characters（经 principals.id 间接关联，需先于 principals 删除）",
+        "principals（title_id = 目标id）",
+        "titleakas_titleakaattributes（titleaka_id IN 目标作品的 titleakas.id，需先于 titleakas 删除）",
+        "titleakas_titleakatypes（同上）",
+        "titleakas（title_id = 目标id）",
+        "titles_genres（title_id = 目标id）",
+        "episodes（id = 目标id 或 parent_id = 目标id）",
+        "names_knownfortitles（title_id = 目标id）"
+      ],
+      "purpose": "清理引用 titles.id 的全部关联记录，避免孤立数据/外键冲突"
+    },
+    "SUB4_DELETE_MAIN": {
+      "type": "DELETE",
+      "description": "删除 titles 主记录",
+      "FROM": "titles",
+      "WHERE": ["id = 目标id（来自 SUB1）"],
+      "purpose": "删除主记录"
+    },
+    "SUB5_VERIFY": {
+      "type": "SELECT",
+      "description": "验证删除结果：再次查询 titles 及关联表，确认记录已不存在",
+      "purpose": "确认删除生效，统计最终删除行数"
+    }
+  },
+  "metadata": {
+    "phase": "subproblem_decomposed",
+    "status": "success",
+    "strategy": "A"
+  }
+}

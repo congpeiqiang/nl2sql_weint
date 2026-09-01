@@ -1,4 +1,5 @@
 ---
+version: 0.1.0
 name: sql-of-thought
 description: "触发：用户提出数据库查询问题；用户希望将自然语言转换为SQL；用户提到NL2SQL、Text-to-SQL或自然语言数据库查询；用户需要使用自然语言问题来分析、查询或提取数据库中的数据。三种策略：(A)标准流水线-复杂多表JOIN/聚合/窗口；(B)快速通道-单表/简单筛选/计数；(C)Cube通道-预定义指标。内部集成WrenAI语义层工具实现Schema自动发现。跳过条件：用户询问NoSQL或非SQL数据库操作；用户直接编写SQL而不需要自然语言输入。"
 ---
@@ -20,7 +21,7 @@ description: "触发：用户提出数据库查询问题；用户希望将自然
 收到用户问题后，**先**加载 `nl2sql-clarification` 技能做清晰度裁决，**再**进入策略决策：
 
 1. `load_skill("nl2sql-clarification")` → 按技能流程执行（get_context + get_instructions → verdict.json）
-2. 读取 `/workspace/nl2sql_process_data/{thread_id}/clarification/verdict.json`：
+2. 从对话上下文中获取 clarification 的裁决结果（`verdict.json`）：
    - `clear=true` → 继续下方「策略决策」
    - `clear=false` → **停止**，按该技能格式输出 `[需要澄清]` 追问，本技能结束，**不得**进入策略决策或调用任何查询工具
 
@@ -58,19 +59,16 @@ description: "触发：用户提出数据库查询问题；用户希望将自然
 Schema 发现工作由 nl2sql-schema-linking 技能自行完成（调用 WrenAI 工具获取 Schema 片段），无需前置 Phase。
 
 ```
-Step 1: nl2sql-knowledge-loader  → 技能,调用 WrenAI 工具从知识库中查询全量业务规则、知识库内容和指标定义等业务知识，并保存
-  Step 1必须按顺序依次执行列出的所有工具，不得跳过任何一个。** 即使你认为某些工具返回的信息冗余或已从其他来源获知，也必须调用。每个工具提供不可替代的信息维度，跳过会导致 Schema 不完整或 SQL 生成错误。
-Step 2: nl2sql-schema-linking  → 技能,调用 WrenAI 工具获取 Schema 片段，裁剪相关表/列
-Step 3: nl2sql-subproblem      → 技能,分解为子句级子问题
-Step 4: nl2sql-query-plan      → 技能,生成程序化查询计划（CoT推理）
-Step 5: nl2sql-sql-generation  → 技能,合成可执行SQL
-Step 5.5: nl2sql-performance-optimization → 技能,性能优化（dry_run成功后、执行前）
-	- 读取/workspace/nl2sql_process_data/{thread_id}/nl2sql-sql-generation/sql.sql
-	- 基于性能规则集检测性能隐患，输出优化建议到/workspace/nl2sql_process_data/{thread_id}/nl2sql-performance-optimization/optimization.json
-	- 若存在高风险问题且优化不改变语义，采用优化后的SQL
+Step 1: nl2sql-knowledge-loader  → 并行调用 MCP 工具获取业务知识（get_instructions + recall_queries + get_all_knowledge）
+Step 2: nl2sql-schema-linking  → 并行调用 MCP 工具获取 Schema（describe_schema + get_context + get_mdl），裁剪相关表/列
+Step 3: nl2sql-subproblem      → 分解为子句级子问题
+Step 4: nl2sql-query-plan      → 生成程序化查询计划（CoT推理）
+Step 5: nl2sql-sql-generation  → 合成可执行SQL + dry_run 验证
+Step 5.5: nl2sql-performance-optimization → 性能优化（dry_run成功后、执行前）
 Step 6: run_sql(sql)           → WrenAI 执行
-	- 读取/workspace/nl2sql_process_data/{thread_id}/nl2sql-sql-generation/sql.sql获取sql，并执行
 Step 7: [可选] nl2sql-correction → 失败时纠错循环
+
+> **数据传递**：各 Skill 优先从对话上下文获取前序输出，read_file 仅作为 fallback。
 ```
 
 ### 完整流程图
@@ -110,11 +108,9 @@ Step 7: [可选] nl2sql-correction → 失败时纠错循环
 跳过传统流水线的大部分步骤，。
 
 ```
-Step 1: nl2sql-knowledge-loader      → 从知识库中查询全量业务规则、知识库内容和指标定义等业务知识
-   Step 1 根据需要有选择的执行列出的所有工具。
-Step 2: nl2sql-sql-generation        → 直接生成SQL（跳过subproblem/plan）
+Step 1: nl2sql-knowledge-loader      → 并行调用 MCP 工具获取业务知识（按需，可精简）
+Step 2: nl2sql-sql-generation        → 直接生成SQL（跳过subproblem/plan）+ dry_run 验证
 Step 3: run_sql(sql)                 → 执行
-	- 读取/workspace/nl2sql_process_data/{thread_id}/nl2sql-sql-generation/sql.sql获取sql，并执行
 ```
 
 **跳过**:nl2sql-schema-linking  / nl2sql-subproblem / nl2sql-query-plan / nl2sql-correction
@@ -173,12 +169,11 @@ Schema Linking 阶段应充分利用并行调用加速 Schema 获取：
 必须顺序的场景：
 1. `describe_model` 必须在 `get_context` 之后（先确定哪些模型相关，再详查）
 2. `dry_run` 必须在 `run_sql` 之前
-3. knowledge-loader → schema-linking → subproblem → query-plan → sql-generation 顺序执行
+3. 各阶段按需执行，子智能体会根据问题复杂度自动选择最优策略
 
 ---
 
-## 数据库特定规则
+## 通用规则
 
-### IMDb (imdb_project)
 - 性能: 始终加 LIMIT，先筛选再 JOIN
-- 规则: 调用 get_instructions() 获取最新业务规则
+- 规则: 调用 get_instructions() 获取当前数据库的最新业务规则

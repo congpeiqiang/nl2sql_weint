@@ -1,0 +1,56 @@
+{
+  "user_intent": {
+    "original_question": "从 Album 表中删除最后一条数据（albumid 最大的一条记录），先 SELECT 确认再 DELETE，只删除一条",
+    "domain": "album",
+    "keywords": ["album", "albumid", "删除", "最后一条", "最大 albumid"],
+    "intent_type": "delete_single_row_by_max_id"
+  },
+  "entities": {
+    "target_table": "album",
+    "identifier_column": "albumid",
+    "selection_logic": "albumid 最大的一条记录",
+    "constraint": "必须只删除一条记录；删除前先 SELECT 确认",
+    "filters": []
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "删除前确认",
+      "condition": "先执行 SELECT 查询 albumid 最大的记录，确认后再执行 DELETE"
+    },
+    {
+      "id": "rule_002",
+      "name": "单条删除",
+      "condition": "DELETE 只能命中 albumid 最大的一条记录，不可误删多条"
+    }
+  ],
+  "field_mappings": {
+    "albumid": "album.albumid",
+    "title": "album.title",
+    "artistid": "album.artistid"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "数据库",
+      "content": "Chinook_Aliyun 为 PostgreSQL 数据库（直连通道，未在语义层建模），使用 dbmcp_run_sql 执行 SQL"
+    },
+    {
+      "topic": "表说明",
+      "content": "album 表为标准 Chinook 表，主键 albumid（自增），包含 title、artistid 等列"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["album"],
+    "main_fields": ["album.albumid", "album.title"],
+    "filter_conditions": ["albumid = MAX(albumid)"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "note": "Chinook_Aliyun 未在语义层建模，无 WrenAI 知识库可查；采用直连通道执行"
+  }
+}

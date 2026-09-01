@@ -1,0 +1,24 @@
+{
+  "clear": false,
+  "reason": "TERM_AMBIGUOUS",
+  "original_question": "查询调温数据",
+  "db_name": "clickhouse-aix",
+  "issues": [
+    {
+      "type": "term_ambiguity",
+      "field": "调温数据含义",
+      "question": "'调温数据'具体指什么？（A. 温度采集数据：aix_crystal_comm_data 中的温度类列，如主真空管1/2温度、热场温度、液面温度等；B. 温度调节操作记录：aix_crystal_record_data 中与调温相关的工艺记录）？"
+    },
+    {
+      "type": "missing_condition",
+      "field": "时间范围",
+      "question": "请提供要查询的时间范围（如：最近24小时、最近7天、或指定日期区间）？"
+    },
+    {
+      "type": "missing_condition",
+      "field": "设备/炉次",
+      "question": "是否需要限定具体设备（device_code）或炉次（puller_batch_no）？若不限定则返回全设备数据"
+    }
+  ],
+  "assumption": null
+}

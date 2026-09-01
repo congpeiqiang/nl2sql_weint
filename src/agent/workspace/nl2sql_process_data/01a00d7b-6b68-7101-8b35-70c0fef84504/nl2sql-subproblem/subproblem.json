@@ -1,0 +1,12 @@
+{
+  "SELECT": "device_code(设备编码), collect_time(采集时间), operation_time(操作时间), puller_batch_no(炉次编号), ingot_no(棒次编号), proc_stage(工艺阶段), work_order_no(工单编号), content(内容), value(值), color(颜色)",
+  "FROM": "aix_crystal_record_data",
+  "JOIN": null,
+  "WHERE": [
+    "content = '调温'"
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": "collect_time DESC",
+  "LIMIT": "不写 LIMIT，由 run_sql 的 limit 参数控制行数（用户执行规范）"
+}

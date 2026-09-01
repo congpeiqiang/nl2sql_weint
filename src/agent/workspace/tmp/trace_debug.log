@@ -1,0 +1,54 @@
+import langsmith OK
+client created
+Total runs: 50
+08:38:30 |      N/A | tool     | parent=01a01405 | execute
+08:38:30 |      N/A | chain    | parent=01a01405 | MessageSlimmerMiddleware.awrap_tool_call
+08:38:30 |      N/A | chain    | parent=01a01405 | FilesystemMiddleware.awrap_tool_call
+08:38:30 |      N/A | chain    | parent=01a01403 | tools
+08:38:30 |     0.0s | chain    | parent=01a01403 | TodoListMiddleware.after_model
+08:38:07 |    22.4s | llm      | parent=01a01405 | ChatDeepSeek
+08:38:07 |    22.5s | chain    | parent=01a01405 | MemoryMiddleware.awrap_model_call
+08:38:07 |    22.5s | chain    | parent=01a01405 | AnthropicPromptCachingMiddleware.awrap_model_call
+08:38:07 |    22.6s | chain    | parent=01a01405 | dynamic_prompt.awrap_model_call
+08:38:07 |    22.6s | chain    | parent=01a01405 | CurrentDbContextMiddleware.awrap_model_call
+08:38:05 |    25.0s | chain    | parent=01a01405 | ThinkingToggleMiddleware.awrap_model_call
+08:38:05 |    25.0s | chain    | parent=01a01405 | QueryKeywordsMiddleware.awrap_model_call
+08:38:05 |    25.0s | chain    | parent=01a01405 | SkillsMiddleware.awrap_model_call
+08:38:05 |    25.0s | chain    | parent=01a01405 | AsyncSubAgentMiddleware.awrap_model_call
+08:38:05 |    25.1s | chain    | parent=01a01405 | SummarizationMiddleware.awrap_model_call
+08:38:05 |    25.1s | chain    | parent=01a01405 | SubAgentMiddleware.awrap_model_call
+08:38:05 |    25.1s | chain    | parent=01a01405 | FilesystemMiddleware.awrap_model_call
+08:38:05 |    25.1s | chain    | parent=01a01405 | TodoListMiddleware.awrap_model_call
+08:38:05 |    25.1s | chain    | parent=01a01403 | model
+08:38:04 |     0.4s | tool     | parent=01a01405 | ls
+08:38:04 |     0.0s | tool     | parent=01a01405 | write_file
+08:38:04 |     0.4s | chain    | parent=01a01405 | MessageSlimmerMiddleware.awrap_tool_call
+08:38:04 |     0.0s | chain    | parent=01a01405 | MessageSlimmerMiddleware.awrap_tool_call
+08:38:04 |     0.0s | chain    | parent=01a01405 | FilesystemMiddleware.awrap_tool_call
+08:38:04 |     0.4s | chain    | parent=01a01405 | FilesystemMiddleware.awrap_tool_call
+08:38:04 |     0.0s | chain    | parent=01a01403 | tools
+08:38:04 |     0.4s | chain    | parent=01a01403 | tools
+08:38:04 |     0.0s | chain    | parent=01a01403 | TodoListMiddleware.after_model
+08:37:37 |    27.2s | llm      | parent=01a01404 | ChatDeepSeek
+08:37:37 |    27.2s | chain    | parent=01a01404 | MemoryMiddleware.awrap_model_call
+08:37:37 |    27.2s | chain    | parent=01a01404 | AnthropicPromptCachingMiddleware.awrap_model_call
+08:37:37 |    27.3s | chain    | parent=01a01404 | dynamic_prompt.awrap_model_call
+08:37:37 |    27.3s | chain    | parent=01a01404 | CurrentDbContextMiddleware.awrap_model_call
+08:37:35 |    28.8s | chain    | parent=01a01404 | ThinkingToggleMiddleware.awrap_model_call
+08:37:35 |    28.8s | chain    | parent=01a01404 | QueryKeywordsMiddleware.awrap_model_call
+08:37:35 |    28.9s | chain    | parent=01a01404 | SkillsMiddleware.awrap_model_call
+08:37:35 |    28.9s | chain    | parent=01a01404 | AsyncSubAgentMiddleware.awrap_model_call
+08:37:35 |    28.9s | chain    | parent=01a01404 | SummarizationMiddleware.awrap_model_call
+08:37:35 |    28.9s | chain    | parent=01a01404 | SubAgentMiddleware.awrap_model_call
+08:37:35 |    28.9s | chain    | parent=01a01404 | FilesystemMiddleware.awrap_model_call
+08:37:35 |    29.0s | chain    | parent=01a01404 | TodoListMiddleware.awrap_model_call
+08:37:35 |    29.0s | chain    | parent=01a01403 | model
+08:37:35 |     0.0s | tool     | parent=01a01404 | read_file
+08:37:35 |     0.0s | chain    | parent=01a01404 | MessageSlimmerMiddleware.awrap_tool_call
+08:37:35 |     0.0s | chain    | parent=01a01404 | FilesystemMiddleware.awrap_tool_call
+08:37:35 |     0.0s | chain    | parent=01a01403 | tools
+08:37:35 |     0.0s | chain    | parent=01a01403 | TodoListMiddleware.after_model
+08:37:12 |    22.9s | llm      | parent=01a01404 | ChatDeepSeek
+08:37:12 |    23.0s | chain    | parent=01a01404 | MemoryMiddleware.awrap_model_call
+08:37:12 |    23.0s | chain    | parent=01a01404 | AnthropicPromptCachingMiddleware.awrap_model_call
+DONE

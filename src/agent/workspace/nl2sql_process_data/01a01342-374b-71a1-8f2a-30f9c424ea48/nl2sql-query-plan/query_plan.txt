@@ -1,0 +1,4 @@
+1. 从 titles 表中筛选 title_type = 'tvSeries' 的行（仅电视剧系列）
+2. 按 average_rating DESC 降序排列
+3. 取前 10 行
+4. 输出 primary_title（标题）和 average_rating（评分）

@@ -1,0 +1,659 @@
+     1	{
+     2	  "catalog": "wren",
+     3	  "schema": "public",
+     4	  "models": [
+     5	    {
+     6	      "name": "album",
+     7	      "tableReference": {
+     8	        "table": "Album"
+     9	      },
+    10	      "columns": [
+    11	        {
+    12	          "name": "AlbumId",
+    13	          "type": "INTEGER",
+    14	          "isCalculated": false,
+    15	          "notNull": true,
+    16	          "isPrimaryKey": true
+    17	        },
+    18	        {
+    19	          "name": "Title",
+    20	          "type": "VARCHAR",
+    21	          "isCalculated": false,
+    22	          "notNull": true,
+    23	          "isPrimaryKey": false
+    24	        },
+    25	        {
+    26	          "name": "ArtistId",
+    27	          "type": "INTEGER",
+    28	          "isCalculated": false,
+    29	          "notNull": true,
+    30	          "isPrimaryKey": false
+    31	        }
+    32	      ],
+    33	      "cached": false,
+    34	      "primaryKey": "AlbumId"
+    35	    },
+    36	    {
+    37	      "name": "artist",
+    38	      "tableReference": {
+    39	        "table": "Artist"
+    40	      },
+    41	      "columns": [
+    42	        {
+    43	          "name": "ArtistId",
+    44	          "type": "INTEGER",
+    45	          "isCalculated": false,
+    46	          "notNull": true,
+    47	          "isPrimaryKey": true
+    48	        },
+    49	        {
+    50	          "name": "Name",
+    51	          "type": "VARCHAR",
+    52	          "isCalculated": false,
+    53	          "notNull": false,
+    54	          "isPrimaryKey": false
+    55	        }
+    56	      ],
+    57	      "cached": false,
+    58	      "primaryKey": "ArtistId"
+    59	    },
+    60	    {
+    61	      "name": "customer",
+    62	      "tableReference": {
+    63	        "table": "Customer"
+    64	      },
+    65	      "columns": [
+    66	        {
+    67	          "name": "CustomerId",
+    68	          "type": "INTEGER",
+    69	          "isCalculated": false,
+    70	          "notNull": true,
+    71	          "isPrimaryKey": true
+    72	        },
+    73	        {
+    74	          "name": "FirstName",
+    75	          "type": "VARCHAR",
+    76	          "isCalculated": false,
+    77	          "notNull": true,
+    78	          "isPrimaryKey": false
+    79	        },
+    80	        {
+    81	          "name": "LastName",
+    82	          "type": "VARCHAR",
+    83	          "isCalculated": false,
+    84	          "notNull": true,
+    85	          "isPrimaryKey": false
+    86	        },
+    87	        {
+    88	          "name": "Company",
+    89	          "type": "VARCHAR",
+    90	          "isCalculated": false,
+    91	          "notNull": false,
+    92	          "isPrimaryKey": false
+    93	        },
+    94	        {
+    95	          "name": "Address",
+    96	          "type": "VARCHAR",
+    97	          "isCalculated": false,
+    98	          "notNull": false,
+    99	          "isPrimaryKey": false
+   100	        },
+   101	        {
+   102	          "name": "City",
+   103	          "type": "VARCHAR",
+   104	          "isCalculated": false,
+   105	          "notNull": false,
+   106	          "isPrimaryKey": false
+   107	        },
+   108	        {
+   109	          "name": "State",
+   110	          "type": "VARCHAR",
+   111	          "isCalculated": false,
+   112	          "notNull": false,
+   113	          "isPrimaryKey": false
+   114	        },
+   115	        {
+   116	          "name": "Country",
+   117	          "type": "VARCHAR",
+   118	          "isCalculated": false,
+   119	          "notNull": false,
+   120	          "isPrimaryKey": false
+   121	        },
+   122	        {
+   123	          "name": "PostalCode",
+   124	          "type": "VARCHAR",
+   125	          "isCalculated": false,
+   126	          "notNull": false,
+   127	          "isPrimaryKey": false
+   128	        },
+   129	        {
+   130	          "name": "Phone",
+   131	          "type": "VARCHAR",
+   132	          "isCalculated": false,
+   133	          "notNull": false,
+   134	          "isPrimaryKey": false
+   135	        },
+   136	        {
+   137	          "name": "Fax",
+   138	          "type": "VARCHAR",
+   139	          "isCalculated": false,
+   140	          "notNull": false,
+   141	          "isPrimaryKey": false
+   142	        },
+   143	        {
+   144	          "name": "Email",
+   145	          "type": "VARCHAR",
+   146	          "isCalculated": false,
+   147	          "notNull": true,
+   148	          "isPrimaryKey": false
+   149	        },
+   150	        {
+   151	          "name": "SupportRepId",
+   152	          "type": "INTEGER",
+   153	          "isCalculated": false,
+   154	          "notNull": false,
+   155	          "isPrimaryKey": false
+   156	        }
+   157	      ],
+   158	      "cached": false,
+   159	      "primaryKey": "CustomerId"
+   160	    },
+   161	    {
+   162	      "name": "employee",
+   163	      "tableReference": {
+   164	        "table": "Employee"
+   165	      },
+   166	      "columns": [
+   167	        {
+   168	          "name": "EmployeeId",
+   169	          "type": "INTEGER",
+   170	          "isCalculated": false,
+   171	          "notNull": true,
+   172	          "isPrimaryKey": true
+   173	        },
+   174	        {
+   175	          "name": "LastName",
+   176	          "type": "VARCHAR",
+   177	          "isCalculated": false,
+   178	          "notNull": true,
+   179	          "isPrimaryKey": false
+   180	        },
+   181	        {
+   182	          "name": "FirstName",
+   183	          "type": "VARCHAR",
+   184	          "isCalculated": false,
+   185	          "notNull": true,
+   186	          "isPrimaryKey": false
+   187	        },
+   188	        {
+   189	          "name": "Title",
+   190	          "type": "VARCHAR",
+   191	          "isCalculated": false,
+   192	          "notNull": false,
+   193	          "isPrimaryKey": false
+   194	        },
+   195	        {
+   196	          "name": "ReportsTo",
+   197	          "type": "INTEGER",
+   198	          "isCalculated": false,
+   199	          "notNull": false,
+   200	          "isPrimaryKey": false
+   201	        },
+   202	        {
+   203	          "name": "BirthDate",
+   204	          "type": "TIMESTAMP",
+   205	          "isCalculated": false,
+   206	          "notNull": false,
+   207	          "isPrimaryKey": false
+   208	        },
+   209	        {
+   210	          "name": "HireDate",
+   211	          "type": "TIMESTAMP",
+   212	          "isCalculated": false,
+   213	          "notNull": false,
+   214	          "isPrimaryKey": false
+   215	        },
+   216	        {
+   217	          "name": "Address",
+   218	          "type": "VARCHAR",
+   219	          "isCalculated": false,
+   220	          "notNull": false,
+   221	          "isPrimaryKey": false
+   222	        },
+   223	        {
+   224	          "name": "City",
+   225	          "type": "VARCHAR",
+   226	          "isCalculated": false,
+   227	          "notNull": false,
+   228	          "isPrimaryKey": false
+   229	        },
+   230	        {
+   231	          "name": "State",
+   232	          "type": "VARCHAR",
+   233	          "isCalculated": false,
+   234	          "notNull": false,
+   235	          "isPrimaryKey": false
+   236	        },
+   237	        {
+   238	          "name": "Country",
+   239	          "type": "VARCHAR",
+   240	          "isCalculated": false,
+   241	          "notNull": false,
+   242	          "isPrimaryKey": false
+   243	        },
+   244	        {
+   245	          "name": "PostalCode",
+   246	          "type": "VARCHAR",
+   247	          "isCalculated": false,
+   248	          "notNull": false,
+   249	          "isPrimaryKey": false
+   250	        },
+   251	        {
+   252	          "name": "Phone",
+   253	          "type": "VARCHAR",
+   254	          "isCalculated": false,
+   255	          "notNull": false,
+   256	          "isPrimaryKey": false
+   257	        },
+   258	        {
+   259	          "name": "Fax",
+   260	          "type": "VARCHAR",
+   261	          "isCalculated": false,
+   262	          "notNull": false,
+   263	          "isPrimaryKey": false
+   264	        },
+   265	        {
+   266	          "name": "Email",
+   267	          "type": "VARCHAR",
+   268	          "isCalculated": false,
+   269	          "notNull": false,
+   270	          "isPrimaryKey": false
+   271	        }
+   272	      ],
+   273	      "cached": false,
+   274	      "primaryKey": "EmployeeId"
+   275	    },
+   276	    {
+   277	      "name": "genre",
+   278	      "tableReference": {
+   279	        "table": "Genre"
+   280	      },
+   281	      "columns": [
+   282	        {
+   283	          "name": "GenreId",
+   284	          "type": "INTEGER",
+   285	          "isCalculated": false,
+   286	          "notNull": true,
+   287	          "isPrimaryKey": true
+   288	        },
+   289	        {
+   290	          "name": "Name",
+   291	          "type": "VARCHAR",
+   292	          "isCalculated": false,
+   293	          "notNull": false,
+   294	          "isPrimaryKey": false
+   295	        }
+   296	      ],
+   297	      "cached": false,
+   298	      "primaryKey": "GenreId"
+   299	    },
+   300	    {
+   301	      "name": "invoice",
+   302	      "tableReference": {
+   303	        "table": "Invoice"
+   304	      },
+   305	      "columns": [
+   306	        {
+   307	          "name": "InvoiceId",
+   308	          "type": "INTEGER",
+   309	          "isCalculated": false,
+   310	          "notNull": true,
+   311	          "isPrimaryKey": true
+   312	        },
+   313	        {
+   314	          "name": "CustomerId",
+   315	          "type": "INTEGER",
+   316	          "isCalculated": false,
+   317	          "notNull": true,
+   318	          "isPrimaryKey": false
+   319	        },
+   320	        {
+   321	          "name": "InvoiceDate",
+   322	          "type": "TIMESTAMP",
+   323	          "isCalculated": false,
+   324	          "notNull": true,
+   325	          "isPrimaryKey": false
+   326	        },
+   327	        {
+   328	          "name": "BillingAddress",
+   329	          "type": "VARCHAR",
+   330	          "isCalculated": false,
+   331	          "notNull": false,
+   332	          "isPrimaryKey": false
+   333	        },
+   334	        {
+   335	          "name": "BillingCity",
+   336	          "type": "VARCHAR",
+   337	          "isCalculated": false,
+   338	          "notNull": false,
+   339	          "isPrimaryKey": false
+   340	        },
+   341	        {
+   342	          "name": "BillingState",
+   343	          "type": "VARCHAR",
+   344	          "isCalculated": false,
+   345	          "notNull": false,
+   346	          "isPrimaryKey": false
+   347	        },
+   348	        {
+   349	          "name": "BillingCountry",
+   350	          "type": "VARCHAR",
+   351	          "isCalculated": false,
+   352	          "notNull": false,
+   353	          "isPrimaryKey": false
+   354	        },
+   355	        {
+   356	          "name": "BillingPostalCode",
+   357	          "type": "VARCHAR",
+   358	          "isCalculated": false,
+   359	          "notNull": false,
+   360	          "isPrimaryKey": false
+   361	        },
+   362	        {
+   363	          "name": "Total",
+   364	          "type": "DOUBLE",
+   365	          "isCalculated": false,
+   366	          "notNull": true,
+   367	          "isPrimaryKey": false
+   368	        }
+   369	      ],
+   370	      "cached": false,
+   371	      "primaryKey": "InvoiceId"
+   372	    },
+   373	    {
+   374	      "name": "invoiceline",
+   375	      "tableReference": {
+   376	        "table": "InvoiceLine"
+   377	      },
+   378	      "columns": [
+   379	        {
+   380	          "name": "InvoiceLineId",
+   381	          "type": "INTEGER",
+   382	          "isCalculated": false,
+   383	          "notNull": true,
+   384	          "isPrimaryKey": true
+   385	        },
+   386	        {
+   387	          "name": "InvoiceId",
+   388	          "type": "INTEGER",
+   389	          "isCalculated": false,
+   390	          "notNull": true,
+   391	          "isPrimaryKey": false
+   392	        },
+   393	        {
+   394	          "name": "TrackId",
+   395	          "type": "INTEGER",
+   396	          "isCalculated": false,
+   397	          "notNull": true,
+   398	          "isPrimaryKey": false
+   399	        },
+   400	        {
+   401	          "name": "UnitPrice",
+   402	          "type": "DOUBLE",
+   403	          "isCalculated": false,
+   404	          "notNull": true,
+   405	          "isPrimaryKey": false
+   406	        },
+   407	        {
+   408	          "name": "Quantity",
+   409	          "type": "INTEGER",
+   410	          "isCalculated": false,
+   411	          "notNull": true,
+   412	          "isPrimaryKey": false
+   413	        }
+   414	      ],
+   415	      "cached": false,
+   416	      "primaryKey": "InvoiceLineId"
+   417	    },
+   418	    {
+   419	      "name": "mediatype",
+   420	      "tableReference": {
+   421	        "table": "MediaType"
+   422	      },
+   423	      "columns": [
+   424	        {
+   425	          "name": "MediaTypeId",
+   426	          "type": "INTEGER",
+   427	          "isCalculated": false,
+   428	          "notNull": true,
+   429	          "isPrimaryKey": true
+   430	        },
+   431	        {
+   432	          "name": "Name",
+   433	          "type": "VARCHAR",
+   434	          "isCalculated": false,
+   435	          "notNull": false,
+   436	          "isPrimaryKey": false
+   437	        }
+   438	      ],
+   439	      "cached": false,
+   440	      "primaryKey": "MediaTypeId"
+   441	    },
+   442	    {
+   443	      "name": "playlist",
+   444	      "tableReference": {
+   445	        "table": "Playlist"
+   446	      },
+   447	      "columns": [
+   448	        {
+   449	          "name": "PlaylistId",
+   450	          "type": "INTEGER",
+   451	          "isCalculated": false,
+   452	          "notNull": true,
+   453	          "isPrimaryKey": true
+   454	        },
+   455	        {
+   456	          "name": "Name",
+   457	          "type": "VARCHAR",
+   458	          "isCalculated": false,
+   459	          "notNull": false,
+   460	          "isPrimaryKey": false
+   461	        }
+   462	      ],
+   463	      "cached": false,
+   464	      "primaryKey": "PlaylistId"
+   465	    },
+   466	    {
+   467	      "name": "playlisttrack",
+   468	      "tableReference": {
+   469	        "table": "PlaylistTrack"
+   470	      },
+   471	      "columns": [
+   472	        {
+   473	          "name": "PlaylistId",
+   474	          "type": "INTEGER",
+   475	          "isCalculated": false,
+   476	          "notNull": true,
+   477	          "isPrimaryKey": true
+   478	        },
+   479	        {
+   480	          "name": "TrackId",
+   481	          "type": "INTEGER",
+   482	          "isCalculated": false,
+   483	          "notNull": true,
+   484	          "isPrimaryKey": true
+   485	        }
+   486	      ],
+   487	      "cached": false
+   488	    },
+   489	    {
+   490	      "name": "track",
+   491	      "tableReference": {
+   492	        "table": "Track"
+   493	      },
+   494	      "columns": [
+   495	        {
+   496	          "name": "TrackId",
+   497	          "type": "INTEGER",
+   498	          "isCalculated": false,
+   499	          "notNull": true,
+   500	          "isPrimaryKey": true
+   501	        },
+   502	        {
+   503	          "name": "Name",
+   504	          "type": "VARCHAR",
+   505	          "isCalculated": false,
+   506	          "notNull": true,
+   507	          "isPrimaryKey": false
+   508	        },
+   509	        {
+   510	          "name": "AlbumId",
+   511	          "type": "INTEGER",
+   512	          "isCalculated": false,
+   513	          "notNull": false,
+   514	          "isPrimaryKey": false
+   515	        },
+   516	        {
+   517	          "name": "MediaTypeId",
+   518	          "type": "INTEGER",
+   519	          "isCalculated": false,
+   520	          "notNull": true,
+   521	          "isPrimaryKey": false
+   522	        },
+   523	        {
+   524	          "name": "GenreId",
+   525	          "type": "INTEGER",
+   526	          "isCalculated": false,
+   527	          "notNull": false,
+   528	          "isPrimaryKey": false
+   529	        },
+   530	        {
+   531	          "name": "Composer",
+   532	          "type": "VARCHAR",
+   533	          "isCalculated": false,
+   534	          "notNull": false,
+   535	          "isPrimaryKey": false
+   536	        },
+   537	        {
+   538	          "name": "Milliseconds",
+   539	          "type": "INTEGER",
+   540	          "isCalculated": false,
+   541	          "notNull": true,
+   542	          "isPrimaryKey": false
+   543	        },
+   544	        {
+   545	          "name": "Bytes",
+   546	          "type": "INTEGER",
+   547	          "isCalculated": false,
+   548	          "notNull": false,
+   549	          "isPrimaryKey": false
+   550	        },
+   551	        {
+   552	          "name": "UnitPrice",
+   553	          "type": "DOUBLE",
+   554	          "isCalculated": false,
+   555	          "notNull": true,
+   556	          "isPrimaryKey": false
+   557	        }
+   558	      ],
+   559	      "cached": false,
+   560	      "primaryKey": "TrackId"
+   561	    }
+   562	  ],
+   563	  "relationships": [
+   564	    {
+   565	      "name": "album_artist",
+   566	      "models": [
+   567	        "album",
+   568	        "artist"
+   569	      ],
+   570	      "joinType": "MANY_TO_ONE",
+   571	      "condition": "album.ArtistId = artist.ArtistId"
+   572	    },
+   573	    {
+   574	      "name": "customer_employee",
+   575	      "models": [
+   576	        "customer",
+   577	        "employee"
+   578	      ],
+   579	      "joinType": "MANY_TO_ONE",
+   580	      "condition": "customer.SupportRepId = employee.EmployeeId"
+   581	    },
+   582	    {
+   583	      "name": "invoice_customer",
+   584	      "models": [
+   585	        "invoice",
+   586	        "customer"
+   587	      ],
+   588	      "joinType": "MANY_TO_ONE",
+   589	      "condition": "invoice.CustomerId = customer.CustomerId"
+   590	    },
+   591	    {
+   592	      "name": "invoiceline_invoice",
+   593	      "models": [
+   594	        "invoiceline",
+   595	        "invoice"
+   596	      ],
+   597	      "joinType": "MANY_TO_ONE",
+   598	      "condition": "invoiceline.InvoiceId = invoice.InvoiceId"
+   599	    },
+   600	    {
+   601	      "name": "invoiceline_track",
+   602	      "models": [
+   603	        "invoiceline",
+   604	        "track"
+   605	      ],
+   606	      "joinType": "MANY_TO_ONE",
+   607	      "condition": "invoiceline.TrackId = track.TrackId"
+   608	    },
+   609	    {
+   610	      "name": "playlisttrack_playlist",
+   611	      "models": [
+   612	        "playlisttrack",
+   613	        "playlist"
+   614	      ],
+   615	      "joinType": "MANY_TO_ONE",
+   616	      "condition": "playlisttrack.PlaylistId = playlist.PlaylistId"
+   617	    },
+   618	    {
+   619	      "name": "playlisttrack_track",
+   620	      "models": [
+   621	        "playlisttrack",
+   622	        "track"
+   623	      ],
+   624	      "joinType": "MANY_TO_ONE",
+   625	      "condition": "playlisttrack.TrackId = track.TrackId"
+   626	    },
+   627	    {
+   628	      "name": "track_album",
+   629	      "models": [
+   630	        "track",
+   631	        "album"
+   632	      ],
+   633	      "joinType": "MANY_TO_ONE",
+   634	      "condition": "track.AlbumId = album.AlbumId"
+   635	    },
+   636	    {
+   637	      "name": "track_genre",
+   638	      "models": [
+   639	        "track",
+   640	        "genre"
+   641	      ],
+   642	      "joinType": "MANY_TO_ONE",
+   643	      "condition": "track.GenreId = genre.GenreId"
+   644	    },
+   645	    {
+   646	      "name": "track_mediatype",
+   647	      "models": [
+   648	        "track",
+   649	        "mediatype"
+   650	      ],
+   651	      "joinType": "MANY_TO_ONE",
+   652	      "condition": "track.MediaTypeId = mediatype.MediaTypeId"
+   653	    }
+   654	  ],
+   655	  "views": [],
+   656	  "cubes": [],
+   657	  "dataSource": "mysql",
+   658	  "layoutVersion": 3
+   659	}

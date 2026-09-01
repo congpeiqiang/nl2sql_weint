@@ -1,0 +1,66 @@
+{
+  "user_intent": {
+    "original_question": "统计 aix_crystal_record_data 表中 content='调温' 的记录，按设备（device_code）分组统计各设备的调温次数，并展示调温次数最高的设备。",
+    "domain": "crystal_growth_device_record",
+    "keywords": ["aix_crystal_record_data", "content", "调温", "device_code", "设备", "调温次数", "分组", "最高"],
+    "intent_type": "count_records_group_by_device_top1"
+  },
+  "entities": {
+    "main_table": "aix_crystal_record_data",
+    "filters": [{"field": "content", "operator": "=", "value": "调温"}],
+    "group_by": ["device_code"],
+    "metrics": [{"name": "调温次数", "definition": "content='调温' 的记录数 COUNT(*)"}],
+    "fields_to_display": ["device_code", "调温次数(COUNT(*))"],
+    "output_requirement": "展示调温次数最高的设备（按次数降序取第一条）"
+  },
+  "metrics": [
+    {
+      "name": "调温次数",
+      "aliases": ["调温记录数"],
+      "formula": "COUNT(*) WHERE content='调温'",
+      "related_tables": ["aix_crystal_record_data"],
+      "aggregation": "COUNT"
+    }
+  ],
+  "business_rules": [],
+  "field_mappings": {
+    "设备/设备编码": {"table": "aix_crystal_record_data", "field": "device_code"},
+    "内容": {"table": "aix_crystal_record_data", "field": "content"},
+    "值": {"table": "aix_crystal_record_data", "field": "value"}
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表字段说明",
+      "content": "aix_crystal_record_data 表含 device_code(设备编码), content(内容), value(值), color(颜色), collect_time, operation_time, proc_stage(工艺阶段), puller_batch_no(炉次编号) 等字段"
+    },
+    {
+      "topic": "业务规则",
+      "content": "项目 knowledge/rules 为空，无自定义业务规则；AGENTS.md 存在但非 UTF-8 编码无法解析"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["aix_crystal_record_data"],
+    "main_fields": ["aix_crystal_record_data.device_code", "aix_crystal_record_data.content"],
+    "filter_conditions": ["content = '调温'"],
+    "group_by": ["device_code"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-01-01T00:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 1,
+      "field_mappings": 0,
+      "knowledge": 2
+    },
+    "filtered_saved": {
+      "metrics": 1,
+      "business_rules": 0,
+      "field_mappings": 2,
+      "knowledge": 2
+    }
+  }
+}

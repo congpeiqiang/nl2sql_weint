@@ -1,0 +1,706 @@
+# aix_crystal_comm_data_all table
+name: aix_crystal_comm_data_all
+table_reference:
+  table: aix_crystal_comm_data_all
+columns:
+- name: id
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: device_code
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: ip
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: collect_time
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: puller_batch_no
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: ingot_no
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_curr
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: curr_furn_batch
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: seed_pos
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: tot_feed_amt
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_vac_t1_temp
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_neg_gnd_v
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: rem_weight
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: set_avg_pull_spd
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: seed_succ_rate
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: heat_time
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: heat_time_seconds
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: set_diam_rate
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: proc_step_time
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: proc_step_time_seconds
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_cham_pres
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: const_diam_avg_pull_spd
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_pump_freq
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: act_avg_pull_spd
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: cryst_form_rate
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: proc_stage
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_vac_t2_temp
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: yield
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_cham_low_pres
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: cruc_pos
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: melt_bright
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: melt_time
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: melt_time_seconds
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_resis
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: sec_cham_pres
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: weight_diam
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: seed_usage_times
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: liq_lvl_pyro
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: curr_rod_count
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: feed_times
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: intell_cryst_pull
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: act_cruc_lift
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: seed_succ_count
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: bot_curr
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: seed_count
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: act_therm_field_temp
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: set_main_pow
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: bot_neg_gnd_v
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: cryst_rot
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_dist_water_temp
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: heat_shield_water_flow
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: bot_resis
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: act_diam_rate
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: set_pull_spd
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: set_liq_lvl_temp
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_v
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: heat_shield_water_temp
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: shoulder_rel_bright
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: cryst_gross_weight
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: tot_rod_count
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: oper_time
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: oper_time_seconds
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: cruc_rot
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: set_diam
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_dist_water_flow
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: heat_shield_pos
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: seed_cryst_no
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: set_liq_surf_dist
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: act_liq_lvl_temp
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: weight_liq_lvl
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: power_cab_temp
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: rod_yield_rate
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_dist_water_pres
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: evac_time
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: evac_time_seconds
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: work_order_no
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: act_diam
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: act_liq_surf_dist
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: set_cruc_lift
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: cryst_swing
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: bot_pow
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: bot_pos_gnd_v
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: bot_v
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: act_pull_spd
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: sec_dist_water_pres
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: disasm_time
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: disasm_time_seconds
+  type: INTEGER
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: remelt_weight
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: init_melt_weight
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: main_pos_gnd_v
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: act_main_pow
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: cryst_len
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: tot_feed_weight
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: cryst_net_weight
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: argon_flow_rate
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: set_therm_field_temp
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: melt_depth
+  type: DOUBLE
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: created_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: executed_at
+  type: TIMESTAMP
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+- name: equal_diam_head_model_switch
+  type: VARCHAR
+  is_calculated: false
+  not_null: false
+  is_primary_key: false
+  properties:
+    description: ''
+cached: false

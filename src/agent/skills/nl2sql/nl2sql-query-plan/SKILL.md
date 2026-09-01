@@ -1,4 +1,5 @@
 ---
+version: 0.1.0
 name: nl2sql-query-plan
 description: "触发：策略A流水线第4步。基于业务知识+Schema+子问题详情，生成程序化逐步查询计划。禁止生成SQL。策略B/策略C跳过。"
 ---
@@ -16,15 +17,19 @@ SQL-of-Thought 流水线第4步。**仅在策略A（复杂查询）中执行。*
 - **自动隔离**: 每个会话（thread_id）使用独立的存储目录
 - **依赖数据**: 读取前序 Skill 的 `knowledge.json`、`schema.json` 和 `subproblem.json`
 
-## 输入数据读取
+## 输入
 
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/knowledge-loader/knowledge.json`
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`
-- 必须调用 read_file 写读取`/workspace/nl2sql_process_data/{thread_id}/nl2sql-subproblem/subproblem.json`
+- 优先从对话上下文中获取前序 Skill 的输出（knowledge-loader / schema-linking / subproblem 的 JSON）
+- 若上下文中找不到，则 read_file 对应文件作为 fallback：
+  - `/workspace/nl2sql_process_data/{thread_id}/knowledge-loader/knowledge.json`
+  - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`
+  - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-subproblem/subproblem.json`
 
 ## 输出
 
-- 必须调用 write_file 写入`/workspace/nl2sql_process_data/{thread_id}/nl2sql-query-plan/query_plan.txt` 程序化查询计划（文本格式），例如：
+- 在回复末尾输出查询计划文本，供编排器传递给下游 skill
+- 仅在数据 >15KB 时 write_file 到 `/workspace/nl2sql_process_data/{thread_id}/nl2sql-query-plan/query_plan.txt` 作为 fallback
+- 格式示例：
 
 ```
 1. 从 titles_t 筛选 title_type='movie' 且 num_votes>10000 的行

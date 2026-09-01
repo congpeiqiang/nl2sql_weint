@@ -1,0 +1,13 @@
+{
+  "sql": "SELECT collect_time, melt_bright, shoulder_rel_bright, proc_stage, puller_batch_no, ingot_no FROM aix_crystal_comm_data WHERE device_code = 'D330' AND proc_stage = '调温' ORDER BY collect_time DESC",
+  "optimized_sql": null,
+  "issues": [
+    {
+      "rule": "no_limit",
+      "severity": "low",
+      "message": "SQL中无LIMIT子句，但根据用户规范，LIMIT通过run_sql的limit参数控制，属于设计意图，无需优化",
+      "suggestion": "无需修改，通过run_sql limit参数控制返回行数"
+    }
+  ],
+  "summary": "SQL结构良好，无高风险性能问题。已明确列出所需列（非SELECT *），WHERE条件精确筛选device_code和proc_stage，ORDER BY有明确排序列。无需优化。"
+}

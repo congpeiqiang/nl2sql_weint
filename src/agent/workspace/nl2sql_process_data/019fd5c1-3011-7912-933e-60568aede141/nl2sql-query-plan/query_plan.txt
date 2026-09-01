@@ -1,8 +1,0 @@
-查询计划：统计 2000-2023 年每年电影产量及相比上一年的增长率
-
-1. 从 titles 表筛选 title_type='movie' 且 start_year BETWEEN 2000 AND 2023 且 start_year IS NOT NULL 的行
-2. 按 start_year 分组，计算每年电影产量 COUNT(*)
-3. 使用 LAG 窗口函数 LAG(COUNT(*)) OVER (ORDER BY start_year) 获取上一年产量
-4. 计算增长率 = (当年产量 - 上一年产量) / 上一年产量 * 100
-5. 按 start_year ASC 排序输出年份、产量、增长率
-6. 第一年（2000年）无上一年数据，增长率为 NULL

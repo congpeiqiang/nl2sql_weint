@@ -1,0 +1,1 @@
+{"strategy": "full", "schema": "imdb MDL: titles(核心作品表, PK id), episodes, principals, principals_characters, titles_genres, titleakas, titleakas_titleakaattributes, titleakas_titleakatypes, names_knownfortitles, names_primaryprofessions, categories, jobs, genres, names, professions, titleakaattributes, titleakatypes", "note": "get_context + get_instructions 检索成功，问题清晰"}

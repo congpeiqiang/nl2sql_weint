@@ -1,9 +1,0 @@
-查询计划：查询每个类型的电影数量，按数量降序排列
-
-1. 从 titles 表筛选 title_type = 'movie' 的电影记录
-2. 通过 titles_genres.title_id = titles.id 连接 titles_genres 表（作品-类型关联表）
-3. 通过 titles_genres.genre_id = genres.id 连接 genres 表（类型表）
-4. 按 genres.display_name 分组（每个类型一组）
-5. 对每组计算 COUNT(DISTINCT titles.id) 得到该类型的电影数量
-6. 按电影数量降序排列（ORDER BY 电影数量 DESC）
-7. 返回 genres.display_name（类型名）和电影数量

@@ -9,12 +9,12 @@
       "path": "./src/agent/main_agent.py:agent"
     },
     "nl2sql_agent": {
-      "path": "./src/agent/nl2sql_agent.py:agent"
+      "path": "./src/agent/graphs/nl2sql_agent.py:agent"
     }
   },
   "checkpointer": {
     "backend": "custom",
-    "path": "./src/agent/checkpointer_factory.py:checkpointer"
+    "path": "./src/agent/checkpoint/checkpointer_factory.py:checkpointer"
   },
   "_deployId": "id_MS81OmFIVnBZMlhrdUp2bG43bmx2TG82VDJacGJ3PT06NWI0OTVlNWQ=",
   "env": ".env",

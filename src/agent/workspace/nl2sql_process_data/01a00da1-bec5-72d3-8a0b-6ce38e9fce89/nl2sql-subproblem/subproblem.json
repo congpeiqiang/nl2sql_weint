@@ -1,0 +1,18 @@
+{
+  "operation": "DELETE",
+  "SELECT": "确认查询：id, primary_title, title_type, start_year（验证目标记录存在）",
+  "FROM": "titles",
+  "JOIN": null,
+  "WHERE": [
+    {"field": "titles.primary_title", "operator": "=", "value": "The Ballad of Conrad & Vernon"}
+  ],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": null,
+  "LIMIT": null,
+  "notes": [
+    "DELETE 目标：titles 表中 primary_title = 'The Ballad of Conrad & Vernon' 的记录",
+    "删除前先 SELECT 确认存在情况（可能多条同名记录，展示全部）",
+    "删除后回显影响行数"
+  ]
+}

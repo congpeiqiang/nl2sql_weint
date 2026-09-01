@@ -1,0 +1,58 @@
+{
+  "user_intent": {
+    "original_question": "从 Album 表中再随机删除一条数据（先 SELECT 随机选取一条待删除记录，再执行 DELETE 删除该条）",
+    "domain": "database_dml",
+    "keywords": ["Album", "随机删除", "SELECT", "DELETE", "一条"],
+    "intent_type": "delete_random_record"
+  },
+  "entities": {
+    "target_table": "Album",
+    "operation": "DELETE",
+    "row_count": 1,
+    "selection": "random",
+    "fields_to_display": ["AlbumId", "Title", "ArtistId"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_dml_001",
+      "name": "删除不可逆操作",
+      "condition": "删除前必须 SELECT 确认待删除记录，且仅删除一条记录"
+    }
+  ],
+  "field_mappings": {},
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "数据库类型",
+      "content": "Chinook_Aliyun 为 PostgreSQL 数据库（chinook 库），未在语义层建模，需通过 dbmcp 直连工具访问"
+    },
+    {
+      "topic": "表说明",
+      "content": "Chinook 数据库中 Album 表为专辑表，包含专辑主键 AlbumId、专辑名称 Title、关联艺术家 ArtistId"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["Album"],
+    "main_fields": ["Album.AlbumId", "Album.Title", "Album.ArtistId"],
+    "filter_conditions": ["随机选取一条记录"],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-08-16T10:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 0,
+      "knowledge": 0
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 1,
+      "field_mappings": 0,
+      "knowledge": 2
+    }
+  }
+}

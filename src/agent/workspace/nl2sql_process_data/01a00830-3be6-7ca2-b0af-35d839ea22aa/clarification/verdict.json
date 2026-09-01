@@ -1,0 +1,9 @@
+{
+  "clear": true,
+  "reason": "OK",
+  "original_question": "查询曲目（Track）数据，包括曲目名称、所属专辑、类型等基本信息，并给出曲目总数概览。",
+  "db_name": "Chinook_Aliyun",
+  "issues": [],
+  "assumption": "Chinook_Aliyun 为直连 PostgreSQL 库（无语义层 server），语义层工具不可用，按基础设施不可用处理不阻塞查询。问题语义明确：需返回 Track 曲目明细（曲目名称、所属专辑 Album、类型 Genre）以及 Track 总行数概览。",
+  "note": "Semantic layer not available for Chinook_Aliyun; direct-connect (dbmcp) channel used."
+}

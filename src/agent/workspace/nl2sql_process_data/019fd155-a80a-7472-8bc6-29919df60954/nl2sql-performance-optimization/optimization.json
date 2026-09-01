@@ -1,6 +1,0 @@
-{
-  "sql": "SELECT n.primary_name AS actor_name, p.ordering\nFROM titles t\nJOIN principals p ON p.title_id = t.id\nJOIN names n ON p.name_id = n.id\nWHERE t.primary_title = 'The Matrix'\n  AND t.title_type = 'movie'\n  AND p.category_id IN ('actor', 'actress')\nORDER BY p.ordering ASC",
-  "optimized_sql": "SELECT n.primary_name AS actor_name, p.ordering\nFROM titles t\nJOIN principals p ON p.title_id = t.id\nJOIN names n ON p.name_id = n.id\nWHERE t.primary_title = 'The Matrix'\n  AND t.title_type = 'movie'\n  AND p.category_id IN ('actor', 'actress')\nORDER BY p.ordering ASC",
-  "issues": [],
-  "summary": "共发现 0 个性能问题。SQL 已明确列出所需列，所有 JOIN 均有 ON 条件，无子查询、无函数包裹列、无 NOT IN、无 DISTINCT、无 LIKE 前缀通配符、无 OR 条件。LIMIT 通过 run_sql 的 limit 参数控制（按任务规范不在 SQL 中写 LIMIT）。"
-}

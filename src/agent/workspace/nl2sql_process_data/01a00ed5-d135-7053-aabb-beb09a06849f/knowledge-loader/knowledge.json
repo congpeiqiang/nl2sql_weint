@@ -1,0 +1,59 @@
+{
+  "user_intent": {
+    "original_question": "查询 Album 表当前的总行数（SELECT count(*)），并返回结果。这是一个验证任务，只需返回行数，不要执行任何删除或修改操作。",
+    "domain": "chinook",
+    "keywords": ["Album", "总行数", "count"],
+    "intent_type": "query_row_count"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["album 总行数"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "验证任务只读",
+      "condition": "仅执行 SELECT count(*) 等只读查询，禁止 DELETE/UPDATE/DDL"
+    },
+    {
+      "id": "rule_002",
+      "name": "SQL 中不写 LIMIT",
+      "condition": "由 run_sql 的 limit 参数控制返回行数，避免与服务端自动追加的 cap 冲突"
+    }
+  ],
+  "field_mappings": {
+    "Album 表": "album"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "知识库说明",
+      "content": "Chinook_Aliyun (PostgreSQL) 未配置 Wren 语义层，也无专属知识库目录；工作区仅存在 imdb_project / aix_project 知识，与本次 Chinook 查询无关，故业务规则/指标/术语为空"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["album"],
+    "main_fields": [],
+    "filter_conditions": [],
+    "time_range": null
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-29T00:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 2,
+      "field_mappings": 1,
+      "knowledge": 1
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 2,
+      "field_mappings": 1,
+      "knowledge": 1
+    }
+  }
+}

@@ -1,4 +1,5 @@
 ---
+version: 0.1.0
 name: nl2sql-correction
 description: "触发：SQL执行失败或dry_run失败超过3次。策略A中使用。基于错误分类体系诊断并修复。策略B仅简单重试（不调用此skill）。策略C不经过此步骤。"
 ---

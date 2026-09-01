@@ -1,0 +1,56 @@
+{
+  "user_intent": {
+    "original_question": "查询当前数据库 artist 表的记录总数（有多少个艺术家）。",
+    "domain": "chinook_music",
+    "keywords": ["artist", "艺术家", "记录总数", "count"],
+    "intent_type": "count_rows_single_table"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["artist 表记录总数"],
+    "target_table": "artist",
+    "aggregation": "COUNT(*)"
+  },
+  "metrics": [],
+  "business_rules": [],
+  "field_mappings": {
+    "艺术家": "artist",
+    "artist 记录总数": "COUNT(*) FROM artist"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "数据库通道说明",
+      "content": "Chinook_Aliyun 为 postgres 直连数据库（未在 Wren 语义层建模），查询通过 dbmcp_run_sql 直连通道执行，SQL 语法遵循 PostgreSQL。"
+    },
+    {
+      "topic": "知识库适配说明",
+      "content": "当前环境知识库（imdb_project/aix_project）均为 IMDb/AIX 项目业务规则，与 Chinook artist 表无关，全部过滤，无适用业务规则。"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["artist"],
+    "main_fields": ["COUNT(*)"],
+    "filter_conditions": [],
+    "time_range": null,
+    "query_type": "单表全量行数统计"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2026-07-28T10:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 0,
+      "knowledge": 0
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 0,
+      "field_mappings": 1,
+      "knowledge": 2
+    }
+  }
+}

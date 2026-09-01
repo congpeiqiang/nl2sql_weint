@@ -1,0 +1,10 @@
+{
+  "SELECT": "COUNT(*) 统计 album 表总行数",
+  "FROM": "album",
+  "JOIN": null,
+  "WHERE": [],
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": null,
+  "LIMIT": null
+}

@@ -1,0 +1,71 @@
+{
+  "user_intent": {
+    "original_question": "查询调温数据",
+    "domain": "aix_crystal_puller",
+    "keywords": ["调温", "温度调整", "晶体生长"],
+    "intent_type": "query_temperature_adjustment_records",
+    "notes": "问题未指定时间范围/设备/炉次等过滤条件，需按全量数据查询或默认最近数据"
+  },
+  "entities": {
+    "time_range": null,
+    "filters": [],
+    "fields_to_display": ["调温相关记录字段"]
+  },
+  "metrics": [],
+  "business_rules": [
+    {
+      "id": "rule_001",
+      "name": "业务规则占位",
+      "condition": "rules/general.md 无自定义业务规则（仅占位文本），get_instructions 返回空规则"
+    }
+  ],
+  "field_mappings": {
+    "调温": {
+      "candidate_1": "aix_crystal_record_data.content 中的调温操作记录（content 为操作内容，value 为对应值）",
+      "candidate_2": "aix_crystal_comm_data 中的温度类传感字段（main_vac_t1_temp / main_vac_t2_temp / act_liq_lvl_temp / set_liq_lvl_temp / liq_lvl_pyro 等）"
+    },
+    "设备编码": "aix_crystal_record_data.device_code",
+    "采集时间": "aix_crystal_record_data.collect_time",
+    "操作时间": "aix_crystal_record_data.operation_time",
+    "炉次编号": "aix_crystal_record_data.puller_batch_no",
+    "棒次编号": "aix_crystal_record_data.ingot_no",
+    "工艺阶段": "aix_crystal_record_data.proc_stage",
+    "工单编号": "aix_crystal_record_data.work_order_no"
+  },
+  "historical_qa_pairs": [],
+  "knowledge": [
+    {
+      "topic": "表结构说明",
+      "content": "aix_crystal_record_data 为记录型数据：content(内容)+value(值)+color(颜色)，记录炉台操作事件；aix_crystal_comm_data 为公共数据：大量传感采集字段（温度/电流/压力/拉速等）"
+    },
+    {
+      "topic": "术语说明",
+      "content": "调温：晶体生长炉中的温度调整操作，通常作为操作记录写入 record_data.content 字段"
+    }
+  ],
+  "context_summary": {
+    "main_tables": ["aix_crystal_record_data", "aix_crystal_comm_data"],
+    "main_fields": ["aix_crystal_record_data.content", "aix_crystal_record_data.value", "aix_crystal_record_data.collect_time"],
+    "filter_conditions": [],
+    "time_range": "未指定"
+  },
+  "metadata": {
+    "phase": "knowledge_loaded",
+    "status": "success",
+    "timestamp": "2025-01-01T00:00:00",
+    "total_queried": {
+      "metrics": 0,
+      "business_rules": 1,
+      "field_mappings": 0,
+      "knowledge": 0,
+      "historical_qa": 0
+    },
+    "filtered_saved": {
+      "metrics": 0,
+      "business_rules": 1,
+      "field_mappings": 6,
+      "knowledge": 2,
+      "historical_qa": 0
+    }
+  }
+}

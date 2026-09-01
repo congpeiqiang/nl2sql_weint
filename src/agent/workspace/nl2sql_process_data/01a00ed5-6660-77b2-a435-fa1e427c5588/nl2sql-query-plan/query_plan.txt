@@ -1,0 +1,15 @@
+查询计划：从 Album 表随机删除一条记录
+
+1. 第一步（随机选取）：
+   - 对 album 表执行 SELECT，使用 ORDER BY random() 随机排序，仅返回 1 条记录
+   - 选取列：albumid, title, artistid
+   - 通过 run_sql 的 limit=1 参数控制只返回 1 行（SQL 中不写 LIMIT，遵守 run_sql LIMIT 规范）
+   - 记录选中的 albumid
+
+2. 第二步（执行删除）：
+   - 使用第一步选中的 albumid 作为 WHERE 条件
+   - 执行 DELETE FROM album WHERE albumid = <选中的值>
+   - 该 WHERE 条件基于主键，保证只删除且仅删除一条记录
+
+3. 第三步（确认结果）：
+   - 可选：再次查询确认该 albumid 已不存在，验证删除成功

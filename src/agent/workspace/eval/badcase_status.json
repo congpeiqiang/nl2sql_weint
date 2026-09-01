@@ -1,0 +1,82 @@
+{
+  "707b335d8f0ea18d19a52398b8fc8b18": {
+    "status": "fixed",
+    "question": "你好",
+    "db_name": "imdb",
+    "reasons": [
+      "user_feedback=0"
+    ],
+    "collected_at": "2026-08-24",
+    "updated_at": "2026-08-24T08:29:13.070300+00:00",
+    "note": "用户测试差评，非模型问题"
+  },
+  "9e0ad442c83044bc9504ed16c3e61356": {
+    "status": "fixed",
+    "question": "参演了最多不同类型电影的演员 Top 10，显示演员名和涉及的类型数",
+    "db_name": "imdb",
+    "reasons": [
+      "sql_biz_correct_score=0.00"
+    ],
+    "collected_at": "2026-08-24",
+    "updated_at": "2026-08-24T08:57:41.072119+00:00",
+    "note": "验证测试"
+  },
+  "fdd0e697799df79c195d69bfb81557fa": {
+    "status": "invalid",
+    "question": "停止任务",
+    "db_name": "",
+    "reasons": [
+      "report_table_score=0.00",
+      "analysis_report_score=0.00"
+    ],
+    "collected_at": "2026-08-24",
+    "updated_at": "2026-08-24T09:02:58.547633+00:00",
+    "note": "非数据查询，用户要求停止任务"
+  },
+  "560049ac128ff69bad1abab89818ff3f": {
+    "status": "pending",
+    "question": "查询专家数据",
+    "db_name": "",
+    "reasons": [
+      "sql_biz_correct_score=0.00"
+    ],
+    "collected_at": "2026-08-24",
+    "updated_at": "2026-08-24T18:13:37.694901+00:00",
+    "note": ""
+  },
+  "93adbfe7b22b24589a5a2c6fc2be0539": {
+    "status": "pending",
+    "question": "专辑数量",
+    "db_name": "",
+    "reasons": [
+      "sql_biz_correct_score=0.30"
+    ],
+    "collected_at": "2026-08-24",
+    "updated_at": "2026-08-24T18:13:37.694901+00:00",
+    "note": ""
+  },
+  "361f52827153eb549588ce9c4a1e3050": {
+    "status": "fixed",
+    "question": "查询 average_rating 最高的 10 部电影，显示标题和评分",
+    "db_name": "Chinook_Aliyun",
+    "reasons": [
+      "sql_biz_correct_score=0.00",
+      "report_table_score=0.00",
+      "analysis_report_score=0.00"
+    ],
+    "collected_at": "2026-08-24",
+    "updated_at": "2026-08-25T01:27:29.088668+00:00",
+    "note": ""
+  },
+  "d396a46bad14d6b4b48efeecd70ceef9": {
+    "status": "pending",
+    "question": "有什么技能",
+    "db_name": "imdb",
+    "reasons": [
+      "user_feedback=0"
+    ],
+    "collected_at": "2026-08-24",
+    "updated_at": "2026-08-24T18:13:37.694901+00:00",
+    "note": ""
+  }
+}

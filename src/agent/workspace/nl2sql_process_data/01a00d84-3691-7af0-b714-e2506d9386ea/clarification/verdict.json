@@ -1,0 +1,8 @@
+{
+  "clear": true,
+  "reason": "OK",
+  "original_question": "统计 aix_crystal_record_data 表中 content='调温' 的记录，按设备（device_code）分组统计各设备的调温次数，并展示调温次数最高的设备。",
+  "db_name": "clickhouse-aix",
+  "issues": [],
+  "assumption": "表 aix_crystal_record_data 存在且含 device_code/content 列；content='调温' 作为唯一过滤条件；按 device_code 分组 COUNT(*) 计调温次数，调温次数最高设备按 COUNT 降序取第一条。"
+}

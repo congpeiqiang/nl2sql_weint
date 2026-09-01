@@ -1,0 +1,11 @@
+{
+  "SELECT": "COUNT(*) AS artist_count  —— artist 表记录总数",
+  "FROM": "artist",
+  "JOIN": null,
+  "WHERE": null,
+  "GROUP_BY": null,
+  "HAVING": null,
+  "ORDER_BY": null,
+  "LIMIT": "SQL 中不写 LIMIT（遵守 run_sql LIMIT 规范，行数由 run_sql limit 参数控制）",
+  "notes": "单表全量行数统计，无筛选、无分组、无关联"
+}

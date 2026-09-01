@@ -1,0 +1,5 @@
+{
+  "instructions": "Chinook数据库是一个音乐商店示例数据库，包含专辑(Album)、艺术家(Artist)、曲目(Track)等表。Album表通过ArtistId外键关联Artist表。",
+  "similar_queries": [],
+  "all_knowledge": "Album表包含Title(专辑标题)和ArtistId字段；Artist表包含ArtistId和Name(艺术家姓名)字段。两表通过ArtistId关联。"
+}
