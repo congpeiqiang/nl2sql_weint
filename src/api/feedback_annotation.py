@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from agent.feedback.store import ANNOTATION_STATUSES, get_store
+from agent.feedback.store import ANNOTATION_STATUSES, AnnotationRecord, get_store
 from agent.eval.bad_types import BAD_TYPES, is_valid_bad_type
 from api._common import json_response, parse_body
 
@@ -117,6 +117,38 @@ async def _run_preview(db_name: str, sql: str, limit: int = _PREVIEW_LIMIT) -> d
     return result
 
 
+def _fill_annotation_from_snapshot(ann) -> "AnnotationRecord":
+    """从本地反馈快照补齐标注的 question/bad_sql（SQLite 读，无网络）。
+
+    入队时 question/sql 为空串（异步快照补齐在后台填充 feedback 表，见
+    api/message_feedback._schedule_snapshot_backfill），列表页标题依赖 question，
+    这里从快照快速补齐并持久化，避免待判断列表显示「无问题摘要」。快照也为空 /
+    读取失败则保持原样（详情端惰性补齐兜底）。
+    """
+    if ann.question and ann.bad_sql:
+        return ann
+    try:
+        rec = store.get(ann.thread_id, ann.message_id)
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[annotation] 读反馈快照失败 %s: %s", ann.thread_id[:12], e)
+        return ann
+    if rec is None or (not rec.question and not rec.sql):
+        return ann
+    fields: dict = {}
+    if not ann.question and rec.question:
+        fields["question"] = rec.question[:2000]
+    if not ann.bad_sql and rec.sql:
+        fields["bad_sql"] = rec.sql[:8000]
+    if not fields:
+        return ann
+    try:
+        updated = store.update_annotation(ann.thread_id, ann.message_id, **fields)
+        return updated or ann
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[annotation] 列表补齐标注失败 %s: %s", ann.thread_id[:12], e)
+        return ann
+
+
 async def _backfill_annotation(thread_id: str, message_id: str) -> dict | None:
     """惰性补齐标注的 question/bad_sql（优先本地反馈快照，再取线程 state）。
 
@@ -165,6 +197,8 @@ async def list_annotations(request: Request):
     if status and status not in ANNOTATION_STATUSES:
         return json_response({"error": f"status 必须是 {ANNOTATION_STATUSES} 之一"}, status=400)
     records = store.list_annotations(status=status, limit=limit)
+    # 列表标题依赖 question：入队时为空，这里从本地快照快速补齐（无网络读取）
+    records = [_fill_annotation_from_snapshot(r) for r in records]
     return json_response(
         {
             "count": len(records),

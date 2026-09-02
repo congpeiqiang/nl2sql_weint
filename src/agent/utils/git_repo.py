@@ -4,25 +4,88 @@
 最小面：浅克隆（branch/tag）、读取仓库元信息（remote/branch/commit/tag）。
 
 安全约束（由调用方 + 本模块共同保证）：
-- repo_url 只允许 http(s)，禁止 ssh/本地路径/file:// 等协议；
+- repo_url 只允许 http(s)/ssh，禁止 git://、本地路径、file:// 等协议；
 - 所有命令用 list 传参（`shell=False`），杜绝 shell 注入；
 - 克隆/删除目标路径必须在 workspace 白名单内（调用方校验）。
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
 from typing import Optional
 
-_REMOTE_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+_REMOTE_URL_RE = re.compile(r"^(?:https?|ssh)://", re.IGNORECASE)
+
+# ── SSH 密钥（语义库 ssh:// 推送用）────────────────────────────
+# 密钥放持久卷（AGENT_DATA_ROOT，容器内=/app/data/.ssh），重建镜像不丢；
+# 若放在 /root/.ssh，容器一 recreate 就消失，GitLab 上已挂的 key 全部失效。
+_SSH_ENSURED = False
+
+
+def ssh_dir() -> Path:
+    """SSH 密钥目录（持久卷下）。"""
+    root = os.environ.get("AGENT_DATA_ROOT", "/app/data")
+    return Path(root) / ".ssh"
+
+
+def ensure_ssh_key() -> Path:
+    """确保持久卷下存在 ed25519 私钥（首启/空卷自动生成），幂等。返回私钥路径。"""
+    global _SSH_ENSURED
+    d = ssh_dir()
+    priv = d / "id_ed25519"
+    if priv.exists() and _SSH_ENSURED:
+        return priv
+    if os.name != "nt":  # 生成/权限只对 Linux 容器有意义；Windows 本地开发不落盘
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
+        if not priv.exists():
+            try:
+                subprocess.run(
+                    ["ssh-keygen", "-t", "ed25519", "-f", str(priv), "-N", "", "-q",
+                     "-C", "nl2sql-push"],
+                    capture_output=True, check=False, stdin=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
+        for f in (priv, priv.with_suffix(".pub")):
+            try:
+                os.chmod(f, 0o600)
+            except OSError:
+                pass
+    _SSH_ENSURED = True
+    return priv
+
+
+def _git_ssh_command() -> str:
+    """git 走 ssh:// 时使用的 ssh 命令：锁定持久卷里的私钥 + known_hosts，
+    自动接受新指纹、禁交互/密码（纯密钥），避免无 TTY 服务进程挂起。"""
+    d = ssh_dir()
+    return (
+        f"ssh -i {d / 'id_ed25519'} -o IdentitiesOnly=yes "
+        f"-o UserKnownHostsFile={d / 'known_hosts'} "
+        "-o StrictHostKeyChecking=accept-new -o BatchMode=yes -o PasswordAuthentication=no"
+    )
 
 
 def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[bool, str]:
     """执行 git 命令，返回 (ok, output)。异常统一转 (False, 错误信息)。"""
+    ensure_ssh_key()  # 保证 GIT_SSH_COMMAND 引用的私钥在持久卷上（幂等）
+    cmd = ["git"]
+    if cwd:
+        # git 2.35+ dubious ownership 检查：仓库目录属主≠进程用户（如容器 root vs
+        # 挂载卷 uid1000）时拒绝执行，报 fatal: detected dubious ownership。
+        # 用命令级 `-c safe.directory=<cwd>` 按仓库路径豁免——不依赖全局 gitconfig
+        # （容器重建后全局配置会丢），作用域仅限本次操作的 cwd。
+        cmd += ["-c", f"safe.directory={cwd}"]
+    cmd += list(args)
     try:
         proc = subprocess.run(
-            ["git", *args],
+            cmd,
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -30,7 +93,11 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[b
             encoding="utf-8",
             errors="replace",
             stdin=subprocess.DEVNULL,
-            env={**__import__("os").environ, "GIT_TERMINAL_PROMPT": "0"},
+            env={
+                **os.environ,
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_SSH_COMMAND": _git_ssh_command(),
+            },
         )
     except FileNotFoundError:
         return False, "git 未安装或不在 PATH"
@@ -48,12 +115,12 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[b
 def validate_repo_url(url: str) -> str:
     """校验并返回归一化的 repo_url；非法时抛 ValueError。
 
-    只允许 http(s)。用 list 传参 + 非 shell 执行，即便 URL 含特殊字符也不会
+    只允许 http(s)/ssh。用 list 传参 + 非 shell 执行，即便 URL 含特殊字符也不会
     被 shell 解释，但显式白名单协议可进一步杜绝 `--upload-pack` 等注入面。
     """
     url = (url or "").strip()
     if not _REMOTE_URL_RE.match(url):
-        raise ValueError("repo_url 必须是 http(s) 地址")
+        raise ValueError("repo_url 必须是 http(s) 或 ssh 地址")
     if any(c in url for c in ("\n", "\r", "\0")):
         raise ValueError("repo_url 含非法字符")
     return url

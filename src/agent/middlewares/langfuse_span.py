@@ -73,6 +73,12 @@ VFS_PROCESS_DATA_PREFIX = "/workspace/nl2sql_process_data/"
 _DUMP_ENABLED = (os.getenv("NL2SQL_PROCESS_DATA_DUMP", "1") or "1").strip().lower() not in (
     "0", "false", "no", "off",
 )
+# 是否把工具 output（查询结果 columns+rows）写入 process_data 落盘文件。
+# 默认关闭：run_sql 等结果可能非常庞大，落盘会撑爆磁盘；调试需要时置 1 临时开启。
+# 完整 output 始终在 Langfuse span 里，落盘只留轻量行数标记即可排查。
+_DUMP_OUTPUT_ENABLED = (os.getenv("NL2SQL_PROCESS_DATA_DUMP_OUTPUT", "0") or "0").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 # 单字段（input/output）大小上限：超过则只存截断标记 + 头部，防病理大结果撑爆磁盘
 _DUMP_MAX_BYTES = 8 * 1024 * 1024
 # 不 dump 的文件类工具（write_file/read_file 产物本身已落盘，不重复代写）
@@ -327,6 +333,49 @@ def _parent_trace_id() -> str:
     return ""
 
 
+def _question_id() -> str:
+    """当前问题标识：主 run 的 Langfuse trace id（每问题 = 一条 chat-turn trace）。
+
+    同会话多问题时，子 run 的 skill span/dump 都要区分归属哪个问题，靠
+    config.metadata 里透传的主 run trace id。优先级：
+    1. config.metadata.langfuse_parent_trace_id —— 子 run 场景（deepagents patch 注入）
+    2. config.metadata.langfuse_trace_id —— 预留（HTTP 层未注入）
+    3. 当前 OTel 活跃 span 的 trace id —— 主 run 直调工具场景兜底
+    """
+    try:
+        from langgraph.config import get_config as _lg_get_config
+        cfg = _lg_get_config()
+        if cfg:
+            meta = cfg.get("metadata") or {}
+            for key in ("langfuse_parent_trace_id", "langfuse_trace_id"):
+                v = meta.get(key, "")
+                if v:
+                    return str(v)
+    except Exception:
+        pass
+    try:
+        from opentelemetry import trace as _otel_trace
+        _span = _otel_trace.get_current_span()
+        _ctx = _span.get_span_context() if _span else None
+        if _ctx and _ctx.is_valid:
+            return format(_ctx.trace_id, "032x")
+    except Exception:
+        pass
+    return ""
+
+
+def _user_question() -> str:
+    """当前问题文本（LangfuseMetadataMiddleware 每 run 注入的 user_question）。"""
+    try:
+        from langgraph.config import get_config as _lg_get_config
+        cfg = _lg_get_config()
+        if cfg:
+            return str((cfg.get("metadata", {}) or {}).get("user_question", "") or "")
+    except Exception:
+        pass
+    return ""
+
+
 def _parent_obs_id() -> str:
     """从 LangGraph config.metadata 读取主 agent 的 root observation ID（M-T3b 修复）。
 
@@ -453,6 +502,25 @@ def _result_payload(result: Any) -> Any:
             pass
         return raw
     return str(raw)
+
+
+def _output_marker(result: Any) -> dict:
+    """工具 output 的轻量占位（默认不落盘完整结果，防查询结果撑爆磁盘）。
+
+    保留行数/条数便于排查归属；完整 output 在 Langfuse span 里可随时回看。
+    """
+    try:
+        payload = _result_payload(result)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        rows = payload.get("rows")
+        if isinstance(rows, list):
+            return {"_omitted": True, "rows_count": len(rows)}
+        return {"_omitted": True}
+    if isinstance(payload, list):
+        return {"_omitted": True, "count": len(payload)}
+    return {"_omitted": True}
 
 
 class LangfuseSpanMiddleware(AgentMiddleware):
@@ -809,17 +877,27 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                 seq = len([f for f in skill_dir.iterdir() if f.suffix == ".json"]) + 1
             except Exception:  # noqa: BLE001
                 seq = 1
+            # 问题维度：同会话多问题 → 用主 run trace id（每问题=一条 chat-turn trace）
+            # + 问题文本区分归属，文件名加问题短 id 前缀（同一问题的产物排在一起）
+            question_id = _question_id()
+            user_question = _user_question()
             payload = {
                 "tool": tool_name,
                 "skill": skill,
                 "heuristic": heuristic,
                 "thread_id": thread_id,
+                "question_id": question_id,
+                "user_question": user_question,
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "input": _cap_json(args, _DUMP_MAX_BYTES),
-                "output": _cap_json(_result_payload(result), _DUMP_MAX_BYTES),
+                "output": _cap_json(_result_payload(result), _DUMP_MAX_BYTES)
+                if _DUMP_OUTPUT_ENABLED
+                else _output_marker(result),
             }
             blob = json.dumps(payload, ensure_ascii=False, default=str)
-            (skill_dir / f"{tool_name}-{seq}.json").write_text(blob, encoding="utf-8")
+            qprefix = question_id[:8] if question_id else ""
+            fname = f"{qprefix}_{tool_name}-{seq}.json" if qprefix else f"{tool_name}-{seq}.json"
+            (skill_dir / fname).write_text(blob, encoding="utf-8")
         except Exception as e:  # noqa: BLE001
             _logger.debug("[langfuse_span] process_data dump 失败: %s", e)
 

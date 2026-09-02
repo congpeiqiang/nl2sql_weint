@@ -14,6 +14,7 @@ system prompt（失败回退本地文件）；同步脚本用 create_prompt 上�
 """
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import random
@@ -586,6 +587,60 @@ def create_score(
     except Exception as e:  # noqa: BLE001
         _logger.debug("[langfuse] create_score(%s) 失败: %s", name, e)
         return False
+
+
+# ── P0 评估可靠交付：显式 flush + atexit 兜底 ───────────────
+# create_score / span 由 SDK 后台线程批量上送；进程退出前不 flush 会丢最近窗口
+# 分数/trace（设计文档 NL2SQL-评估精准化设计方案.md §8.2）。flush 幂等、永不抛。
+
+def flush_langfuse() -> None:
+    """显式刷新 Langfuse SDK 上送队列（分数/trace 后台缓冲）。
+
+    幂等：从未创建 client/handler 时 no-op；任何异常仅告警，绝不影响调用方
+    （uvicorn lifespan 停机 / 脚本收尾）。同 run_experiment.py:697 的
+    `get_client().flush()` 先例——handler 与 get_client 共享同一全局单例。
+    """
+    if _client is None and _handler is None:
+        return
+    try:
+        _flush_sdk_clients()
+        _logger.info("[langfuse] SDK 队列已显式 flush")
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[langfuse] flush 失败: %s", e)
+
+
+def _flush_sdk_clients() -> None:
+    """flush 进程内所有 Langfuse SDK client 实例（各自持有上送队列）。
+
+    get_client() 与 CallbackHandler 内部共享全局单例，但各持有队列引用；
+    逐个 flush 兜底 SDK 内部实现差异。单个失败不影响其余。
+    """
+    clients = []
+    if _client is not None:
+        clients.append(_client)
+    if _handler is not None:
+        hc = getattr(_handler, "_langfuse_client", None)
+        if hc is not None and hc not in clients:
+            clients.append(hc)
+    for c in clients:
+        try:
+            c.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _flush_on_exit() -> None:
+    """atexit 兜底：覆盖不经 uvicorn lifespan 的进程（collect_badcase / feedback /
+    离线实验等脚本进程）。只在建过 client/handler 时动作；异常吞掉。"""
+    try:
+        if _client is None and _handler is None:
+            return
+        _flush_sdk_clients()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+atexit.register(_flush_on_exit)
 
 
 # ── M4 版本管理：Prompt 拉取 / 上传 ────────────────────────

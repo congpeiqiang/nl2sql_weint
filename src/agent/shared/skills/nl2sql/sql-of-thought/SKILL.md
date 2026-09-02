@@ -112,7 +112,7 @@ Step 7: [可选] nl2sql-correction → 失败时纠错循环
 跳过传统流水线的大部分步骤，。
 
 ```
-Step 1: nl2sql-knowledge-loader      → 并行调用 MCP 工具获取业务知识（按需，可精简）
+Step 1: nl2sql-knowledge-loader      → 并行调用 Wrenai MCP 工具获取业务知识（优先调用Wrenai MCP，不要调用dbmcp工具。）
 Step 2: nl2sql-sql-generation        → 直接生成SQL（跳过subproblem/plan）+ dry_run 验证
 Step 3: run_sql(sql)                 → 执行
 ```

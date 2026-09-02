@@ -46,8 +46,10 @@ RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.
 
 # 系统依赖：mysqlclient 运行时 + curl（健康检查）+ xz-utils（解压 Node.js）
 # + tzdata（设置容器时区，修复日志时间显示 UTC 的问题）
+# + git（语义库 git 版本化/推送：push_to_git 用 subprocess 调系统 git）
+# + openssh-client（GitLab 实例禁 HTTP git 访问，语义库需走 ssh:// 推送）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libmariadb3 curl xz-utils tzdata vim-tiny && \
+    libmariadb3 curl xz-utils tzdata vim-tiny git openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 # 创建 vi 软链接（-f 强制：vim-tiny 的 alternatives 可能已建 /usr/bin/vi，

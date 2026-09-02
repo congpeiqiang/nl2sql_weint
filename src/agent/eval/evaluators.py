@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
 """M3 五维在线评估（Langfuse Score 写入）。
 
-五维（docs/langfuse平台/Langfuse接入实现方案.md §3.1）：
-- schema_match_score       Schema 选择正确性：code evaluator 规则（同步）+ LLM-judge 采样
+五维（docs/langfuse平台/Langfuse接入实现方案.md §3.1 + NL2SQL-评估精准化设计方案.md §8）：
+- schema_match_score       Schema 选择正确性：code evaluator 规则（同步）
 - sql_valid_score          SQL 合法性/安全性：确定性（同步，复用 sql_approval.classify_sql）
-- sql_biz_correct_score    业务语义正确性：LLM-as-a-Judge（采样，后台线程）
-- report_table_score       报表/表格正确性：LLM-as-a-Judge（采样，后台线程）
-- analysis_report_score    分析报告质量/幻觉检测：LLM-as-a-Judge（采样，后台线程）
+- sql_biz_correct_score    业务语义正确性：LLM-as-a-Judge（采样，落盘队列 worker）
+- report_table_score       报表/表格正确性：LLM-as-a-Judge（采样，落盘队列 worker）
+- analysis_report_score    分析报告质量/幻觉检测：LLM-as-a-Judge（采样，落盘队列 worker）
 - sql_exec_success         SQL 执行是否成功（code evaluator，同步）——SQL 异常类 BadCase 依据
 
-设计（对齐 §3.2「全量规则校验 + 部分 LLM-Judge 采样」）：
+设计（对齐 §3.2「全量规则校验 + 部分 LLM-Judge 采样」+ 设计文档 P0 §8.2/§8.3）：
 - 确定性维度在 span 结束时同步写，零成本、无 LLM、每查询必现；
 - LLM-judge 维度按采样率（环境变量 NL2SQL_EVAL_JUDGE_SAMPLE，0~1，默认 0.3）
-  在后台 daemon 线程异步跑，控成本；judge 需要用户问题 → 从执行线程的 state
-  读最后一条非系统 human 消息（HTTP 自调用，与 message_feedback 同模式）。
+  先入 {AGENT_DATA_ROOT}/eval_queue.sqlite 落盘待评队列，由单例守护 worker
+  异步执行（幂等、进程重启自动续跑、失败重试留痕），取代旧 fire-and-forget
+  daemon 线程（P0 可靠交付，见 docs/langfuse平台/NL2SQL-评估精准化设计方案.md §8）；
+  judge 需要用户问题 → 从执行线程的 state 读最后一条非系统 human 消息
+  （HTTP 自调用，与 message_feedback 同模式）。
 - 所有 Langfuse 调用兜 try/except：评估是旁路，异常不影响主流程。
 """
 from __future__ import annotations
@@ -23,7 +26,6 @@ import logging
 import os
 import random
 import re
-import threading
 
 from agent.middlewares.sql_approval import classify_sql
 from agent.trace.langfuse_client import create_score
@@ -218,7 +220,9 @@ def fetch_question(thread_id: str) -> str:
 
     base = (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
     try:
-        r = httpx.get(f"{base}/threads/{thread_id}/state", timeout=10.0)
+        # trust_env=False：本调用恒为服务内部自调用，直连目标；否则会读
+        # HTTP(S)_PROXY 被代理劫持（judge worker 每任务挂满 10s 超时，队列排空极慢）。
+        r = httpx.get(f"{base}/threads/{thread_id}/state", timeout=10.0, trust_env=False)
         if r.status_code != 200:
             return ""
         state = r.json()
@@ -246,6 +250,48 @@ def fetch_question(thread_id: str) -> str:
 
 # ── 采样调度入口（LangfuseSpanMiddleware 调用）────────────────
 
+def _execute_judge_task(
+    kind: str,
+    trace_id: str,
+    question_thread: str,
+    sql: str = "",
+    result: str = "",
+    report: str = "",
+) -> None:
+    """执行一次 LLM-judge 并写分（eval_queue 守护 worker 调用的执行体）。
+
+    与旧 daemon 线程体内逻辑一致。判定类「软失败」（未取到问题 / judge 输出
+    不可解析）按原语义静默跳过，不抛异常；意外异常向上抛给 eval_queue 记失败
+    并重试（超过上限置 failed 留痕），供运维可查。
+    """
+    q = fetch_question(question_thread)
+    if not q:
+        _logger.debug("[eval] 未取到用户问题，跳过 judge（thread=%s）", question_thread)
+        return
+    if kind == "sql_biz_correct":
+        score = judge_sql_biz_correct(q, sql, result)
+        if score is not None:
+            create_score(
+                name="sql_biz_correct_score", value=score,
+                trace_id=trace_id, comment="LLM-judge(采样)",
+            )
+            _logger.info("[eval] sql_biz_correct_score=%.2f trace=%s", score, trace_id[:12])
+    elif kind == "report":
+        table_score, analysis_score = judge_report(q, report)
+        if table_score is not None:
+            create_score(
+                name="report_table_score", value=table_score,
+                trace_id=trace_id, comment="LLM-judge(采样)",
+            )
+            _logger.info("[eval] report_table_score=%.2f trace=%s", table_score, trace_id[:12])
+        if analysis_score is not None:
+            create_score(
+                name="analysis_report_score", value=analysis_score,
+                trace_id=trace_id, comment="LLM-judge(采样)",
+            )
+            _logger.info("[eval] analysis_report_score=%.2f trace=%s", analysis_score, trace_id[:12])
+
+
 def schedule_judge(
     kind: str,
     trace_id: str,
@@ -254,45 +300,21 @@ def schedule_judge(
     result: str = "",
     report: str = "",
 ) -> None:
-    """后台线程跑 LLM-judge 并写分（fire-and-forget，daemon 线程）。
+    """把一次 LLM-judge 采样任务入**落盘待评队列**（幂等），由守护 worker 执行写分。
+
+    P0 可靠交付（docs/langfuse平台/NL2SQL-评估精准化设计方案.md §8.3）：取代旧
+    fire-and-forget daemon 线程——任务持久化到 {AGENT_DATA_ROOT}/eval_queue.sqlite，
+    进程崩溃/重启后 pending 自动续跑（补评）；失败可重试可查。签名与调用点不变。
 
     Args:
         kind: "sql_biz_correct"（子 agent 执行 span 后）| "report"（主 agent 报表 span 后）
         trace_id: 写分目标 trace（sql_biz_correct → 子 trace；report → 主 trace）
         question_thread: 从该 thread 的 state 读用户问题（子 agent 是子线程，主 agent 是主线程）
     """
-    def _run() -> None:
-        try:
-            q = fetch_question(question_thread)
-            if not q:
-                _logger.debug("[eval] 未取到用户问题，跳过 judge（thread=%s）", question_thread)
-                return
-            if kind == "sql_biz_correct":
-                score = judge_sql_biz_correct(q, sql, result)
-                if score is not None:
-                    create_score(
-                        name="sql_biz_correct_score", value=score,
-                        trace_id=trace_id, comment="LLM-judge(采样)",
-                    )
-                    _logger.info("[eval] sql_biz_correct_score=%.2f trace=%s", score, trace_id[:12])
-            elif kind == "report":
-                table_score, analysis_score = judge_report(q, report)
-                if table_score is not None:
-                    create_score(
-                        name="report_table_score", value=table_score,
-                        trace_id=trace_id, comment="LLM-judge(采样)",
-                    )
-                    _logger.info("[eval] report_table_score=%.2f trace=%s", table_score, trace_id[:12])
-                if analysis_score is not None:
-                    create_score(
-                        name="analysis_report_score", value=analysis_score,
-                        trace_id=trace_id, comment="LLM-judge(采样)",
-                    )
-                    _logger.info("[eval] analysis_report_score=%.2f trace=%s", analysis_score, trace_id[:12])
-        except Exception as e:  # noqa: BLE001
-            _logger.warning("[eval] judge 后台任务失败: %s", e)
-
     try:
-        threading.Thread(target=_run, daemon=True, name="eval-judge").start()
+        from agent.eval.eval_queue import enqueue, ensure_worker
+
+        enqueue(kind, trace_id, question_thread, sql=sql, result=result, report=report)
+        ensure_worker(_execute_judge_task)
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[eval] 启动 judge 线程失败: %s", e)
+        _logger.debug("[eval] judge 入队失败: %s", e)

@@ -500,7 +500,37 @@ Langfuse UI 验证：**Scores** 页过滤 `user-feedback`，看 value 分布与 
 | 在线门禁 | §7.3 | 按 `prompt_label` 分组好评率对比，`value<0` 已剔除 |
 | 监控 | §2.3 | 差评线索优先看 `user-feedback=0` 的 comment |
 
-### 3.6 关键坑
+### 3.6 标注闭环（待标注队列 + 标注页操作流程 · 实施现状，2026-09-02）
+
+**入队**（`put_feedback` → `store.enqueue_annotation`，幂等 `INSERT OR IGNORE`）：**所有评分（👍 和 👎）都进待标注队列**（`feedback_annotation` 表，status=`queued`）；`feedback_type`（query/chat）自动判定。入队时 question/sql 为空串，由后台快照补齐**同步回填标注记录**（列表/详情即取即得，不会显示「无问题摘要」）。
+
+**状态机**：
+
+```
+queued 待判断 ──① 有效 + 点赞 ──► good（直接入 Good Set，跳过改 SQL）
+        │──② 有效 ──────────► annotating ──「执行验证」──► validated
+        │                                              ├──③ 正确 ──► good
+        │                                              └──④ 错误 ──► badcase
+        └──⑤ 无效 / 误报 / 闲聊 ──► rejected
+```
+
+**标注页操作**（`/feedback/annotate`，入口=聊天主页右上「待标注」；顶栏可选填**标注人**，存 localStorage 追溯）：
+
+1. **待判断 queued** — 判断这条反馈是否有效：
+   - 「**有效查询，直接入 Good Set**」（仅点赞反馈）→ 一步入集，跳过改 SQL
+   - 「**有效反馈，进入标注**」→ 进标注中
+   - 「**无效 / 误报，驳回**」→ rejected
+2. **标注中 / 已验证** — 修正并验证 SQL：
+   - SQL 编辑器（预填模型 SQL，后端只读护栏，写/DDL 直接拒绝）→ 填库名 → 「**执行验证**」→ 结果表格预览 → 状态自动变 **validated**
+   - 「**确认入 Good Set**」→ 写 `Dataset:goodcase`（正向样本），终态 good
+   - BadCase 区：选**错误类型**（下拉带说明）+ 填**金标 SQL**（正确写法，须能执行通过）+ 备注 → 「**确定入 BadCase**」→ 写 `Dataset:badcase` + 回归集，终态 badcase
+3. **终态**（BadCase / Good / 已驳回）— 只读展示（错误类型、金标 SQL、金标结果、确认时间、标注人）
+
+**规则**：点赞反馈**不能入 BadCase**（按钮置灰，只能 Good Set 或驳回）——差评才走 badcase；入 BadCase 必须「错误类型 + 金标 SQL（后端先执行校验）」。
+
+**产物去向**：BadCase → Langfuse `Dataset:badcase` + `badcase_status.json`（status=reviewed，进回归集）→ `run_experiment --from-badcase` 回归；Good → `Dataset:goodcase` → 正向样本。标注页 BadCase/GoodCase 两个 Tab **直读 Langfuse Dataset**（来源 `auto-collect` 自动采集 / `user-annotation` 人工确认），与 Langfuse UI 一致。
+
+### 3.7 关键坑
 
 - **v4 无 score 删除 API**：撤销只能写 `-1` 哨兵分（软删除），读取端统一「按 trace 取最新」+ `value<0` 过滤。
 - **反馈归属必须精确到 message**：不能按会话最新 trace，必须 `find_message_trace_id` 升序扫。

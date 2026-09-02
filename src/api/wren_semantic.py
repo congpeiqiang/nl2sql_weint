@@ -915,6 +915,15 @@ async def push_to_git(request: Request):
     branch = str(data.get("branch", "") or "main").strip()
     tag = str(data.get("tag", "") or "").strip()
     commit_message = str(data.get("commit_message", "") or "初始化语义库").strip()
+    # 是否强制覆盖远端（force push）。默认非强制：远端已有不同历史时普通推送会被
+    # git 拒绝（rejected / non-fast-forward），需要用户在前端显式勾选强制覆盖。
+    # body 里可能是 JSON bool，也可能是字符串（"true"/"false"），统一归一化。
+    raw_force = data.get("force", False)
+    if isinstance(raw_force, bool):
+        force = raw_force
+    else:
+        force = str(raw_force or "").strip().lower() in ("1", "true", "yes", "on")
+    push_flags = ["--force"] if force else []
 
     if not remote_url:
         return json_response({"error": "remote_url 必填"}, status=400)
@@ -945,10 +954,21 @@ async def push_to_git(request: Request):
                 return json_response({"error": f"git remote add 失败: {out}"}, status=500)
             steps.append("remote add origin")
         else:
-            _logger.info("[push_to_git] 已有 .git，set-url origin %s", remote_url)
+            # 已有 .git（可能是上次半途失败残留）：origin 可能未配置（如 remote add
+            # 被 dubious ownership / 断网打断），分支名也可能不是目标（如 master vs main）。
+            # set-url 失败则改 add，再强制把当前分支重命名为目标分支，确保后续 push 走对分支。
+            _logger.info("[push_to_git] 已有 .git，配置 origin %s", remote_url)
             ok, out = git_repo._run(["remote", "set-url", "origin", remote_url], cwd=cwd)
             if not ok:
-                _logger.warning("[push_to_git] set-url 失败: %s", out)
+                _logger.info("[push_to_git] set-url 失败（origin 未配置?）: %s", out)
+                ok, out = git_repo._run(["remote", "add", "origin", remote_url], cwd=cwd)
+                if not ok:
+                    return json_response({"error": f"git remote add 失败: {out}"}, status=500)
+            _logger.info("[push_to_git] git branch -M %s", branch)
+            ok, out = git_repo._run(["branch", "-M", branch], cwd=cwd)
+            if not ok:
+                return json_response({"error": f"git branch 重命名为 {branch} 失败: {out}"}, status=500)
+            steps.append("配置 origin + 重命名分支")
 
         _logger.info("[push_to_git] _ensure_git_identity")
         _ensure_git_identity(cwd)
@@ -965,13 +985,27 @@ async def push_to_git(request: Request):
             return json_response({"error": f"git commit 失败: {out}"}, status=500)
         steps.append("git commit")
 
-        _logger.info("[push_to_git] git push -u origin %s --force", branch)
+        _logger.info(
+            "[push_to_git] git push -u origin %s%s", branch, " --force" if force else ""
+        )
         ok, out = git_repo._run(
-            ["push", "-u", "origin", branch, "--force"],
+            ["push", "-u", "origin", branch, *push_flags],
             cwd=cwd, timeout=300,
         )
         if not ok:
             _logger.warning("[push_to_git] 首次 push 失败: %s", out)
+            # 非强制推送被远端拒绝（历史分叉/需拉取）→ 明确引导勾选强制覆盖，不再盲目重试
+            low = out.lower()
+            if not force and (
+                "rejected" in low or "non-fast-forward" in low or "fetch first" in low
+            ):
+                return json_response(
+                    {"error":
+                        f"远端分支 '{branch}' 已有不同历史，普通推送被拒绝。\n"
+                        "如需覆盖远端内容，请勾选推送弹窗中的「强制覆盖远端（force push）」。\n"
+                        f"git 输出: {out}"},
+                    status=409,
+                )
             # 如果是远程仓库不存在，尝试用 gh CLI 自动创建（仅 GitHub）
             if "repository not found" in out.lower() and "github.com" in remote_url:
                 created = _auto_create_github_repo(remote_url)
@@ -979,14 +1013,14 @@ async def push_to_git(request: Request):
                     steps.append("auto-create remote repo")
                     _logger.info("[push_to_git] 自动创建仓库成功，重试 push")
                     ok, out = git_repo._run(
-                        ["push", "-u", "origin", branch, "--force"],
+                        ["push", "-u", "origin", branch, *push_flags],
                         cwd=cwd, timeout=300,
                     )
             if not ok:
                 git_repo._run(["remote", "set-url", "origin", remote_url], cwd=cwd)
                 _logger.info("[push_to_git] 重试 push")
                 ok, out = git_repo._run(
-                    ["push", "-u", "origin", branch, "--force"],
+                    ["push", "-u", "origin", branch, *push_flags],
                     cwd=cwd, timeout=300,
                 )
         if not ok:
@@ -996,7 +1030,9 @@ async def push_to_git(request: Request):
         if tag:
             _logger.info("[push_to_git] git tag %s", tag)
             git_repo._run(["tag", "-f", tag], cwd=cwd)
-            ok, out = git_repo._run(["push", "origin", tag, "--force"], cwd=cwd, timeout=120)
+            ok, out = git_repo._run(
+                ["push", "origin", tag, *push_flags], cwd=cwd, timeout=120
+            )
             if ok:
                 steps.append(f"tag {tag}")
             else:
@@ -1260,6 +1296,27 @@ async def git_pull(request: Request):
     return json_response({"ok": True, "message": f"拉取成功: {out}"})
 
 
+async def get_git_ssh_key(request: Request):
+    """返回后端用于 ssh:// git 推送的 SSH 公钥。
+
+    供前端「复制 SSH 公钥」配置到 GitLab/码云等账号的 SSH Keys 页。
+    密钥持久化在 AGENT_DATA_ROOT/.ssh（重建容器不丢），公钥随推送不变，
+    同一账号所有仓库通用，无需每加一个仓库配一次。
+    """
+    from agent.utils import git_repo
+
+    priv = git_repo.ensure_ssh_key()
+    pub = priv.with_suffix(".pub")
+    try:
+        pubkey = pub.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        return json_response({"error": f"读取 SSH 公钥失败: {e}"}, status=500)
+    if not pubkey:
+        return json_response({"error": "SSH 公钥为空（需先在容器内生成密钥）"}, status=500)
+
+    return json_response({"ok": True, "pubkey": pubkey, "path": str(pub)})
+
+
 # ── 路由表（custom_app.py 聚合）──────────────────────────
 routes: list[BaseRoute] = [
     Route("/api/wren-projects", list_wren_projects, methods=["GET"]),
@@ -1280,4 +1337,5 @@ routes: list[BaseRoute] = [
     Route("/api/wren-projects/{name}/knowledge/ai-generate", ai_generate_knowledge, methods=["POST"]),
     Route("/api/wren-projects/{name}/git-status", git_status, methods=["GET"]),
     Route("/api/wren-projects/{name}/git-pull", git_pull, methods=["POST"]),
+    Route("/api/git-ssh-key", get_git_ssh_key, methods=["GET"]),
 ]

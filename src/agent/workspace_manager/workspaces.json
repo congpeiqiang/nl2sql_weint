@@ -1,11 +1,16 @@
 {
   "version": 1,
-  "active": "default",
+  "active": "workspace_local",
   "workspaces": {
     "default": {
       "path": "/app/data/workspace",
       "name": "默认工作区",
       "created_at": ""
+    },
+    "workspace_local": {
+      "path": "D:\\nl2sql_data\\workspace_local",
+      "name": "workspace_local",
+      "created_at": "2026-09-01T13:02:18.086221+00:00"
     }
   }
 }

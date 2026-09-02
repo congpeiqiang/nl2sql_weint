@@ -445,6 +445,14 @@ class FeedbackStore:
 
         入队后若 question/sql 为空，标注详情端可惰性补齐（见
         api/feedback_annotation.py get 端点）。返回当前记录。
+
+        2026-09-02 复活规则：取消反馈（撤销）会把原标注回滚为 rejected（见
+        revoke_annotations_for_message），用户对同一条消息**重新反馈**时须把
+        rejected 复活为 queued——否则该反馈永远不再出现在待判断列表。rejected
+        属 _TERMINAL（update_annotation 状态机禁止回退），故用直连 UPDATE；
+        question/sql 新值此时可能为空（后台快照补齐尚未完成），保留旧值避免
+        标题回退「无问题摘要」。终态 badcase/good 是已完成的标注产物，不受
+        重新反馈影响，保持原样。
         """
         with _LOCK:
             row = self._conn.execute(
@@ -452,7 +460,34 @@ class FeedbackStore:
                 (thread_id, message_id),
             ).fetchone()
             if row is not None:
-                return self._row_to_annotation(row)
+                cur = self._row_to_annotation(row)
+                if cur.status == "rejected":
+                    self._conn.execute(
+                        "UPDATE feedback_annotation SET status='queued', is_valid=NULL,"
+                        " question=?, bad_sql=?, rating=?, note=?, feedback_type=?,"
+                        " db_name=?, annotator='', annotated_at='', badcase_at='',"
+                        " bad_type='', gold_sql='', gold_result='', exec_error=''"
+                        " WHERE thread_id=? AND message_id=?",
+                        (
+                            (question or "")[:2000] or cur.question,
+                            (sql or "")[:8000] or cur.bad_sql,
+                            rating,
+                            (note or "")[:2000],
+                            feedback_type,
+                            (db_name or "")[:128],
+                            thread_id,
+                            message_id,
+                        ),
+                    )
+                    self._conn.commit()
+                    return self._row_to_annotation(
+                        self._conn.execute(
+                            "SELECT * FROM feedback_annotation"
+                            " WHERE thread_id=? AND message_id=?",
+                            (thread_id, message_id),
+                        ).fetchone()
+                    )
+                return cur
             now = _now_iso()
             rec = AnnotationRecord(
                 thread_id=thread_id,

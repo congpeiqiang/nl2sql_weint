@@ -142,6 +142,14 @@ def _build_langfuse_metadata() -> dict:
         metadata.setdefault("skills", get_enriched_skill_manifest())
     except Exception:
         pass
+    # 问题文本透传：主 run 注入的 user_question → 子 run 也能标注中间产物归属问题
+    # （langfuse_span._dump_process_data 用它 + langfuse_parent_trace_id 区分同会话多问题）
+    try:
+        _q = _current_user_question()
+        if _q:
+            metadata["user_question"] = _q
+    except Exception:
+        pass
     return metadata
 
 

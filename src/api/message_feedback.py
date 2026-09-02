@@ -181,7 +181,20 @@ def _schedule_snapshot_backfill(thread_id: str, message_id: str) -> None:
         if not question and not sql:
             return
         try:
-            store.update_snapshot(thread_id, message_id, question, sql)
+            snapshot_ok = store.update_snapshot(thread_id, message_id, question, sql)
+            # 标注记录同步回填：入队时 question/sql 为空串（见 put_feedback），
+            # 这里一并补齐，让待标注队列列表页标题有值（否则恒显示「无问题摘要」，
+            # 直到详情端惰性补齐才持久化）。
+            if snapshot_ok:
+                ann = store.get_annotation(thread_id, message_id)
+                if ann is not None:
+                    fields = {}
+                    if not ann.question and question:
+                        fields["question"] = question[:2000]
+                    if not ann.bad_sql and sql:
+                        fields["bad_sql"] = sql[:8000]
+                    if fields:
+                        store.update_annotation(thread_id, message_id, **fields)
         except Exception as e:  # noqa: BLE001
             _logger.warning("[feedback] 快照补齐失败: %s", e)
 

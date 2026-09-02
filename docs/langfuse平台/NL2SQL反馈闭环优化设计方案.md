@@ -1,6 +1,6 @@
 # NL2SQL 反馈闭环优化设计方案
 
-> **状态**：设计稿（待实施） · **最后更新**：2026-08-30
+> **状态**：已实施（P0~P2 全部上线，2026-09-02 补标注页按状态操作流程） · **最后更新**：2026-09-02
 > **定位**：面向「nl2sql 闭环」的三项优化——① 用户反馈类型区分（查询/闲聊）② 反馈看板指标 ③ 待标注队列 + 标注页面 + 人工正确 SQL + BadCase 生成（含 bad_type 错误类型）。
 > **与现网关系**：全部为**增量**改造，不改变现有反馈写入/打分链路的数据语义；兼容存量数据。
 > **配套手册**：[NL2SQL-Langfuse全流程实现手册.md](NL2SQL-Langfuse全流程实现手册.md)（§3 用户反馈 / §5 采集 / §7 门禁 / §6 迭代状态机）。
@@ -281,6 +281,48 @@ CREATE INDEX IF NOT EXISTS idx_fa_status ON feedback_annotation(status);
 6. 队列顶部有状态筛选（全部/待处理/已处理/无效），可统计当天处理量与 bad_type 分布。
 
 **权限**：标注页限管理员/标注角色（前端路由守卫；后端 judge/execute/confirm 端点加简单鉴权或 `?key=` 校验，首版可用现有前端 auth）。
+
+### 4.4.1 标注页操作流程（按状态 · 实施现状，2026-09-02）
+
+> 与 4.4 设计稿的差异：实际 UI 已上线 Good Set 正向样本、点赞「直接入 Good Set」、标注人字段、状态 Tab 全量（含 validated/rejected/badcase/good）、BadCase/GoodCase Tab 直读 Langfuse Dataset。下面按**当前页面实际操作**描述。
+
+**状态机**：
+
+```
+queued 待判断 ──① 有效 + 点赞 ──► good（直接入 Good Set，跳过改 SQL）
+        │──② 有效 ──────────► annotating ──「执行验证」──► validated
+        │                                              ├──③ 正确 ──► good
+        │                                              └──④ 错误 ──► badcase
+        └──⑤ 无效 / 误报 / 闲聊 ──► rejected
+```
+
+**页面结构**（`/feedback/annotate`，入口=聊天主页右上「待标注」链接）：
+- 顶栏：返回聊天 + 标题 + 「刷新」+ **标注人**输入框（可选，存 localStorage，用于追溯「谁标注的」）
+- 左侧：状态 Tab（全部 / 待判断 / 标注中 / 已验证 / 已驳回 / BadCase / GoodCase）+ 队列列表（每条显示状态、反馈类型、问题摘要、👍/👎、会话/消息 id）
+- 右侧：选中记录的详情 + 操作面板
+
+**按状态的操作**：
+
+1. **待判断 queued** — 人工判断这条反馈是否有效：
+   - 「**有效查询，直接入 Good Set**」（仅点赞反馈）→ 一步入集，跳过改 SQL
+   - 「**有效反馈，进入标注**」→ 进标注中
+   - 「**无效 / 误报，驳回**」→ rejected
+2. **标注中 annotating / 已验证 validated** — 修正并验证 SQL：
+   - SQL 编辑器（预填模型 SQL，后端只读护栏，写/DDL 直接拒绝）→ 填库名（默认用反馈带的）→ 「**执行验证**」→ 结果表格预览（前 30 行）→ 状态自动变 **validated**
+   - 「**确认入 Good Set**」→ 写 `Dataset:goodcase`（正向样本），终态 good
+   - **BadCase 区**：选**错误类型**（下拉带说明）+ 填**金标 SQL**（正确写法，须能执行通过）+ 备注 → 「**确定入 BadCase**」→ 写 `Dataset:badcase` + 回归集，终态 badcase
+3. **终态**（BadCase / Good / 已驳回）— 只读展示（错误类型、金标 SQL、金标结果、确认时间、标注人）
+
+**规则与提示**：
+- **点赞反馈不能入 BadCase**（按钮置灰，只能走 Good Set 或驳回）——差评才走 badcase
+- 入 BadCase 必须：错误类型 + 金标 SQL（后端会先执行校验，失败则拦）
+- 标注人字段可选，不填也能操作；填了落库并显示在详情里
+- BadCase / GoodCase 两个 Tab **直读 Langfuse Dataset**（含来源：`auto-collect` 自动采集 / `user-annotation` 人工确认），与 Langfuse UI 一致
+
+**产物去向（闭环终点）**：
+- BadCase → Langfuse `Dataset:badcase` + `badcase_status.json`（status=reviewed，进回归集）→ `run_experiment --from-badcase` 回归评测（默认跳过 fixed/invalid）
+- Good Set → Langfuse `Dataset:goodcase` → 正向样本评测
+- 每日 02:13 cron `collect_badcase` 自动采集（feedback_gate 门禁，`feedback_type=query` 收口）
 
 ### 4.5 「执行」复用 dbmcp 引擎（不新写执行器）
 
