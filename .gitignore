@@ -8,3 +8,51 @@ wheels/
 
 # Virtual environments
 .venv
+
+# 敏感配置（含密钥），不入库
+.env
+.env.prod
+
+# Runtime checkpoint data (auto-recreated by backend on startup)
+src/agent/workspace/checkpoint/
+
+# 忽略 SQLite 数据库大文件
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+# 运行时 DB 及 WAL/SHM 伴生文件（shared/feedback、shared/trace 运行时产物）
+*.db
+*.db-shm
+*.db-wal
+
+# 运行时数据库配置（含加密密码，不入库）
+db_config.json
+
+# 消息反馈运行时数据（SQLite + WAL 伴生 + 旧 JSON 留档，收进 feedback/ 子目录）
+src/agent/workspace/feedback/
+model_config.json
+
+# 运行时日志（start_server.py 文件日志，自动轮转，不入库）
+logs/
+
+# skill 版本化物化目录（AGENT_DATA_ROOT 未配置时兜底落仓库内；配置时在项目外）
+src/agent/skill_refs/
+
+# 调试期服务日志（Start-Process 重定向输出，不入库）
+server_*.log
+
+# ── 2026-09-01 停止跟踪：LangGraph 运行时持久化状态 ──
+.langgraph_api/
+
+# ── 实验/临时文件 ──
+.tmp/
+
+# ── 工作区运行时产物 ──
+src/agent/workspace/tmp/
+src/agent/workspace/large_tool_results/
+src/agent/workspace/nl2sql_process_data/
+# 各工作区 Wren 查询历史（LanceDB，运行时生成）
+src/agent/workspace/*/.wren/

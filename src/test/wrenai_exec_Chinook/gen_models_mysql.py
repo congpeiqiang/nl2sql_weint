@@ -11,8 +11,7 @@ from sqlalchemy import create_engine, inspect, text
 DB_CONFIG = {
     "host": "mysql-master",
     "port": 3306,
-    # "database": "Chinook_AutoIncrement",
-    "database": "aix_report",
+    "database": "Chinook_AutoIncrement",
     "user": "aoi-dev",
     "password": "aoi8dev.1234",
 }
@@ -37,7 +36,7 @@ inspector = inspect(engine)
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 
-def write_model(table, columns, pk_col, **extra):  # ← 改为接受 extra
+def write_model(table, columns, pk_col, **extra):
     model_name = table.lower() + "_t"
     model = {
         "name": model_name,
@@ -46,7 +45,7 @@ def write_model(table, columns, pk_col, **extra):  # ← 改为接受 extra
     }
     if pk_col:
         model["primary_key"] = pk_col
-    model.update(extra)                            # ← 写入表级描述
+    model.update(extra)
 
     d = os.path.join(MODELS_DIR, model_name)
     os.makedirs(d, exist_ok=True)
@@ -56,7 +55,7 @@ def write_model(table, columns, pk_col, **extra):  # ← 改为接受 extra
         yaml.dump(model, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
-# ← 新增：读取 MySQL 注释
+# 读取 MySQL 注释
 table_comments = {}
 col_comments = {}
 try:
@@ -89,19 +88,18 @@ for table in inspector.get_table_names():
         raw_type = str(col["type"]).upper().split("(")[0]
         wren_type = TYPE_MAP.get(raw_type, "VARCHAR")
         is_pk = col["name"] in pk_cols
-        col_entry = {                               # ← 改为 col_entry dict
-            "name": col["name"],
-            "type": wren_type,
+        col_entry = {
+            "name": col["name"], "type": wren_type,
             "is_calculated": False,
             "not_null": not col.get("nullable", True),
             "is_primary_key": is_pk,
         }
-        desc = col_comments.get(table, {}).get(col["name"], "")  # ← 读列注释
+        desc = col_comments.get(table, {}).get(col["name"], "")
         if desc:
             col_entry["properties"] = {"description": desc}
         columns.append(col_entry)
 
-    extra = {}                                      # ← 读表注释
+    extra = {}
     if table in table_comments:
         extra["properties"] = {"description": table_comments[table]}
     write_model(table, columns, pk_name, **extra)

@@ -41,7 +41,7 @@ async def main():
             "env": {
                 "LLMWIKI_PROVIDER": "openai",
                 "LLMWIKI_MODEL": "deepseek-chat",
-                "OPENAI_API_KEY": "sk-97dc8af1edbb468f868ddad89cedda78",
+                "OPENAI_API_KEY": "sk-8f6fcfa34385427a960b4f17147416d0",
                 "OPENAI_BASE_URL": "https://api.deepseek.com",
             },
         }

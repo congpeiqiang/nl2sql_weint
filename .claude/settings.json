@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PYTHONUTF8=1 python -X utf8 -c ' *)",
+      "Bash(PYTHONUTF8=1 python -X utf8 _inspect_state.py)"
+    ]
+  }
+}

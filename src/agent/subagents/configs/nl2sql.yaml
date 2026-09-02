@@ -1,0 +1,61 @@
+# ============================================================
+# 子智能体配置：nl2sql（NL2SQL 查询专家）
+# ============================================================
+
+name: nl2sql
+
+description: >
+  NL2SQL 查询专家。负责将用户自然语言问题转换为 SQL 查询并执行。
+  当用户需求涉及"查询"、"统计"、"分析数据"、"有多少"、"列出"、
+  "排名"、"对比"、"计算"、"汇总"等数据查询关键词时，应委派给此子智能体。
+
+# 工具列表 — 运行时根据名称匹配
+tools:
+  # 通用工具
+#  - suggestChart # 根据数据特征推荐合适的图表类型（柱状图、折线图、散点图等）
+#  - suggestCharts       # 批量推荐多种图表方案供选择
+#  - getSchema           # 获取图表 Schema
+#  - renderInteractiveChart # 渲染带交互（悬停、点击、筛选）的图表
+#  - diagnoseConfig # 诊断配置中的问题（字段缺失、类型错误等）
+#  - reportIssue # 生成问题报告（用于调试/反馈）
+#  - applyTheme # 应用主题样式（颜色、字体、背景等）
+#  - interrogateChart # 反向解析：从图表代码提取配置结构
+#  - groundChart # 将图表与底层数据语义对齐（校验数据-视觉映射）
+#  - suggestStreamCharts # 推荐适合流式/实时数据的图表
+#  - suggestDashboard # 建议多图表组合的仪表板布局
+#  - suggestTokenEncoding # 建议视觉通道的编码映射（颜色、大小、形状等）
+#  - suggestStretchCharts # 针对宽数据集（多变量）推荐可视化方案
+#  - repairChartConfig # 自动修复常见配置错误
+#  - proposeChartVariants # 基于当前配置生成多种变体方案
+
+  # db_mcp_server 直连工具（未建模库走直连：dbmcp_get_db_info / dbmcp_run_sql）
+  - get_db_info          # 获取指定数据库的表清单（直连，用于未建模库的 schema 发现）
+
+  # WrenAI MCP 工具（通过 wren serve mcp 加载）
+  - run_sql             # 通过 Wren 语义层执行 SQL 查询（默认 limit=1000，最大 10000）
+  - dry_run             # 验证 SQL 语法但不返回数据
+  - dry_plan            # 基于mdl的sql转为基于真实数据库的sql
+  - query_cube          # 运行结构化 Cube（指标）查询，返回聚合数据
+  - get_mdl             # 返回完整 MDL（模型、关系、Cube）JSON，只是从target/mdl.json中获取数据
+  - list_models         # 列出可用语义模型及列数，一般从target/mdl.json中获取数据
+  - describe_model      # 描述模型的列、主键、引用 SQL 和关系
+  - list_cubes          # 列出项目中的 Cube 及其度量/维度
+  - describe_cube       # 返回 Cube 的完整定义
+  - get_data_source     # 返回项目配置的数据源（SQL 方言），从~/.wren/profiles.yml获取数据
+  - list_functions      # 列出数据源可用的 SQL 函数
+  - get_instructions    # 返回 knowledge/rules/*.md 中的业务规则
+  - recall_queries      # 检索与问题相似的 NL→SQL 示例
+  - get_context         # 语义检索与问题相关的 Schema 片段
+  - describe_schema     # 返回完整 MDL Schema 的纯文本描述
+  - list_stored_queries # 枚举 knowledge/sql/ 中存储的 NL→SQL 对
+  - list_knowledge      # 列出 knowledge/ 目录下的知识文件
+  - get_all_knowledge   # 一次读取 metrics/glossary/caveats 全部知识文件
+
+# 技能路径（由主智能体 SkillsMiddleware 加载，子智能体自动继承）
+skills:
+  - /shared/skills/nl2sql/
+
+# ============================================================
+# 系统提示词
+# ============================================================
+system_prompt_file: prompt/NL2SQL_SYSTEM_PROMPT.md
