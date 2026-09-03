@@ -19,6 +19,7 @@ import logging
 import os
 import random
 import re
+from contextvars import ContextVar
 
 _logger = logging.getLogger(__name__)
 
@@ -50,6 +51,106 @@ _CANARY_RESOLVED: str | None = None
 _PROMPT_VERSIONS: dict[str, int] = {}
 # M4 评估后新增：prompt 来源追踪（"name@label" → langfuse|local），供 metadata.prompt.source
 _PROMPT_SOURCE: dict[str, str] = {}
+
+# ── M-T7：叶子归巢（治理 Tracing 孤儿 root trace 污染）───────────
+# 背景：deepagents 异步子 agent / 自动续跑在 worker 线程/异步任务里执行 model/tool
+# 叶子时，langchain run-tree 祖先（parent_run_id）不在 handler._runs（祖先 run 的
+# observation 已 detach/reset），SDK 落到裸 client start_observation；该线程/任务
+# 的 OTel contextvar 又为空 → v4 把每条 GENERATION/TOOL 提升成独立 root trace
+# （以模型/工具名命名，如 ChatQwen/run_sql），session_id 全空，真 trace 树只剩骨架。
+# 方案：叶子 start 包装器检测「父失联」时按 metadata 解析锚点，经 ContextVar 传给
+# 被包装的 _get_parent_observation；命中则返回 _AnchoredClient，强制 start_observation
+# 携带 trace_context={trace_id, parent_span_id} 归巢（复用 langfuse_span path A/C
+# 已验证机制）。仅父失联 **且** 锚点可解析才干预，其余路径与未 patch 逐字节一致。
+# 开关 LANGFUSE_LEAF_NESTING_ENABLE（默认 1；置 0 整段跳过）——比 LANGFUSE_ENABLE
+# 更细的保底回滚手段。
+_LEAF_ANCHOR: ContextVar[tuple[str, str, str] | None] = ContextVar(
+    "langfuse_leaf_anchor", default=None
+)
+# 与 langfuse_span._MAIN_TRACE_NAME 同值：显式 trace_context 的 span 若父观测跨批
+# 导出，v4 可能把它判成新 root、用 span 名覆盖 trace 名（M-T6b 修复 A 同款防护）。
+_LEAF_TRACE_NAME = "chat-turn"
+_M_LEAF_NAMES = (
+    "on_chat_model_start",
+    "on_llm_start",
+    "on_tool_start",
+    "on_retriever_start",
+)
+
+
+def _leaf_nesting_enabled() -> bool:
+    v = (os.getenv("LANGFUSE_LEAF_NESTING_ENABLE", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _resolve_leaf_anchor(metadata) -> tuple[str, str, str] | None:
+    """叶子「父失联」时解析归巢锚点 → (trace_id_hex, root_obs_hex, case) | None。
+
+    定位键（生产实测，observations.metadata Map 键齐全）：
+      1. langfuse_parent_trace_id —— 子 run（deepagents 异步子任务）/续跑 run 叶子
+         （deepagents_async_config_patch._wrap_runs_create 在 runs.create 前注入并
+         下传）。root obs 优先 _ROOT_OBS_MAP[tid]：子 run root chain 启动时已把自己
+         root obs 刷进该 trace 槽 → 叶子挂到子 run root obs（nl2sql_agent 下、层级
+         贴近现状）；槽空兜底 metadata.langfuse_parent_obs_id（runs.create 时快照的
+         主 trace root obs，同样归入 chat-turn）。
+      2. thread_id / langfuse_session_id（== 会话线程）→ _THREAD_TRACE_MAP[thr]
+         —— 主 run / 自动续跑叶子：挂回 chat-turn trace 的 root obs。langgraph
+         configurable.thread_id 部分 SDK 版本在 metadata.configurable 内，一并兜底。
+      3. 两者皆空 → None（离线实验 / eval 等无父可归 run 保持原样，零回归）。
+    """
+    md = metadata or {}
+    try:
+        ptid = str(md.get("langfuse_parent_trace_id") or "").strip()
+        if ptid:
+            p_oid = _ROOT_OBS_MAP.get(ptid) or ""
+            if not p_oid:
+                p_oid = str(md.get("langfuse_parent_obs_id") or "").strip()
+            return (ptid, p_oid, "subagent")
+        for k in ("thread_id", "langfuse_session_id"):
+            thr = str(md.get(k) or "").strip()
+            if thr:
+                rec = _THREAD_TRACE_MAP.get(thr)
+                if rec and rec[0]:
+                    return (rec[0], rec[1], f"thread:{k}")
+        cfg = md.get("configurable")
+        if isinstance(cfg, dict):
+            thr = str(cfg.get("thread_id") or "").strip()
+            if thr:
+                rec = _THREAD_TRACE_MAP.get(thr)
+                if rec and rec[0]:
+                    return (rec[0], rec[1], "thread:configurable")
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+class _AnchoredClient:
+    """裸 client 薄包装：强制叶子 start_observation 携带显式 trace_context 归巢。
+
+    SDK 调用方对返回对象做 `isinstance(x, Langfuse)` 判断——本类非 Langfuse → 走
+    else 分支直接 `.start_observation(...)`（不传 trace_context）→ 本类注入
+    {trace_id, parent_span_id}（hex 字符串，与 langfuse_span path A/C 同格式）。
+    span 另补 langfuse.trace.name（_LEAF_TRACE_NAME）防 v4 用 span 名覆盖 trace 名。
+    """
+
+    __slots__ = ("_client", "_tid_hex", "_oid_hex")
+
+    def __init__(self, client, tid_hex, oid_hex):
+        self._client = client
+        self._tid_hex = tid_hex
+        self._oid_hex = oid_hex
+
+    def start_observation(self, trace_context=None, **kwargs):
+        if not trace_context:
+            trace_context = {"trace_id": self._tid_hex}
+            if self._oid_hex:
+                trace_context["parent_span_id"] = self._oid_hex
+        span = self._client.start_observation(trace_context=trace_context, **kwargs)
+        try:
+            span._otel_span.set_attribute("langfuse.trace.name", _LEAF_TRACE_NAME)
+        except Exception:  # noqa: BLE001
+            pass
+        return span
 
 
 def langfuse_enabled() -> bool:
@@ -522,6 +623,59 @@ def _patch_handler_for_trace_nesting(handler) -> None:
         return result
 
     handler.on_chain_start = _patched_on_chain_start
+
+    # M-T7：叶子归巢补丁。整段仅当开关开启时装配；关闭即返回，on_chain_start 既有
+    # 补丁不受影响。_LEAF_ANCHOR ContextVar 在同一线程/任务同步调用栈内由叶子包装器
+    # set、_gpo 消费，天然按并发隔离（多 run 不串号）。
+    if not _leaf_nesting_enabled():
+        return
+    _orig_gpo = handler._get_parent_observation
+
+    def _gpo(parent_run_id):
+        obs = _orig_gpo(parent_run_id)
+        anchor = _LEAF_ANCHOR.get()
+        # 仅当 SDK 解析到裸 client（父失联）且锚点可解析才包装；父在 _runs →
+        # 正常归巢，与未 patch 逐字节一致。handler._trace_context 非空时保留
+        # langgraph resume 语义，不强行覆盖。
+        if (
+            anchor
+            and obs is getattr(handler, "_langfuse_client", None)
+            and getattr(handler, "_trace_context", None) is None
+        ):
+            return _AnchoredClient(obs, anchor[0], anchor[1])
+        return obs
+
+    handler._get_parent_observation = _gpo
+
+    def _leaf_wrapper(mname: str, orig):
+        def w(*args, **kwargs):
+            pr = kwargs.get("parent_run_id")
+            lost = False
+            try:
+                lost = pr is None or pr not in handler._runs
+            except Exception:  # noqa: BLE001
+                pass
+            anchor = _resolve_leaf_anchor(kwargs.get("metadata")) if lost else None
+            if anchor is None:
+                return orig(*args, **kwargs)
+            _logger.info(
+                "[langfuse_leaf] %s 父失联 → 锚定 trace=%s obs=%s case=%s",
+                mname, anchor[0][:16], (anchor[1] or "(none)")[:16], anchor[2],
+            )
+            token = _LEAF_ANCHOR.set(anchor)
+            try:
+                return orig(*args, **kwargs)
+            finally:
+                _LEAF_ANCHOR.reset(token)
+
+        return w
+
+    for _m in _M_LEAF_NAMES:
+        _orig_m = getattr(handler, _m, None)
+        if _orig_m is None:
+            continue
+        setattr(handler, _m, _leaf_wrapper(_m, _orig_m))
+        _logger.info("[langfuse_leaf] 已包装 %s（父失联时锚定归巢）", _m)
 
 
 def get_langfuse_callbacks() -> list:
