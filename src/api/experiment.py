@@ -12,11 +12,17 @@
     POST /api/experiment/runs                    提交实验（后台执行，返回 stamp）
     GET  /api/experiment/runs                    历史 run 列表
     GET  /api/experiment/runs/{stamp}            状态 + 结果（manifest/gate/逐条明细）
+    POST /api/experiment/runs/{stamp}/cancel     停止运行中的实验（cooperative，见 cancel_run）
 
 后台执行：POST 建 stamp + 初始 status 文件后 asyncio.create_task 跑
 _run_orchestrator（asyncio.to_thread 包阻塞逻辑，不卡事件循环）；进度经
-on_progress 回调写 {stamp}.status.json，前端轮询读取。cancel 不在 MVP
-（subprocess 树取消复杂）；超时由 GET 侧标记 interrupted 兜底。
+on_progress 回调写 {stamp}.status.json，前端轮询读取。
+
+运行中「停止」= 跨进程协作取消（不 kill subprocess，避免强杀 agent 留半截 trace）：
+POST cancel 写停止标记 <run_dir>/cancel → 状态置 cancelling（暂态，前端继续轮询）→
+orchestrator 每臂顶部 / worker 每题顶部检查标记 → 自然断点退出、部分结果照常落盘 →
+orchestrator 返回 RC_CANCELLED → 终态 cancelled。若 run 卡死在单题 LLM 内，停止粒度
+= 一题时长（与聊天「停止」语义一致）。超时兜底：GET 侧超 _RUN_TIMEOUT 标记 interrupted。
 """
 from __future__ import annotations
 
@@ -40,6 +46,9 @@ _logger = logging.getLogger(__name__)
 _RUN_DIR_NAME = "experiment_runs"
 _RUN_TIMEOUT = 7200  # 单 run 超时（秒），超时未刷新 → interrupted
 _RUN_TASKS: dict[str, asyncio.Task] = {}
+# 停止标记文件名：与 run_experiment.py 的 _CANCEL_FILE_NAME / _cancel_path 同一约定
+# （API 写 <run_dir>/<stamp>/cancel，orchestrator/worker 从 out_dir.parent 推出同一路径）
+_CANCEL_FILE_NAME = "cancel"
 
 # 参与实验的 Langfuse prompt 名（label A/B 入口）
 _PROMPT_NAMES = ("main_system_prompt", "nl2sql_system_prompt")
@@ -52,6 +61,15 @@ def _run_dir() -> Path:
     from agent.workspace_manager import get_workspace_manager
 
     return get_workspace_manager().active_workspace / "eval" / _RUN_DIR_NAME
+
+
+def _cancel_file(stamp: str) -> Path:
+    """该 run 的停止标记文件：<run_dir>/<stamp>/cancel。
+
+    与 run_experiment 侧 `Path(out_dir).parent / "cancel"`（out_dir = <run_dir>/<stamp>/out）
+    严格同一路径——API 写标记、orchestrator/worker 读标记，无需跨进程定位。
+    """
+    return _run_dir() / stamp / _CANCEL_FILE_NAME
 
 
 # 北京时区（UTC+8，无 DST）：历史 run 标题时间戳用业务本地时间，避免 0 时区观感
@@ -471,7 +489,11 @@ async def _execute_run(stamp: str, body: dict) -> None:
         ns.queries_path = await asyncio.to_thread(rex._prepare_queries, ns)
         rc = await asyncio.to_thread(rex._run_orchestrator, ns, on_progress, stamp)
         cur = _read_status(stamp) or {}
-        if rc == 0:
+        if rc == rex.RC_CANCELLED:
+            # 用户手动停止：orchestrator 已保留部分结果 manifest → 终态 cancelled（非 error）
+            cur["status"] = "cancelled"
+            cur["stage"] = "cancelled"
+        elif rc == 0:
             cur["status"] = "done"
             cur["stage"] = "complete"
         else:
@@ -483,13 +505,86 @@ async def _execute_run(stamp: str, body: dict) -> None:
     except Exception as e:  # noqa: BLE001
         _logger.error("[experiment] run %s 异常: %s", stamp, e)
         cur = _read_status(stamp) or {}
-        cur["status"] = "error"
-        cur["stage"] = "failed"
-        cur["error"] = f"{type(e).__name__}: {e}"
+        if _cancel_file(stamp).exists():
+            # 停止请求期间后台异常退出（如 worker 超时没及时收尾）：有标记按 cancelled 收尾，
+            # 避免误报 error——部分结果仍保留在 out/。
+            cur["status"] = "cancelled"
+            cur["stage"] = "cancelled"
+            cur["error"] = "停止请求：后台任务异常退出（已完成部分保留）"
+        else:
+            cur["status"] = "error"
+            cur["stage"] = "failed"
+            cur["error"] = f"{type(e).__name__}: {e}"
         cur["finished_at"] = datetime.now(timezone.utc).isoformat()
         _write_status(stamp, cur)
     finally:
         _RUN_TASKS.pop(stamp, None)
+
+
+async def cancel_run(request: Request):
+    """停止运行中的实验。
+
+    机制：写停止标记 <run_dir>/<stamp>/cancel + 状态置 cancelling（暂态，前端继续轮询）。
+    orchestrator/worker 在自然断点（每题/每臂）检查标记 → 干净退出、部分结果照常落盘 →
+    orchestrator 返 RC_CANCELLED → _execute_run 写终态 cancelled。
+    幂等：已终态 → 409；僵尸 run（status=running 但进程重启无存活 task）→ 直接收尾 cancelled。
+    """
+    stamp = request.path_params["stamp"]
+    st = _read_status(stamp)
+    if st is None:
+        # 无 status 文件 = 从没创建或已被删除（manifest-only 老 run 视为已结束）
+        mf = _run_dir() / f"run_{stamp}.json"
+        if mf.exists():
+            return json_response({"error": f"run {stamp} 已结束，无法停止"}, status=409)
+        return json_response({"error": f"run {stamp} 不存在"}, status=404)
+
+    cur_status = st.get("status", "")
+    _TERMINAL = ("done", "error", "interrupted", "cancelled")
+    if cur_status in _TERMINAL:
+        return json_response({"error": f"run {stamp} 已结束（{cur_status}），无法停止"}, status=409)
+
+    task = _RUN_TASKS.get(stamp)
+    live = task is not None and not task.done()
+    if cur_status == "running" and not live:
+        # 僵尸 run：无任何进程在跑（重启残留），标记无人接收 → 直接落终态
+        st["status"] = "cancelled"
+        st["stage"] = "cancelled"
+        st["error"] = "无运行任务（进程重启残留），按已停止收尾"
+        st["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _write_status(stamp, st)
+        return json_response({"ok": True, "status": "cancelled"})
+
+    if not live:
+        # status 是 cancelling 但 task 已消失（_execute_run 崩溃/被提前 pop）——标记仍在，
+        # 但无人执行；直接收尾终态，防前端 stuck cancelling。
+        st["status"] = "cancelled"
+        st["stage"] = "cancelled"
+        st["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _write_status(stamp, st)
+        return json_response({"ok": True, "status": "cancelled"})
+
+    # 存活 run：写标记（orchestrator/worker 同一路径读它）→ 状态置 cancelling
+    try:
+        cf = _cancel_file(stamp)
+        cf.parent.mkdir(parents=True, exist_ok=True)
+        cf.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[experiment] cancel 写标记失败 %s: %s", stamp, e)
+        return json_response({"error": f"写停止标记失败: {e}"}, status=500)
+
+    st["status"] = "cancelling"  # 其余字段（stage/started_at/arms…）保留原值
+    _write_status(stamp, st)
+
+    # 竞态兜底：写完标记后 task 若已 done（恰在此窗口自然结束）→ 置终态，防 stuck cancelling
+    if task.done():
+        latest = _read_status(stamp) or st
+        if latest.get("status") in ("running", "cancelling"):
+            latest["status"] = "cancelled"
+            latest["stage"] = "cancelled"
+            latest["finished_at"] = datetime.now(timezone.utc).isoformat()
+            _write_status(stamp, latest)
+    _logger.info("[experiment] cancel requested: %s", stamp)
+    return json_response({"ok": True, "status": "cancelling"})
 
 
 async def delete_run(request: Request):
@@ -652,4 +747,5 @@ routes: list[BaseRoute] = [
     Route("/api/experiment/runs", list_runs, methods=["GET"]),
     Route("/api/experiment/runs/{stamp}", get_run, methods=["GET"]),
     Route("/api/experiment/runs/{stamp}", delete_run, methods=["DELETE"]),
+    Route("/api/experiment/runs/{stamp}/cancel", cancel_run, methods=["POST"]),
 ]

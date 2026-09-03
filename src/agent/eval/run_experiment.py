@@ -72,6 +72,24 @@ AUX_DIMS = ("schema_match_score",)
 _DEFAULT_ROUTE = "qwen"
 _DEFAULT_MODEL = "qwen3.7-max"
 
+# ── 运行中「停止」协作取消 ──────────────────────────────
+# 三层进程（API / orchestrator / worker 子进程）共用同一**停止标记文件**做协作取消：
+# API cancel 端点写标记 → orchestrator 每臂顶部 / worker 每题顶部检查 → 自然断点干净退出。
+# 不做 kill subprocess：单题 agent 在跑 LLM 时强杀会留半截 trace。
+# 标记文件统一放 <per-stamp run_dir>/cancel（= Path(out_dir).parent / "cancel"）。
+_CANCEL_FILE_NAME = "cancel"
+# orchestrator 检测到停止时返回的专用退出码 → API 映射为 status=cancelled（区别于 0/1/2）
+RC_CANCELLED = 130
+
+
+def _cancel_path(out_dir: str | Path) -> Path:
+    """从 orchestrator/worker 的 out_dir 推出停止标记文件路径。
+
+    out_dir = <run_dir>/out（per-stamp 结果目录）→ 标记 = <run_dir>/cancel，
+    与 API 侧 `experiment.py` 写标记用的 `_run_dir()/stamp/"cancel"` 同一路径。
+    """
+    return Path(out_dir).parent / _CANCEL_FILE_NAME
+
 
 def _load_env() -> None:
     """独立脚本运行先加载项目 env（start_server 由入口加载；此处兜底）。
@@ -528,11 +546,14 @@ def _run_worker(
     run_name: str = "",
     skill_ref: str = "",
     prompt_label: str | None = None,
+    cancel_file: str = "",
 ) -> int:
-    """单 label（arm）跑完全部查询，写 JSONL。返回 0=成功 1=worker 内部失败。
+    """单 label（arm）跑完全部查询，写 JSONL。返回 0=成功（含中途停止的部分结果） 1=worker 内部失败。
 
     prompt_label 显式指定时覆盖 LANGFUSE_PROMPT_LABEL（空串 → 走 production 默认）；
     None（旧调用）→ 沿用 label。skill_ref 非空时注入 SKILLS_REF（skill 版本 A/B）。
+    cancel_file 非空时每题前检查：标记存在 → 中止（已做部分仍落盘）；停止判定归 orchestrator
+    （worker 仍返回 0），避免退出码语义被取消路径污染。
     """
     # ── import 前注入 label（进程级 A/B 的显式优先项）+ 语义库版本（A/B 语义库）
     #    + skill 版本（A/B skill，git ref 物化）──
@@ -579,6 +600,14 @@ def _run_worker(
 
     async def _run_all() -> None:
         for idx, q in enumerate(queries):
+            # 运行中「停止」：标记文件已写（API cancel 端点落盘）→ 当前题自然结束后不再开新题。
+            # 单题 agent（LLM）无法中断，等它跑完当前题即退出，最坏粒度 = 一题时长。
+            if cancel_file and Path(cancel_file).exists():
+                _logger.warning(
+                    "[worker] 收到停止请求（cancel 标记），中止于第 %d 题（已跑 %d/%d）",
+                    idx, idx, len(queries),
+                )
+                break
             question = str(q.get("question", "")).strip()
             if not question:
                 continue
@@ -848,9 +877,18 @@ def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
     per_arm: dict[str, list[dict]] = {}
     arm_run_name: dict[str, str] = {}
 
+    # 运行中「停止」：标记文件 = <run_dir>/cancel（API cancel 端点落盘），
+    # orchestrator 每臂顶部检查——多臂时不启动后续臂，单臂等 worker（每题检查）自然退出。
+    cancel_file = _cancel_path(args.out_dir)
+    cancelled = False
+
     if on_progress:
         on_progress({"stage": "running_arms", "total": len(arms), "done": 0, "current": ""})
     for i, arm in enumerate(arms):
+        if cancel_file.exists():
+            cancelled = True
+            _logger.warning("[orchestrator] 检测到停止请求，中止后续臂（已完成 %d/%d）", i, len(arms))
+            break
         name = arm["name"]
         run_name = args.run_name or _default_run_name(arm, stamp)
         arm_run_name[name] = run_name
@@ -865,6 +903,7 @@ def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
             "--out", str(out_path),
             "--run-name", run_name,
             "--prompt-label", arm["prompt_label"],  # 空串显式传 → worker 走 production
+            "--cancel-file", str(cancel_file),  # 每题前检查停止标记（cooperative cancel）
         ]
         if arm["semantic_ref"]:
             cmd += ["--semantic", arm["semantic_ref"]]
@@ -889,7 +928,9 @@ def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
         _logger.info("[orchestrator]   run=%s", arm_run_name[name])
 
     # ── Dataset Run 级分数（每 arm 一个 run；UI Dataset → Runs 按 run 对比）──
-    _write_run_scores(args, per_arm, arm_run_name)
+    # 停止后不落 run 级分（半截结果建 Run 实体误导对比），只保留 manifest 部分明细。
+    if not cancelled:
+        _write_run_scores(args, per_arm, arm_run_name)
 
     # ── 落盘 manifest（工作区 eval/experiment_runs/）──
     try:
@@ -909,8 +950,9 @@ def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
                 "aggregate": _aggregate(recs),
                 "run_name": arm_run_name[l],
             }
-        # 门禁结果随 manifest 落盘（arms≥2 时；供 API 读回展示）
-        if len(arms) >= 2:
+        # 门禁结果随 manifest 落盘（arms≥2 且未被停止时；供 API 读回展示）。
+        # 停止的 run 缺臂（per_arm 不足）→ 跳过，防 labels[...] KeyError。
+        if len(arms) >= 2 and not cancelled and len(per_arm) == len(arms):
             ref_agg = manifest["labels"][arms[0]["name"]]["aggregate"]
             cand_agg = manifest["labels"][arms[1]["name"]]["aggregate"]
             _passed, _failures = _compare_gate(ref_agg, cand_agg, args.threshold)
@@ -927,6 +969,11 @@ def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
         _logger.info("[orchestrator] manifest → %s", run_dir / f"run_{stamp}.json")
     except Exception as e:  # noqa: BLE001
         _logger.warning("[orchestrator] manifest 落盘失败: %s", e)
+
+    # ── 停止收尾（部分 manifest 已落盘 → get_run 能读回已完成样本；跳过门禁/分数）──
+    if cancelled:
+        _logger.info("[orchestrator] 已按停止请求中止，保留部分结果")
+        return RC_CANCELLED
 
     # ── 门禁（ref=arms[0]，cand=arms[1]）──
     if len(arms) < 2:
@@ -1101,6 +1148,7 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, default=0.05, help="回归门禁阈值（默认 0.05）")
     parser.add_argument("--out-dir", default=str(Path(_PROJECT_ROOT) / ".tmp" / "experiment"), help="结果输出目录")
     parser.add_argument("--timeout", type=int, default=1800, help="单 worker 超时秒（默认 1800）")
+    parser.add_argument("--cancel-file", default="", help="worker 模式：停止标记文件路径（每题前检查，存在即中止）")
     args = parser.parse_args()
 
     if args.worker:
@@ -1115,6 +1163,7 @@ def main() -> None:
             run_name=args.run_name,
             skill_ref=args.skill_ref,
             prompt_label=args.prompt_label,
+            cancel_file=args.cancel_file,
         ))
 
     # ── 解析查询集：--dataset 选 Langfuse 数据集（可与 --queries 合并、去重、归一化）──
