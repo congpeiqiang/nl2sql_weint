@@ -125,11 +125,15 @@ async def list_datasets(request: Request):
 
     count 取 v4 dataset_items.list 的 meta.total_items（datasets.list 元数据不带
     item 数），每数据集一次查询；读取失败标记 -1。
+
+    note：给前端「数据集为空」与「读取失败」以可区分原因（两者此前都返回空数组，
+    前端无法判断该显示「暂无数据集」还是「加载失败」）。
     """
     from agent.trace.langfuse_client import get_client
 
     client = get_client()
     out = []
+    note = ""
     try:
         ds_resp = client.api.datasets.list(limit=100)
         for d in (ds_resp.data or []):
@@ -150,8 +154,14 @@ async def list_datasets(request: Request):
             out.append({"name": name, "count": count})
     except Exception as e:  # noqa: BLE001
         _logger.warning("[experiment] 列数据集失败: %s", e)
+        note = "读取 Langfuse 数据集失败：%s" % (str(e)[:200] or type(e).__name__)
     out.sort(key=lambda x: x["name"])
-    return json_response({"datasets": out})
+    if not note and not out:
+        note = (
+            "当前 Langfuse 项目暂无 Dataset：可运行 badcase 采集（collect_badcase）"
+            "或在标注页确认 BadCase/点赞 Good Set 入库后刷新。"
+        )
+    return json_response({"datasets": out, "note": note})
 
 
 async def prompt_labels(request: Request):
