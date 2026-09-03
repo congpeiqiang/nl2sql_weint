@@ -374,6 +374,38 @@ def _current_trace_refs() -> tuple[str, str]:
         return "", ""
 
 
+# 参与实验的 Langfuse prompt 名（run 级快照记录各名当前版本号；与 api/experiment.py 的
+# _PROMPT_NAMES 同集——label A/B 入口，两套 prompt 版本计数器各自独立）
+_PROMPT_VERSION_NAMES = ("main_system_prompt", "nl2sql_system_prompt")
+
+
+def _run_snapshot(prompt_label: str, semantic: str, skill_ref: str, run_id: str) -> dict:
+    """构造 run 级版本快照（worker 执行时锁定「实际生效版本」，全 arm 各条目恒定）。
+
+    字段均为 Langfuse metadata 可存值（str，≤200）：
+    - prompt_label / prompt_version_*：label 是该 arm 真实生效的进程级 label；
+      prompt_version_<name> 用 get_prompt_version 取该 label 下当前实际版本号
+      （Langfuse 各 prompt 独立计数；取不到 → ""）。
+    - skill_ref / semantic_ref：该 arm 选择的 git ref（留空 = 磁盘 skill / 语义库 HEAD）。
+    """
+    from agent.trace.langfuse_client import get_prompt_version
+
+    snap: dict = {
+        "run_id": run_id,
+        "prompt_label": prompt_label,
+        "skill_ref": skill_ref or "(disk)",
+        "semantic_ref": semantic or "(head)",
+    }
+    for pn in _PROMPT_VERSION_NAMES:
+        try:
+            ver = get_prompt_version(pn, prompt_label)
+            snap[f"prompt_version_{pn}"] = str(ver) if isinstance(ver, int) else ""
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("[worker] 取 prompt %s 版本失败: %s", pn, e)
+            snap[f"prompt_version_{pn}"] = ""
+    return snap
+
+
 def _report_run_item(
     client,
     run_name: str,
@@ -381,11 +413,21 @@ def _report_run_item(
     trace_id: str,
     obs_id: str,
     meta: dict,
+    run_description: str = "",
+    run_meta: dict | None = None,
 ) -> None:
     """把单条实验结果关联进 Langfuse Dataset Run（run 由首个 run_item 隐式创建）。
 
     仅当 item 带 dataset_item_id 时生效；--queries 文件的裸查询（无 item_id）跳过，
     并提示该结果不会在 Langfuse Dataset Runs 中出现。
+
+    Langfuse run 级展示（Dataset → Runs 页）：
+    - run_description：整轮实验说明（用户提交时填写，所有臂/条目同值）。
+    - run_meta：run 级版本快照（实际生效的 prompt label/版本、skill_ref、语义库
+      db=ref）。Dataset Run 的 metadata 是「run 级」——每条 create 都会更新 run
+      元数据，故必须传**恒定**的 run 级 dict（含 index/question 的逐条 dict 会让
+      run 元数据被最后一条覆盖成噪声）。裸查询（run_meta=None）时退化为旧行为
+      （逐条 meta），不改原 CLI 语义。
     """
     item_id = str(item.get("dataset_item_id", "") or "")
     if not item_id:
@@ -394,14 +436,16 @@ def _report_run_item(
     try:
         client.api.dataset_run_items.create(
             run_name=run_name,
+            run_description=run_description or None,
             dataset_item_id=item_id,
             trace_id=trace_id or None,
             observation_id=obs_id or None,
-            metadata=meta,
+            metadata=run_meta if run_meta is not None else meta,
         )
         _logger.info(
-            "[worker] run_item 落库 run=%s item=%s trace=%s",
+            "[worker] run_item 落库 run=%s item=%s trace=%s%s",
             run_name, item_id[:12], (trace_id or "")[:12],
+            f" desc={run_description[:40]!r}" if run_description else "",
         )
     except Exception as e:  # noqa: BLE001
         _logger.warning("[worker] dataset_run_items.create 失败 item=%s: %s", item_id[:12], e)
@@ -441,13 +485,19 @@ def _serialize_experiment_expected(v):
 
 
 @contextmanager
-def _experiment_attrs(handler, client, run_name, item, meta):
+def _experiment_attrs(handler, client, run_name, item, meta, description="", run_meta=None):
     """把 langfuse.experiment.* 属性注入单条查询的 trace（路径 B，与 Dataset Run 并行）。
 
     - 仅当 handler 可用 + item 带 dataset_item_id + dataset_id 可解析时启用；
       否则 yield None（查询照常跑，只落 Dataset Run）。
     - experiment_id 稳定 = exp-<run_name> → 同一 arm 的所有 item 归并成一个
       Experiment 实体（UI Experiment 页按 run 对比多轮）。
+    - run 级（整轮实验、恒定）：
+      · description（非空）→ root span 直写 langfuse.experiment.description
+        （官方 run_experiment 同款：属性是整 run 共享的人类可读说明，UI 页顶栏展示）；
+      · run_meta（版本快照 dict）→ langfuse.experiment.metadata.*（_propagate_attributes
+        的 experiment_metadata，所有 item 继承，run 详情可溯源实际版本）。
+    - 逐条 item 级：experiment_item_metadata=meta（label/db/index/question…，实验页条目详情）。
     - 根链 on_chain_start 时补 langfuse.experiment.item.root_observation_id=<root span
       自身 id>（官方要求该值必须等于 root spanId；root obs id 只在 span 创建时才知，
       故用 M-T6b 同款 on_chain_start 补丁，逐条装/卸避免跨查询串扰）。
@@ -479,6 +529,9 @@ def _experiment_attrs(handler, client, run_name, item, meta):
                         "run_id": meta.get("run_id", ""),
                     },
                 }
+                if run_meta:
+                    # run 级版本快照（恒定值）；值均 str ≤200，直接进 experiment_metadata
+                    attrs["experiment_metadata"] = {str(k): str(v) for k, v in run_meta.items() if v != ""}
     if attrs is None:
         yield None
         return
@@ -500,6 +553,9 @@ def _experiment_attrs(handler, client, run_name, item, meta):
                     otel = getattr(obs, "_otel_span", None)
                     if oid and otel is not None:
                         otel.set_attribute("langfuse.experiment.item.root_observation_id", oid)
+                        if description:
+                            # run 级描述：root span 直写（官方 run_experiment 同款属性）
+                            otel.set_attribute("langfuse.experiment.description", description)
                         if exp_expected is not None:
                             otel.set_attribute(
                                 "langfuse.experiment.item.expected_output",
@@ -507,8 +563,9 @@ def _experiment_attrs(handler, client, run_name, item, meta):
                             )
                         patched["n"] += 1
                         _logger.info(
-                            "[worker] experiment root_observation_id=%s expected_output=%s",
-                            oid[:12], "set" if exp_expected is not None else "none",
+                            "[worker] experiment root_observation_id=%s desc=%s expected_output=%s",
+                            oid[:12], "set" if description else "none",
+                            "set" if exp_expected is not None else "none",
                         )
             except Exception as e:  # noqa: BLE001
                 _logger.debug("[worker] experiment root_observation_id 补齐失败: %s", e)
@@ -547,6 +604,7 @@ def _run_worker(
     skill_ref: str = "",
     prompt_label: str | None = None,
     cancel_file: str = "",
+    description: str = "",
 ) -> int:
     """单 label（arm）跑完全部查询，写 JSONL。返回 0=成功（含中途停止的部分结果） 1=worker 内部失败。
 
@@ -554,6 +612,8 @@ def _run_worker(
     None（旧调用）→ 沿用 label。skill_ref 非空时注入 SKILLS_REF（skill 版本 A/B）。
     cancel_file 非空时每题前检查：标记存在 → 中止（已做部分仍落盘）；停止判定归 orchestrator
     （worker 仍返回 0），避免退出码语义被取消路径污染。
+    description：整轮实验的人类可读说明（实验级单个，所有 arm/条目同值），写入
+    Langfuse run 描述（Dataset Run run_description + root span langfuse.experiment.description）。
     """
     # ── import 前注入 label（进程级 A/B 的显式优先项）+ 语义库版本（A/B 语义库）
     #    + skill 版本（A/B skill，git ref 物化）──
@@ -596,6 +656,12 @@ def _run_worker(
 
     # 每次 worker 一个 run id，实验 trace 按此分组
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    # run 级版本快照（执行时锁定实际生效版本：prompt label/各 prompt 版本、skill、语义库）
+    run_snapshot = _run_snapshot(resolved, semantic, skill_ref, run_id)
+    _logger.info(
+        "[worker] run 级版本快照: %s",
+        json.dumps({k: v for k, v in run_snapshot.items() if k != "run_id"}, ensure_ascii=False),
+    )
     records: list[dict] = []
 
     async def _run_all() -> None:
@@ -639,7 +705,10 @@ def _run_worker(
                     "question": question,
                     "run_id": run_id,
                 }
-                with _experiment_attrs(get_langfuse_handler(), get_client(), run_name, q, _meta_pre):
+                with _experiment_attrs(
+                    get_langfuse_handler(), get_client(), run_name, q, _meta_pre,
+                    description=description, run_meta=run_snapshot,
+                ):
                     result = await g.ainvoke(
                         {"messages": [HumanMessage(content=question)]},
                         {
@@ -696,6 +765,8 @@ def _run_worker(
                             "question": question,
                             "run_id": run_id,
                         },
+                        run_description=description,
+                        run_meta=run_snapshot,
                     )
                 # 五维分写回 trace（UI 按 trace/run item 查看每维分数）
                 if trace_id:
@@ -909,6 +980,9 @@ def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
             cmd += ["--semantic", arm["semantic_ref"]]
         if arm["skill_ref"]:
             cmd += ["--skill-ref", arm["skill_ref"]]
+        # 实验级 Description：整轮一条，透传给每个 arm worker → Langfuse run 描述
+        if getattr(args, "description", "") or "":
+            cmd += ["--description", str(args.description)]
         if args.judge:
             cmd.append("--judge")
         _logger.info("[orchestrator] spawn: %s", " ".join(cmd[-12:]))
@@ -1149,6 +1223,7 @@ def main() -> None:
     parser.add_argument("--out-dir", default=str(Path(_PROJECT_ROOT) / ".tmp" / "experiment"), help="结果输出目录")
     parser.add_argument("--timeout", type=int, default=1800, help="单 worker 超时秒（默认 1800）")
     parser.add_argument("--cancel-file", default="", help="worker 模式：停止标记文件路径（每题前检查，存在即中止）")
+    parser.add_argument("--description", default="", help="实验级描述（整轮一条，透传所有臂写入 Langfuse run description）")
     args = parser.parse_args()
 
     if args.worker:
@@ -1164,6 +1239,7 @@ def main() -> None:
             skill_ref=args.skill_ref,
             prompt_label=args.prompt_label,
             cancel_file=args.cancel_file,
+            description=args.description,
         ))
 
     # ── 解析查询集：--dataset 选 Langfuse 数据集（可与 --queries 合并、去重、归一化）──

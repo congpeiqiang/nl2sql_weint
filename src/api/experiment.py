@@ -49,6 +49,8 @@ _RUN_TASKS: dict[str, asyncio.Task] = {}
 # 停止标记文件名：与 run_experiment.py 的 _CANCEL_FILE_NAME / _cancel_path 同一约定
 # （API 写 <run_dir>/<stamp>/cancel，orchestrator/worker 从 out_dir.parent 推出同一路径）
 _CANCEL_FILE_NAME = "cancel"
+# 实验级 Description 最大长度（Langfuse run 描述 / span 属性 / 自研 UI 共用上限）
+_DESC_MAX = 2000
 
 # 参与实验的 Langfuse prompt 名（label A/B 入口）
 _PROMPT_NAMES = ("main_system_prompt", "nl2sql_system_prompt")
@@ -365,6 +367,9 @@ async def create_run(request: Request):
     if len(set(names)) != len(names):
         return json_response({"error": "arm 名重复（name 需唯一）"}, status=400)
 
+    # 实验级 Description（整轮一条）：截断保护，Langfuse run 描述 + 自研 run 记录共用
+    description = str(body.get("description") or "").strip()[:_DESC_MAX]
+
     stamp = _stamp()
     status = {
         "stamp": stamp,
@@ -377,6 +382,7 @@ async def create_run(request: Request):
             "dataset_limit": int(body.get("dataset_limit") or 0),
             "judge": bool(body.get("judge")),
             "threshold": float(body.get("threshold") or 0.05),
+            "description": description,
         },
         "error": "",
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -467,6 +473,7 @@ async def _execute_run(stamp: str, body: dict) -> None:
             judge=bool(body.get("judge")),
             threshold=float(body.get("threshold") or 0.05),
             timeout=int(body.get("timeout") or 1800),
+            description=str(body.get("description") or "").strip()[:_DESC_MAX],
         )
 
         cur = _read_status(stamp) or {}
@@ -644,6 +651,7 @@ async def list_runs(request: Request):
                     "gate": manifest.get("gate"),
                     "started_at": st.get("started_at", ""),
                     "finished_at": st.get("finished_at", ""),
+                    "description": (st.get("request") or {}).get("description", "") or "",
                 }
             except Exception as e:  # noqa: BLE001
                 _logger.warning("[experiment] 读 manifest %s 失败: %s", mf.name, e)
@@ -668,6 +676,7 @@ async def list_runs(request: Request):
                 "gate": None,
                 "started_at": st.get("started_at", ""),
                 "finished_at": st.get("finished_at", ""),
+                "description": (st.get("request") or {}).get("description", "") or "",
             }
     ordered = sorted(runs.values(), key=lambda r: r["stamp"], reverse=True)
     return json_response({"runs": ordered})
@@ -732,6 +741,7 @@ async def get_run(request: Request):
             "error": (st or {}).get("error", ""),
             "started_at": (st or {}).get("started_at", ""),
             "finished_at": (st or {}).get("finished_at", ""),
+            "description": ((st or {}).get("request") or {}).get("description", "") or "",
             "manifest": manifest,
             "items": items,
             "gate": gate,
