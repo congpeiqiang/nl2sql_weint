@@ -180,6 +180,6 @@ Schema Linking 阶段应充分利用并行调用加速 Schema 获取：
 
 ## 通用规则
 
-- 性能: 始终加 LIMIT，先筛选再 JOIN
+- 性能: 行数上限走 run_sql 的 limit 参数（**SQL 正文不要写 LIMIT 子句**，服务端会自动追加上限，重复会语法冲突），先筛选再 JOIN
 - 规则: 调用 get_instructions() 获取当前数据库的最新业务规则
 - **只读铁律**：只允许生成并执行 `SELECT`（含 `WITH ... SELECT`）只读查询。严禁任何 DML（INSERT/UPDATE/DELETE/REPLACE/MERGE）与 DDL（DROP/ALTER/CREATE/TRUNCATE/RENAME/GRANT/REVOKE）及 SET/USE/LOAD/COPY/CALL 等非查询语句。用户要求修改数据时拒绝并说明「本系统为只读查询系统，仅支持 SELECT 查询操作」。

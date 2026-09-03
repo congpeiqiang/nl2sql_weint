@@ -7,7 +7,7 @@
 | # | 规则 | 严重度 | 检测方式 | 优化建议 |
 |---|------|:---:|---------|---------|
 | 1 | SELECT * | high | 检测 SELECT 列表含 `*` | 明确列出所需列 |
-| 2 | SELECT 无 LIMIT | high | 检测 SELECT 无 LIMIT 子句 | 添加 LIMIT |
+| 2 | 未设行数上限 | high | top-N/大表无行数限制（契约：SQL 不写 LIMIT） | ORDER BY + run_sql 传 limit=N |
 | 3 | JOIN 无 ON 条件 | high | 检测 JOIN 无 ON 子句 | 添加 ON 条件 |
 | 4 | 子查询 | medium | 检测 FROM/WHERE 中的子查询 | 改写为 JOIN |
 | 5 | 函数包裹列 | medium | 检测 WHERE 中函数包裹列 | 避免索引失效 |
@@ -39,21 +39,23 @@ SELECT id, name, age FROM users WHERE age > 30
 
 ---
 
-### 规则 2：SELECT 无 LIMIT（严重度：high）
+### 规则 2：未设行数上限（严重度：high）
 
-**问题**：无 LIMIT 的 SELECT 可能返回全表数据，导致内存溢出或响应缓慢。
+**问题**：top-N / 前 N 条 / 最大的 N 个等隐含行数限制的问题，若不真正限制行数，可能返回远超预期、甚至全表的数据。
 
-**检测**：SELECT 语句无 LIMIT 子句。
+**检测**：问题隐含「前 N / Top N / 最多 N」意图时，SQL 是否限制了行数；大表 SELECT 无任何行数上限也需警惕。
+
+**实现（run_sql 契约）**：行数上限**通过 `run_sql` 的 `limit` 参数控制，不要在 SQL 正文写 `LIMIT` 子句**。服务端执行时会自动追加 `LIMIT {limit+1}`（多取一行探测截断），SQL 自带 `LIMIT` 会构成双重 LIMIT 而语法报错。
 
 **示例**：
 ```sql
--- 问题
-SELECT name FROM users
--- 优化
-SELECT name FROM users LIMIT 100
+-- 正确：top-10 → ORDER BY 排好序，执行时传 limit=10
+SELECT name FROM users ORDER BY age DESC
+-- 错误：SQL 里写 LIMIT（会与服务端自动追加冲突 → 双重 LIMIT）
+SELECT name FROM users ORDER BY age DESC LIMIT 10
 ```
 
-**注意**：聚合查询（GROUP BY）通常不需要 LIMIT，需结合业务判断。
+**注意**：未显式传 limit 时工具默认上限 1000（最大 10000），单表查询不加 LIMIT 也不会全表无界返回；聚合查询（GROUP BY）通常无需额外上限，需结合业务判断。
 
 ---
 

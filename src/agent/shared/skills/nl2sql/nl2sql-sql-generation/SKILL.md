@@ -72,6 +72,7 @@ dry_run(sql)               ← WrenAI 验证
 - **纠错**: 3次 dry_run 失败 → 调用 nl2sql-correction
 - **最终 SQL 复验（铁律）**: 执行 run_sql 前，**必须用最终 SQL 再 dry_run 一次**。若 SQL 在初版 dry_run 后被修改/精化（增删字段、改排序/别名、加过滤条件等），**禁止直接执行**——先 `dry_run(最终SQL)` 验证通过，再交给执行步骤 run_sql。确保 dry_run 记录与最终执行的 SQL 完全一致，避免出现「干跑的是版本A、实际执行版本B」的中间产物错位（process_data 里会留两个版本，且报告 SQL 与 dry_run 对不上）。
 - 不要执行run_sql
+- **run_sql 行数契约**：SQL 正文**不写 `LIMIT` 子句**；top-N / 防超量用 `ORDER BY ...` 排好序，交由执行阶段 `run_sql(sql=..., limit=N)` 传参（默认 1000）。服务端会自动追加上限，SQL 自带 LIMIT 会双重 LIMIT 语法报错
 - **只读铁律**：只生成 `SELECT`（含 `WITH ... SELECT`）只读查询；**严禁**生成 INSERT/UPDATE/DELETE/REPLACE/MERGE 等 DML，或 DROP/ALTER/CREATE/TRUNCATE/RENAME/GRANT/REVOKE 等 DDL 及 SET/USE/LOAD/COPY/CALL 等非查询语句
 
 ## 错误处理

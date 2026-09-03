@@ -1,7 +1,7 @@
 ---
 version: 0.1.0
 name: nl2sql-performance-optimization
-description: "触发：SQL生成成功且dry_run验证通过后，在正式执行前进行性能优化检查。策略A中使用。基于性能规则集检测SQL中的性能隐患（SELECT *、无LIMIT、笛卡尔积、函数包裹列、NOT IN等），并给出优化建议。策略B简单查询可选。策略C不经过此步骤。"
+description: "触发：SQL生成成功且dry_run验证通过后，在正式执行前进行性能优化检查。策略A中使用。基于性能规则集检测SQL中的性能隐患（SELECT *、未设行数上限、笛卡尔积、函数包裹列、NOT IN等），并给出优化建议。策略B简单查询可选。策略C不经过此步骤。"
 ---
 
 # NL2SQL SQL 性能优化智能体
@@ -73,7 +73,7 @@ Step 5: 返回优化结果给编排器
 
 - **只读约束**：本技能只做性能分析，不执行 SQL、不修改数据库
 - **保守优化**：优化建议必须保持 SQL 语义不变，不得改变查询结果
-- **优先级**：高风险问题（SELECT *、笛卡尔积、无 LIMIT）优先处理
+- **优先级**：高风险问题（SELECT *、笛卡尔积、未设行数上限）优先处理
 - **不强制修改**：输出优化建议，由编排器决定是否采纳
 - **规则集**：完整规则见 `references/performance-rules.md`，必须逐条对照
 
@@ -82,7 +82,7 @@ Step 5: 返回优化结果给编排器
 | # | 规则 | 严重度 | 说明 |
 |---|------|:---:|------|
 | 1 | SELECT * | high | 应明确列出所需列 |
-| 2 | SELECT 无 LIMIT | high | 可能返回大量数据 |
+| 2 | 未设行数上限 | high | 可能返回大量数据（默认 run_sql limit=1000 兜底；top-N 须显式传 limit，SQL 不写 LIMIT） |
 | 3 | JOIN 无 ON 条件 | high | 笛卡尔积风险 |
 | 4 | 子查询 | medium | 可改写为 JOIN |
 | 5 | 函数包裹列 | medium | 如 YEAR(created_at) 导致索引失效 |
