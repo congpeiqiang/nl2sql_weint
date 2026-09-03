@@ -68,9 +68,12 @@ _SRC = _PROJECT_ROOT / "src"
 CORE_DIMS = ("sql_biz_correct_score", "sql_valid_score", "sql_exec_success")
 AUX_DIMS = ("schema_match_score",)
 
-# worker 默认模型路由（queries 内可逐条覆盖）
-_DEFAULT_ROUTE = "qwen"
-_DEFAULT_MODEL = "qwen3.7-max"
+# worker 默认模型路由（queries 内可逐条覆盖：llm_route/llm_model）
+# 空串 = 跟随主模型：active provider 默认模型（与线上聊天一致）。
+# 不再写死 qwen —— 写死会把整场实验绑死在单一接入点上，其 key 失效即全军覆没
+#（2026-09-03 生产：阿里云百炼 qwen 接入点 key 被封 → 所有离线 run 首题 401）。
+_DEFAULT_ROUTE = ""
+_DEFAULT_MODEL = ""
 
 # ── 运行中「停止」协作取消 ──────────────────────────────
 # 三层进程（API / orchestrator / worker 子进程）共用同一**停止标记文件**做协作取消：
@@ -594,6 +597,38 @@ def _experiment_attrs(handler, client, run_name, item, meta, description="", run
         handler.on_chain_start = orig_start
 
 
+def _resolve_effective_model(route: str, model: str) -> str:
+    """溯源 label：本次查询实际生效的模型名。
+
+    route/model 显式给定 → 原样返回；空 = 跟随主模型（active provider 默认模型，
+    与 ThinkingToggleMiddleware/create_model 的回退链一致）。读不到配置给可读占位。
+    仅用于 metadata/日志标注，不参与真实模型选择。
+    """
+    if model:
+        return model
+    try:
+        from agent.settings.model_config_store import get_store
+
+        store = get_store()
+        provs = store.get_all_decrypted()
+        active = store.get_active()
+        cfg = next((p for p in provs if p.name == route), None) if route else None
+        if cfg is None:
+            cfg = next((p for p in provs if p.name == active), None) or (provs[0] if provs else None)
+        if cfg is not None:
+            mid = cfg.default_model
+            if not mid:
+                for m in cfg.models or []:
+                    if isinstance(m, dict) and m.get("id"):
+                        mid = str(m["id"])
+                        break
+            if mid:
+                return mid
+    except Exception:  # noqa: BLE001 —— 标注失败不影响运行
+        pass
+    return model or (route if route else "(active 默认)")
+
+
 def _run_worker(
     label: str,
     queries: list[dict],
@@ -680,6 +715,11 @@ def _run_worker(
             db_name = str(q.get("db_name", "") or os.getenv("NL2SQL_EVAL_DB", "chinook_aliyun"))
             route = str(q.get("llm_route", "") or _DEFAULT_ROUTE)
             model = str(q.get("llm_model", "") or _DEFAULT_MODEL)
+            # enable_thinking：不强制，缺省 None = 跟随主模型默认（无覆盖时节点用
+            # 模块级 deepseek_model，deepseek 思考开）；queries 内可逐题 "true"/"false" 覆盖。
+            _th_raw = q.get("enable_thinking")
+            thinking = None if _th_raw is None else str(_th_raw).lower() in ("true", "1", "yes", "on")
+            model_label = _resolve_effective_model(route, model)
             rec: dict = {
                 "label": label,
                 "index": idx,
@@ -700,7 +740,7 @@ def _run_worker(
                     "semantic_ref": semantic or "",
                     "skill_ref": skill_ref or "",
                     "db_name": db_name,
-                    "model": model,
+                    "model": model_label,
                     "index": idx,
                     "question": question,
                     "run_id": run_id,
@@ -721,7 +761,7 @@ def _run_worker(
                                 "db_name": db_name,
                                 "llm_route": route,
                                 "llm_model": model,
-                                "enable_thinking": False,
+                                "enable_thinking": thinking,
                             },
                         },
                     )
@@ -759,7 +799,7 @@ def _run_worker(
                             "semantic_ref": semantic or "",
                             "skill_ref": skill_ref or "",
                             "db_name": db_name,
-                            "model": model,
+                            "model": model_label,
                             "strategy": strategy,
                             "index": idx,
                             "question": question,
