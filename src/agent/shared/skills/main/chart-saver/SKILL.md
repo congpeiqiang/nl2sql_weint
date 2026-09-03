@@ -96,9 +96,11 @@ python /shared/skills/main/chart-saver/scripts/save_chart.py \
 | 保存目录不存在 | 脚本自动创建目录 |
 | 文件名含非法字符 | 脚本自动替换为安全字符 |
 
+
 ## 最佳实践
 
 1. **优先使用 SVG 格式** — SVG 矢量图清晰且可被 Markdown 引用
 2. **文件名语义化** — 使用能反映图表内容的名称，如 `Top10_Movies_by_Average_Rating_chart`
 3. **保存后立即引用** — 保存后立即在报告中用相对路径引用，避免遗漏
 4. **与 report-export 技能配合** — 保存图表后，用 report-export 技能生成包含图表引用的报告
+
