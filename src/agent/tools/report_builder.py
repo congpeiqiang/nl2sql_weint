@@ -20,6 +20,7 @@ import json
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated
 
 from langchain.tools import ToolRuntime
@@ -30,6 +31,55 @@ _logger = logging.getLogger(__name__)
 
 _RE_IFRAME = re.compile(r"<iframe[\s\S]*?</iframe>", re.IGNORECASE)
 _SAFE_FNAME = re.compile(r'[\\/:*?"<>|\r\n]+')
+# 全量结果表内嵌上限：超过则只给路径链接（防病理性超大表把报告文件撑爆）
+_EMBED_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _full_table_section(result_obj) -> str:
+    """从 check 结果携带的 full_result_files 读盘拼「完整数据表」一节。
+
+    QueryResultOffloadMiddleware 在 run_sql 边界把大结果表（>50 行）确定性落盘，
+    check_progress 已把 VFS 指针汇总到 result.full_result_files。这里**代码读盘**
+    （0 模型 token）内嵌到报告正文；VFS `/workspace/` 前缀映射到当前活跃工作区
+    磁盘目录（与报告落盘目录同源）。文件缺失 / 超大 / 读取失败时降级只写路径
+    链接，不报错。
+    """
+    if not isinstance(result_obj, dict):
+        return ""
+    files = result_obj.get("full_result_files")
+    if not isinstance(files, list) or not files:
+        return ""
+    try:
+        from agent.workspace_manager import get_workspace_manager
+
+        root = Path(get_workspace_manager().active_workspace)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[build_report] active workspace 读取失败: %s", e)
+        return ""
+    parts = []
+    for fp in files:
+        if not isinstance(fp, str) or not fp.startswith("/workspace/"):
+            parts.append(f"\n- 全量结果文件：`{fp}`（路径不在工作区，无法内嵌）")
+            continue
+        rel = fp[len("/workspace/"):]
+        disk = root / rel
+        try:
+            if not disk.is_file():
+                parts.append(f"\n- 全量结果文件：`{fp}`（文件缺失，无法内嵌）")
+                continue
+            size = disk.stat().st_size
+            if size > _EMBED_MAX_BYTES:
+                parts.append(
+                    f"\n- 全量结果文件：`{fp}`（{size} 字节过大，未内嵌，可下载查看）"
+                )
+                continue
+            parts.append(disk.read_text(encoding="utf-8").rstrip())
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("[build_report] 读全量结果文件失败 %s: %s", fp, e)
+            parts.append(f"\n- 全量结果文件：`{fp}`（读取失败，可手动打开查看）")
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
 
 
 # ── 消息归一化（兼容 dict 与 LangChain BaseMessage）───────────────────
@@ -158,6 +208,11 @@ async def _build_report_coro(
         str(result_text),
     ]
     next_section = 2
+    # 大结果全量表内嵌（QueryResultOffload 落盘文件，代码读盘 0 token；无则跳过）
+    full_table = _full_table_section(_obj)
+    if full_table:
+        md_parts += [f"\n## {next_section}. 完整数据表\n", full_table]
+        next_section += 1
     # 模型最终回复若已含该 SQL（result_text 命中）则不重复成节
     if sql and sql not in str(result_text):
         md_parts += [f"\n## {next_section}. 执行 SQL\n", f"```sql\n{sql}\n```"]

@@ -153,6 +153,24 @@ sql-of-thought 编排器（`sql-of-thought` skill）加载每个子 skill 时，
 - 可以使用 execute("mkdir -p /workspace/tmp /workspace/report") 确保目录存在
 - 示例：write_file("/workspace/report/report.md", report_content)
 
+### 8.3 大结果输出规则（防超长生成撞 60s 超时 / 前端冻结）
+
+系统在 run_sql 工具边界做**确定性落盘 + 消息瘦身**：当查询结果表超过 50 行、或
+结果文本超过 8000 字符时，全量数据会被自动写入
+`/workspace/nl2sql_process_data/{thread_id}/query_result/*.md`，而你在 run_sql
+工具结果里只会看到结构化 JSON：
+`{columns, row_count, rows: [前 20 行样例], rows_truncated: true, full_result_file: "…/query_result/….md"}`。
+
+**此时最终回复必须遵守：**
+1. 一句话结论 / 总数（引用 `row_count`，不要数样例行数当总数）；
+2. 前 20 行样例 markdown 表（**只引用工具结果 `rows` 字段里可见的行**）；
+3. 全量文件 VFS 路径（把 `full_result_file` 原样给出），并说明完整数据见该文件。
+
+**禁止：**
+- 把全量数据逐行重打回回复里（你只能看到 20 行样例，全量只在文件里）；
+- 用 `read_file` 读取该 `query_result/*.md` 后，把内容逐行照抄进回复或 write_file；
+- 把样例行数（20）误当业务统计口径——业务行数以 `row_count` 为准。
+
 ## 九、必须遵守的九大设计原则
 
 以下原则来自论文的核心发现和失败消融教训，每一个都是经过实验验证的最佳实践，**必须严格遵守**：
@@ -229,6 +247,26 @@ SQL生成并dry_run通过 → write_todos([{SQL生成与验证: completed},{性�
 ```
 
 **注意：** 策略B（快速通道）不经过性能优化，todos 中可省略该步骤；策略A（标准流水线）必须包含性能优化步骤。
+
+**todo 纪律铁律（进度必须真实，禁止提前全勾）：**
+
+进度状态必须真实反映当前执行位置。**禁止**把尚未开始或正在进行的步骤标成
+completed；**禁止**在一次 write_todos 里把后续步骤一次性全部勾完。
+
+run_sql 执行成功返回结果后，正确节奏是：
+1. 先把「查询执行」标 completed，同时把下一个真正要做的步骤（「结果汇总」）标 in_progress；
+2. **真正生成完最终回复之后**，才把最后一步标 completed。
+
+对照示例（run_sql 刚返回 431 行大结果，最终回复还没生成）：
+
+✅ 正确：
+```text
+run_sql 成功返回 → write_todos([{查询执行: completed}, {结果汇总: in_progress}])
+最终回复写完     → write_todos([{结果汇总: completed}])
+```
+
+❌ 错误：run_sql 一成功就把 {查询执行: completed, 结果汇总: completed, …} 全部勾完——
+「结果呈现」还没做就提前全勾，界面进度会在真实执行仍进行时显示全部完成。
 
 ---
 

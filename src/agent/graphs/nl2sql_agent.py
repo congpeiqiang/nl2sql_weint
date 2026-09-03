@@ -20,6 +20,7 @@ from agent.middlewares.model_timeout import ModelTimeoutMiddleware
 from agent.middlewares.sql_approval import build_sql_approval_middleware
 from agent.middlewares.tool_filter import ToolFilterMiddleware
 from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
+from agent.middlewares.query_result_offload import QueryResultOffloadMiddleware
 from agent.middlewares.write_todos import WriteTodosProtocolMiddleware
 from agent.tools.mcp_tool import sub_tools as mcp_tools
 from agent.subagents.track_progress import ProgressTrackerMiddleware
@@ -194,6 +195,12 @@ _middleware = [
     # 前端切模型（如 DeepSeek 官方 API）只对主 agent 生效，子 agent 仍打旧 provider。
     ThinkingToggleMiddleware(),
     ToolFilterMiddleware(),
+    # 大结果表落盘 + 消息瘦身（431 部门人数 228s 静默治本）：
+    # 必须在 LangfuseSpan 之前（外层）——langchain wrap_tool_call 链 first=outermost，
+    # 外层在 handler 返回后做后处理，故 LangfuseSpan 的 span output / LLM-judge /
+    # process_data dump 吃原始全量 payload，只有进 state 的消息被瘦身成
+    # {row_count, rows:[前20样例], full_result_file}（与 main_agent MessageSlimmer 同构）。
+    QueryResultOffloadMiddleware(),
     # M2 ② 结构化层：关键工具边界包 skill 级 span（skill 名作 metadata + vfs_path 定位）
     LangfuseSpanMiddleware(),
     dynamic_prompt,

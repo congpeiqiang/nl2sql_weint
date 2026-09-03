@@ -198,14 +198,21 @@ def _run_sql_meta(messages, i):
     except (json.JSONDecodeError, ValueError):
         obj = None
     if isinstance(obj, dict):
+        rc = obj.get("row_count")
+        try:
+            rc_int = int(rc) if rc is not None else None
+        except (TypeError, ValueError):
+            rc_int = None
         rr = obj.get("rows")
-        if isinstance(rr, list):
+        # QueryResultOffload 大结果瘦身后 rows 仅前 N 样例、真行数在 row_count：
+        # 须优先 row_count，否则 _extract_last_sql 的「返回行数最多 = 产出 SQL」
+        # 启发式会把 20 当 431（生产 trace「431 部门人数」228s 静默治本修复）。
+        if obj.get("rows_truncated") and rc_int is not None:
+            rows = rc_int
+        elif isinstance(rr, list):
             rows = len(rr)
-        elif obj.get("row_count") is not None:
-            try:
-                rows = int(obj["row_count"])
-            except (TypeError, ValueError):
-                rows = 0
+        elif rc_int is not None:
+            rows = rc_int
         cc = obj.get("columns")
         if isinstance(cc, list):
             cols = [str(x).strip().lower() for x in cc]
@@ -234,6 +241,40 @@ def _run_sql_meta(messages, i):
                 return sql, rows, cols
             last_sql = sql  # 无 id 匹配时回退：最后一个 run_sql 的 sql
     return last_sql, rows, cols
+
+
+def _collect_full_result_files(messages) -> list:
+    """收集子线程里 run_sql 大结果落盘文件的 VFS 指针（保序去重）。
+
+    QueryResultOffloadMiddleware 把 >50 行 / 大文本的 run_sql 结果瘦身为
+    {row_count, rows:[前 N 样例], rows_truncated, full_result_file}。这里从子线程
+    消息确定性汇总全量文件清单给主 agent / build_report，供其代码读盘嵌入报告
+    （0 模型开销，不依赖模型在最终回复里拼的字符串）。
+    """
+    files = []
+    seen = set()
+    for m in messages:
+        if isinstance(m, dict):
+            role = m.get("role") or m.get("type")
+            name = m.get("name") or ""
+        else:
+            role = getattr(m, "type", "")
+            name = getattr(m, "name", "") or ""
+        if role not in ("tool", "tool_result"):
+            continue
+        if not (isinstance(name, str) and name.endswith("run_sql")):
+            continue
+        try:
+            obj = json.loads(_msg_content_str(m))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        fp = obj.get("full_result_file")
+        if isinstance(fp, str) and fp and fp not in seen:
+            seen.add(fp)
+            files.append(fp)
+    return files
 
 
 def _final_table_headers(messages) -> set:
@@ -487,6 +528,11 @@ def apply_patch():
                 # sql-generation process_data 回填为产出 run_sql（若 dry_run 与
                 # 实际执行 SQL 不一致），保证中间产物与前端/报告 SQL 同源
                 _backfill_process_data_sql(messages, sql)
+            # 大结果全量文件指针（QueryResultOffload 落盘）附到 result，
+            # build_report 读盘后把完整结果表嵌入报告正文（0 模型开销）
+            full_files = _collect_full_result_files(messages)
+            if full_files:
+                result["full_result_files"] = full_files
         elif run["status"] == "error":
             error_detail = run.get("error")
             result["error"] = (
