@@ -74,7 +74,7 @@ def _git_ssh_command() -> str:
 
 def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[bool, str]:
     """执行 git 命令，返回 (ok, output)。异常统一转 (False, 错误信息)。"""
-    ensure_ssh_key()  # 保证 GIT_SSH_COMMAND 引用的私钥在持久卷上（幂等）
+    ensure_ssh_key()  # 容器首启生成持久卷私钥（幂等）；Windows 开发机不落盘
     cmd = ["git"]
     if cwd:
         # git 2.35+ dubious ownership 检查：仓库目录属主≠进程用户（如容器 root vs
@@ -83,6 +83,12 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[b
         # （容器重建后全局配置会丢），作用域仅限本次操作的 cwd。
         cmd += ["-c", f"safe.directory={cwd}"]
     cmd += list(args)
+    # ssh:// origin 时锁定持久卷私钥：仅当密钥真实存在（容器内）才注入 GIT_SSH_COMMAND。
+    # Windows 开发机 ensure_ssh_key 不落盘 → 不注入，走用户自身 ssh（agent/凭据），
+    # 否则 `-i /app/data/.ssh/id_ed25519`（不存在的路径）会让一切 ssh git 操作必败。
+    _env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if (ssh_dir() / "id_ed25519").exists():
+        _env["GIT_SSH_COMMAND"] = _git_ssh_command()
     try:
         proc = subprocess.run(
             cmd,
@@ -93,11 +99,7 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[b
             encoding="utf-8",
             errors="replace",
             stdin=subprocess.DEVNULL,
-            env={
-                **os.environ,
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_SSH_COMMAND": _git_ssh_command(),
-            },
+            env=_env,
         )
     except FileNotFoundError:
         return False, "git 未安装或不在 PATH"

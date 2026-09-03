@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -32,6 +33,7 @@ from typing import Optional
 
 # 共享 git archive 子树物化（skill 版本化同用）；保留 _git_archive_materialize 别名
 from agent.utils.git_archive import git_archive_materialize as _git_archive_materialize  # noqa: F401
+from agent.utils import git_repo
 
 _logger = logging.getLogger(__name__)
 
@@ -48,12 +50,18 @@ def wrenai_server_name(db_name: str) -> str:
 
 # ── 语义库 A/B：WREN_SEMANTIC_OVERRIDE 版本物化 ───────────────
 # 实验 worker 进程设 WREN_SEMANTIC_OVERRIDE（逗号分隔多库）。命中后把该库的 Wren
-# 项目物化到 git ref 所指版本（git archive 子树），wrenai MCP server 的 --project
-# 指向物化目录 → 同查询同 prompt 只换语义库版本。
+# 项目物化到 git ref 所指版本（git archive / 远程浅克隆），wrenai MCP server 的
+# --project 指向物化目录 → 同查询同 prompt 只换语义库版本。
 #
 # 取值两种形态：
 #   db=ref          从该库当前项目所在 git 仓库取 ref（默认，物化"正在服务的语义库"）
 #   db=path@ref     从显式 path 取 ref（如历史版本在 nl2sql 仓库 src/test/wrenai_exec_Chinook@v6.0.0）
+#
+# 版本真源与 skill 侧同构：语义库仓库（正在服务的项目目录）自己的 origin 就是版本
+# 远程。本地 git archive 取不到该 ref（刚推 tag、容器未 fetch）时，src="" 会直取
+# origin 浅克隆——不再静默退化跑当前版本（run 预检用 materialize_semantic_ref 显式
+# 物化，失败即报错）。物化目录落 <tmp>/nl2sql_wren_semantic_cache/<db>/<ref>/ 并写
+# `.nl2sql_wren_ok` marker（记录 src|ref）——API 预检物化后 worker 子进程零网络复用。
 _semantic_override_cache: dict[tuple[str, str, str], Optional[str]] = {}
 _semantic_override_lock = threading.Lock()
 
@@ -96,42 +104,125 @@ def _lookup_override(overrides: dict[str, tuple[str, str]], db_name: str) -> Opt
     return None
 
 
-def semantic_project_path(db_name: str, base: Path) -> Optional[str]:
-    """若 WREN_SEMANTIC_OVERRIDE 命中 db_name，物化该 ref 并返回物化目录。
+# Wren 项目合法性标记：版本间目录布局不同（v2/v6/HEAD 用 models/；v3~v5 用
+# wren_project.yml；HEAD/v6 另含 target/mdl.json）——命中任一即视为合法项目。
+_WREN_MARKERS = ("wren_project.yml", "models", "target/mdl.json", "config")
+# 物化目录 marker：记录 src|ref，供跨进程复用（API 预检 → worker 子进程零网络）
+_MARKER_FILE = ".nl2sql_wren_ok"
 
-    物化源：override 显式给 path 时用 path（如历史版本在 nl2sql 仓库内），否则用
-    base（正在服务的语义库所在 git 仓库）。未命中 / 物化失败 / 无项目标记 →
-    None（调用方回退 base，实验静默退化为当前版本，不中断）。进程级按 (db, src, ref)
-    缓存一次。
+
+def _wren_markers_hit(root: Path) -> bool:
+    return any((root / m).exists() for m in _WREN_MARKERS)
+
+
+def _cache_dir(db_name: str, ref: str) -> Path:
+    return (
+        Path(tempfile.gettempdir()) / "nl2sql_wren_semantic_cache"
+        / _safe_ref(db_name) / _safe_ref(ref)
+    )
+
+
+def _marker_matches(root: Path, key: str) -> bool:
+    try:
+        p = root / _MARKER_FILE
+        return p.is_file() and p.read_text(encoding="utf-8").strip() == key
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _write_marker(root: Path, key: str) -> None:
+    try:
+        (root / _MARKER_FILE).write_text(key, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[semantic_db] 写 marker 失败: %s", e)
+
+
+def _materialize_from_origin(source: Path, ref: str, dest_root: Path) -> bool:
+    """本地取不到 ref（刚推 tag 容器未 fetch / 浅克隆无历史 tag）→ 直取仓库 origin。
+
+    仅 src=""（正在服务的语义库，独立小仓库）走远程；显式 path@ref 的历史版本保持
+    本地 archive。浅克隆 ref 到 pid 独立临时目录后拷出项目树（clone 根即 Wren 项目
+    根：wren_project.yml 在仓库根）。返回是否得到合法项目；无 origin / 克隆失败 → False。
     """
-    overrides = _parse_semantic_overrides()
-    spec = _lookup_override(overrides, db_name)
-    if not spec:
-        return None
-    src, ref = spec
+    try:
+        ok, out = git_repo._run(["remote", "get-url", "origin"], cwd=str(source), timeout=15)
+        origin = out.strip() if ok else ""
+    except Exception:  # noqa: BLE001
+        origin = ""
+    if not origin:
+        return False
+    parent = dest_root.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    work = parent / f".work_{dest_root.name}_{os.getpid()}"
+    if work.exists():
+        shutil.rmtree(work, ignore_errors=True)
+    try:
+        git_repo.clone_shallow(origin, ref, str(work), timeout=300)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[semantic_db] 浅克隆 ref=%s 失败: %s", ref, e)
+        return False
+    try:
+        if dest_root.exists():
+            shutil.rmtree(dest_root, ignore_errors=True)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        for child in list(Path(work).iterdir()):
+            if child.name == ".git":
+                continue
+            target = dest_root / child.name
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            shutil.move(str(child), str(target))
+        return _wren_markers_hit(dest_root)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[semantic_db] 远程物化 ref=%s 失败: %s", ref, e)
+        return False
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _materialize_semantic(db_name: str, src: str, ref: str, base: Path) -> Optional[str]:
+    """把该库语义库 ref 物化到缓存目录，返回项目目录；失败 → None。
+
+    顺序：进程缓存 → 磁盘快路径（合法项目 + marker 匹配，跨进程零网络）→ 本地 git
+    archive（dev / 离线 / 已在服务的版本）→ 远程浅克隆（src="" 且仓库有 origin）。
+    未命中 override（spec None）由调用方判断，本函数不读 env。
+    """
     source = Path(src).resolve() if src else base.resolve()
     key = (db_name, str(source), ref)
     with _semantic_override_lock:
         if key in _semantic_override_cache:
             return _semantic_override_cache[key]
-    dest_root = (
-        Path(tempfile.gettempdir()) / "nl2sql_wren_semantic_cache"
-        / _safe_ref(db_name) / _safe_ref(ref)
-    )
-    dest_root.mkdir(parents=True, exist_ok=True)
+    dest_root = _cache_dir(db_name, ref)
+    marker_key = f"{src}|{ref}"
+    # 快路径：目录已物化本 key 的合法项目 → 复用（API 预检后 worker 子进程零网络）
+    if _wren_markers_hit(dest_root) and _marker_matches(dest_root, marker_key):
+        with _semantic_override_lock:
+            _semantic_override_cache[key] = str(dest_root)
+        return str(dest_root)
+    if dest_root.exists():
+        shutil.rmtree(dest_root, ignore_errors=True)
     materialized = _git_archive_materialize(source, ref, dest_root)
     result: Optional[str] = None
-    # 项目判据：版本间目录布局不同（v2/v6/HEAD 用 models/；v3~v5 用 wren_project.yml；
-    # HEAD/v6 另含 target/mdl.json）——命中任一已知标记即视为合法 Wren 项目。
-    markers = ("wren_project.yml", "models", "target/mdl.json", "config")
-    hit = materialized is not None and any((materialized / m).exists() for m in markers)
-    if hit:
+    if materialized is not None and _wren_markers_hit(materialized):
         result = str(materialized)
+        _write_marker(materialized, marker_key)
         _logger.info(
             "[semantic_db] 语义库 A/B：db=%s ref=%s → %s（markers=%s）",
             db_name, ref, materialized,
-            [m for m in markers if materialized and (materialized / m).exists()],
+            [m for m in _WREN_MARKERS if (materialized / m).exists()],
         )
+    elif not src:
+        # 本地取不到该 ref（刚推 tag / 浅克隆无历史）→ 直取 origin，不再静默退化
+        if _materialize_from_origin(source, ref, dest_root):
+            result = str(dest_root)
+            _write_marker(dest_root, marker_key)
+            _logger.info("[semantic_db] 语义库 A/B（远程）：db=%s ref=%s → %s", db_name, ref, dest_root)
+        else:
+            _logger.warning(
+                "[semantic_db] 语义库版本物化失败 db=%s ref=%s（本地无该 ref 且从 origin 取不到："
+                "tag 不存在/未推送/网络不可达/未绑 git）→ 回退 %s",
+                db_name, ref, base,
+            )
     else:
         _logger.warning(
             "[semantic_db] 语义库版本物化失败/无项目标记 db=%s ref=%s → 回退 %s",
@@ -140,6 +231,33 @@ def semantic_project_path(db_name: str, base: Path) -> Optional[str]:
     with _semantic_override_lock:
         _semantic_override_cache[key] = result
     return result
+
+
+def semantic_project_path(db_name: str, base: Path) -> Optional[str]:
+    """若 WREN_SEMANTIC_OVERRIDE 命中 db_name，物化该 ref 并返回物化目录。
+
+    物化源：override 显式给 path 时用 path（如历史版本在 nl2sql 仓库内），否则用
+    base（正在服务的语义库所在 git 仓库）。未命中 / 物化失败 / 无项目标记 → None
+    （调用方回退 base 当前版本）。进程级按 (db, src, ref) 缓存一次。
+    """
+    overrides = _parse_semantic_overrides()
+    spec = _lookup_override(overrides, db_name)
+    if not spec:
+        return None
+    src, ref = spec
+    return _materialize_semantic(db_name, src, ref, base)
+
+
+def materialize_semantic_ref(db_name: str, ref: str) -> Optional[str]:
+    """显式物化 db 的语义库 ref（不读 WREN_SEMANTIC_OVERRIDE env，供 run 预检调）。
+
+    base 取该库正在服务的项目目录（get_detector().project_path_for）；db 未建模 /
+    ref 不可得（本地无且无 origin）→ None。返回物化的 Wren 项目目录。
+    """
+    base = get_detector().project_path_for(db_name)
+    if not base:
+        return None
+    return _materialize_semantic(db_name, "", ref, Path(base))
 
 
 # ── db_name 归一化（查询集 → db_config 配置名）─────────────────

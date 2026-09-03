@@ -178,61 +178,127 @@ async def prompt_labels(request: Request):
 async def skill_refs(request: Request):
     """skill 版本 git refs（tags/branches/HEAD）。
 
-    仅当 skill 目录真实被 git 跟踪才列 refs；否则返回空 + note（skill 目录在
-    nl2sql 主仓库内，未提交时 `git -C` 会向上找到主仓库，把语义库 tags 误当
-    skill 版本列出——选了也物化失败，误导用户）。
+    GitLab 为真源：`git ls-remote` 直读 origin（TTL 缓存，推 tag 后 ≤30s 出现，无需
+    服务器手工 git fetch）。skill tag 命名硬约定 `skills/`|`skills-` 前缀——排除语义
+    执行版 v1~v7 等非 skill tag，无需再逐个 ref 查树内容。开发机代码在 git 检出内
+    → 额外并入本地已打/已推 refs（离线可用）；生产容器代码目录无 .git → 纯远程。
+    origin 取 `SKILLS_GIT_REMOTE`（未配置且无本地仓库 → 空 + note）。
     """
-    from agent.utils.skills_versioning import _default_skills_base
+    from agent.utils.skills_versioning import (
+        _default_skills_base,
+        effective_origin,
+        enclosing_repo,
+        remote_refs,
+        tag_like_skill,
+    )
 
     base = _default_skills_base()
-    # 逐个 ref 过滤「树里真含 skills 子树的」：skill 在 nl2sql 主仓库内时主仓库
-    # tags 混着语义库版本（v1~v6），直接全列会误导；且 skill 文件可能 staged 但
-    # 从未 commit——git archive 按 ref 物化仍取不到，那些 ref 也不能用。
-    def _ref_has_path(repo: str, rel: str, ref: str) -> bool:
-        try:
-            r = subprocess.run(
-                ["git", "-C", repo, "ls-tree", "-r", "--name-only", ref, "--", rel],
-                capture_output=True, text=True, timeout=30,
-            )
-            return r.returncode == 0 and bool(r.stdout.strip())
-        except Exception:  # noqa: BLE001
-            return False
+    enc = enclosing_repo(base)
+    repo_root = enc[0] if enc else None
+    local = _git_refs(Path(repo_root)) if repo_root else None
+    origin = effective_origin(repo_root)
+    remote = remote_refs(origin) if origin else None
 
-    try:
-        repo = subprocess.run(
-            ["git", "-C", str(base), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=30,
-        ).stdout.strip()
-        rel = os.path.relpath(base, repo).replace("\\", "/")
-        all_refs = _git_refs(base)
-        tags = [t for t in all_refs["tags"] if _ref_has_path(repo, rel, t)]
-        branches = [b for b in all_refs["branches"] if _ref_has_path(repo, rel, b)]
-        head = all_refs["head"] if _ref_has_path(repo, rel, "HEAD") else ""
-    except Exception:  # noqa: BLE001  判定失败保守返回空
-        tags, branches, head = [], [], ""
+    tags: list[str] = []
+    _seen: set[str] = set()
+    for src in (remote, local):
+        if not src:
+            continue
+        for t in src.get("tags") or []:
+            if tag_like_skill(t) and t not in _seen:
+                tags.append(t)
+                _seen.add(t)
+
+    branches: list[str] = []
+    _seen_b: set[str] = set()
+    for src in (remote, local):
+        if not src:
+            continue
+        for b in src.get("branches") or []:
+            if b not in _seen_b:
+                branches.append(b)
+                _seen_b.add(b)
+    head = (local or {}).get("head", "") or ""
+
     if not tags and not branches and not head:
-        return json_response(
-            {
-                "tags": [],
-                "branches": [],
-                "head": "",
-                "note": "skill 目录尚未提交 git（文件已 add 但未 commit），暂无可用版本；commit + 打 tag 后可用",
-            }
-        )
+        # 远程可达的仓库必有 ≥1 个分支，正常情况不会走到这；走到只有两种：
+        # 远程不可达/未配置（remote=None），或远程仓库空到无任何 ref（note2）。
+        if remote is None:
+            note = (
+                "无法连接 GitLab（SKILLS_GIT_REMOTE 未配置或网络不可达），暂无可用 "
+                "skill 版本；配置远程源后重试"
+            )
+        else:
+            note = (
+                "GitLab 当前无可选 skill 版本；commit 并推送 skills/ 或 skills- 前缀的 "
+                "tag 后下拉自动出现（≤30s），无需在服务器手工 git fetch"
+            )
+        return json_response({"tags": [], "branches": [], "head": "", "note": note})
     return json_response({"tags": tags, "branches": branches, "head": head})
 
 
 async def semantic_refs(request: Request):
-    """指定库的语义库 git refs（tags/branches/HEAD）。"""
+    """指定库的语义库 git refs（tags/branches/HEAD）。
+
+    版本真源 = 该语义库仓库（正在服务的项目目录）自己的 origin：`git ls-remote` 直读
+    （TTL 缓存，语义库在设置里 push 新 tag 后 ≤30s 下拉自动出现，无需服务器手工
+    fetch）。本地仓库 refs 并入（dev / 已 fetch 的版本）。本地目录未绑 git → 只出本地
+    refs（通常为空）+ note。
+    """
     db = (request.query_params.get("db") or "").strip()
     if not db:
         return json_response({"error": "db 必填（如 ?db=chinook_aliyun）"}, status=400)
     from agent.utils.semantic_db import get_detector
+    from agent.utils import git_repo
+    from agent.utils.skills_versioning import remote_refs
 
     path = get_detector().project_path_for(db)
     if not path:
         return json_response({"error": f"数据库 {db} 未建模（无语义库项目）"}, status=404)
-    return json_response(_git_refs(Path(path)))
+    repo = Path(path)
+    local = _git_refs(repo)
+    origin = ""
+    try:
+        ok, out = git_repo._run(["remote", "get-url", "origin"], cwd=str(repo), timeout=15)
+        origin = out.strip() if ok else ""
+    except Exception:  # noqa: BLE001
+        origin = ""
+    remote = remote_refs(origin) if origin else None
+
+    tags: list[str] = []
+    _seen: set[str] = set()
+    for src in (remote, local):
+        if not src:
+            continue
+        for t in src.get("tags") or []:
+            if t not in _seen:
+                tags.append(t)
+                _seen.add(t)
+    branches: list[str] = []
+    _seen_b: set[str] = set()
+    for src in (remote, local):
+        if not src:
+            continue
+        for b in src.get("branches") or []:
+            if b not in _seen_b:
+                branches.append(b)
+                _seen_b.add(b)
+    head = (local or {}).get("head", "") or ""
+
+    if not tags and not branches and not head:
+        # git 仓库必有 ≥1 个分支，走到这只剩两种：本地目录未绑 git / 远程不可达且本地无 ref
+        if origin:
+            note = (
+                "无法连接该语义库的远程仓库（网络不可达或未授权），本地亦无已 fetch 的 "
+                "git refs；修复远程后推 tag ≤30s 自动出现"
+            )
+        else:
+            note = (
+                "该语义库是本地目录（未绑定 Git 远程），暂无可用版本；先在「语义库管理」"
+                "里推送到 Git 再选版本"
+            )
+        return json_response({"tags": [], "branches": [], "head": "", "note": note})
+    return json_response({"tags": tags, "branches": branches, "head": head})
 
 
 # ── 实验编排 ───────────────────────────────────────────────
@@ -294,8 +360,46 @@ async def create_run(request: Request):
     )
 
 
+def _preflight_arms(arms: list[dict]) -> str:
+    """逐臂物化 skill_ref 与 semantic_ref；返回错误描述，全过 → 空串。
+
+    物化失败（tag 不存在 / GitLab 不可达 / 名字不合前缀 / 库未建模或未绑 git）→
+    显式报错，不让 worker 静默退化跑「当前版本」得出看似成功实则错误的 A/B 结果。
+    预检同时把物化目录备好，worker 子进程走 marker 快路径零网络。
+
+    semantic_ref 形态：`db=ref`（UI）或 `db=ref,db2=ref2`（多库）；无 `=` 的裸 ref
+    运行时本来就不生效（override 解析跳过），预检同样跳过。
+    """
+    from agent.utils.skills_versioning import materialize_skills_ref
+    from agent.utils.semantic_db import materialize_semantic_ref
+
+    for a in arms:
+        if not isinstance(a, dict):
+            continue
+        ref = str(a.get("skill_ref") or "").strip()
+        if ref and materialize_skills_ref(ref) is None:
+            return (
+                f"skill_ref <{ref}> 物化失败：tag 不存在 / GitLab 不可达 / "
+                "名字不含 skills/ 或 skills- 前缀，请检查后重试"
+            )
+        sem = str(a.get("semantic_ref") or "").strip()
+        for part in sem.split(","):
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            db, sref = (s.strip() for s in part.split("=", 1))
+            if not db or not sref:
+                continue
+            if materialize_semantic_ref(db, sref) is None:
+                return (
+                    f"semantic_ref <{part}> 物化失败：库「{db}」未建模 / 无语义库项目，"
+                    "或该 ref 本地与远程都不存在（本地目录未绑 git 无法取版本），请检查后重试"
+                )
+    return ""
+
+
 async def _execute_run(stamp: str, body: dict) -> None:
-    """后台执行：装载查询集 → orchestrator（spawn worker）→ 状态落盘。"""
+    """后台执行：skill_ref 预检 → 装载查询集 → orchestrator（spawn worker）→ 状态落盘。"""
     import agent.eval.run_experiment as rex
 
     def on_progress(prog: dict) -> None:
@@ -334,6 +438,21 @@ async def _execute_run(stamp: str, body: dict) -> None:
             threshold=float(body.get("threshold") or 0.05),
             timeout=int(body.get("timeout") or 1800),
         )
+
+        cur = _read_status(stamp) or {}
+        cur["stage"] = "preflight"
+        _write_status(stamp, cur)
+
+        # ── skill_ref / semantic_ref 预检（物化含网络浅克隆，放线程不卡事件循环）──
+        pre_err = await asyncio.to_thread(_preflight_arms, body.get("arms") or [])
+        if pre_err:
+            cur = _read_status(stamp) or {}
+            cur["status"] = "error"
+            cur["stage"] = "failed"
+            cur["error"] = pre_err
+            cur["finished_at"] = datetime.now(timezone.utc).isoformat()
+            _write_status(stamp, cur)
+            return
 
         cur = _read_status(stamp) or {}
         cur["stage"] = "loading_dataset"
