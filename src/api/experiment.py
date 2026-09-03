@@ -335,12 +335,14 @@ async def semantic_refs(request: Request):
 async def create_run(request: Request):
     """提交离线实验：body {datasets, dataset_limit?, arms[], judge?, threshold?}。"""
     body = await parse_body(request)
-    datasets = body.get("datasets") or ["badcase"]
+    # 不隐式默认 badcase（此前空/缺省会偷偷回退 badcase，数据集未采集时 404 误导）。
+    # 缺省或空数组一律 400，由前端显式勾选（与前端「至少选一个」校验一致）。
+    datasets = body.get("datasets")
     if isinstance(datasets, str):
         datasets = [datasets]
-    datasets = [str(d) for d in datasets if d]
+    datasets = [str(d) for d in (datasets or []) if d]
     if not datasets:
-        return json_response({"error": "datasets 不能为空"}, status=400)
+        return json_response({"error": "datasets 不能为空：请至少勾选一个数据集"}, status=400)
 
     raw_arms = body.get("arms")
     if not isinstance(raw_arms, list) or not raw_arms:
