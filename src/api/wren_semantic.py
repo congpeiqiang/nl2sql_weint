@@ -914,7 +914,15 @@ async def push_to_git(request: Request):
     remote_url = str(data.get("remote_url", "") or "").strip()
     branch = str(data.get("branch", "") or "main").strip()
     tag = str(data.get("tag", "") or "").strip()
-    commit_message = str(data.get("commit_message", "") or "初始化语义库").strip()
+    commit_message = str(data.get("commit_message", "") or "").strip()
+    if not commit_message:
+        # 前端提交信息留空时自动生成（含语义库名 + 时间），不再默认固定文案
+        from datetime import datetime, timezone
+
+        commit_message = "语义库更新 %s %s" % (
+            name,
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        )
     # 是否强制覆盖远端（force push）。默认非强制：远端已有不同历史时普通推送会被
     # git 拒绝（rejected / non-fast-forward），需要用户在前端显式勾选强制覆盖。
     # body 里可能是 JSON bool，也可能是字符串（"true"/"false"），统一归一化。
