@@ -38,6 +38,7 @@ from agent.eval.evaluators import (
 )
 from agent.eval import eval_subject  # P1 评估单元：工具边界证据 sidecar + 收尾组装
 from agent.trace.langfuse_client import (
+    _attach_app_root_claim,
     create_score,
     get_client,
     get_thread_trace_context,
@@ -933,7 +934,25 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                         skill, c_tid[:16], c_oid[:16] if c_oid else "(none)",
                         otel_active,
                     )
-            span = client.start_observation(**obs_kwargs)
+            # M-T8b：显式 trace_context 归巢（path A 子 agent skill span / path C
+            # 主 agent 工具 span）创建的观测，父观测早于它导出（跨线程/已 end）→
+            # SDK 无 parent_expected_exported 抑制 → 误判 is_app_root=true → v4
+            # Traces 列表同一 trace 多一行。与 M-T7 归巢同机制：创建瞬间注入
+            # langfuse_trace_id baggage 认领，触发 suppressed_by_parent_claim，
+            # 让归巢 skill span 不再成为独立 UI 行（真 root main_agent 不受影响）。
+            _tc = obs_kwargs.get("trace_context") or {}
+            _claim_tid = _tc.get("trace_id") if isinstance(_tc, dict) else None
+            _claim_token = _attach_app_root_claim(_claim_tid) if _claim_tid else None
+            try:
+                span = client.start_observation(**obs_kwargs)
+            finally:
+                if _claim_token is not None:
+                    try:
+                        from opentelemetry import context as otel_context
+
+                        otel_context.detach(_claim_token)
+                    except Exception:  # noqa: BLE001
+                        pass
             # M-T6b（修复 A）：trace_context 显式嵌套的 span 其父 observation 早于它
             # 导出、不在同一批 → v4 把它们判为 root observation，而 v4 的 trace 名 =
             # 最新 root observation 的 trace_name → 会用 skill span 名当 trace 名。

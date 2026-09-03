@@ -124,6 +124,54 @@ def _resolve_leaf_anchor(metadata) -> tuple[str, str, str] | None:
     return None
 
 
+# ── M-T8：归巢观测 app-root 认领（一行 trace = Traces 列表一行）────────
+# 背景：_mark_app_root_candidate（SDK span_processor）判 is_app_root=true 的三个
+# 抑制条件——parent_expected_exported（OTel 父观测在本进程仍在导出期望表）、
+# suppressed_by_parent_claim（当前 OTel 上下文 baggage 的 langfuse_trace_id ==
+# 该 span 的 trace_id）。M-T3/M-T7 归巢的观测（子 agent root chain / 自动续跑
+# 叶子）锚定的是早已 end 的 root obs → 父不在导出期望表（parent_expected_exported
+# 判定失效）→ 只能靠 baggage claim 抑制。否则 v4 把每条归巢观测都标
+# is_app_root=true → Traces 列表按 is_app_root 渲染时一行 trace 变 N 行
+# （2026-09-03 会话 01a065d6 实测：1 trace 内 19 个 app root 事件）。
+# 与 SDK start_as_current_span 内的 _set_langfuse_trace_id_in_baggage（client.py
+# ~1349）同机制：给"塞回既有 trace"的后代补声明，真 root 不受影响（无声明）。
+
+
+def _with_app_root_claim(ctx, trace_id_hex):
+    """返回在 ctx 上追加 langfuse_trace_id=<trace_id_hex 小写> baggage 的上下文。
+
+    失败/无 trace_id → 原样返回 ctx（零干预）。
+    """
+    if not trace_id_hex:
+        return ctx
+    try:
+        from opentelemetry import baggage as otel_baggage
+
+        normalized = str(trace_id_hex).lower()
+        if otel_baggage.get_baggage("langfuse_trace_id", ctx) == normalized:
+            return ctx
+        return otel_baggage.set_baggage("langfuse_trace_id", normalized, ctx)
+    except Exception:  # noqa: BLE001
+        return ctx
+
+
+def _attach_app_root_claim(trace_id_hex):
+    """把当前 OTel 上下文替换为带 app-root 认领声明的上下文并 attach。
+
+    返回需 otel_context.detach 的 token；无 trace_id 或失败 → None（零干预）。
+    """
+    if not trace_id_hex:
+        return None
+    try:
+        from opentelemetry import context as otel_context
+
+        return otel_context.attach(
+            _with_app_root_claim(otel_context.get_current(), trace_id_hex)
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class _AnchoredClient:
     """裸 client 薄包装：强制叶子 start_observation 携带显式 trace_context 归巢。
 
@@ -145,7 +193,22 @@ class _AnchoredClient:
             trace_context = {"trace_id": self._tid_hex}
             if self._oid_hex:
                 trace_context["parent_span_id"] = self._oid_hex
-        span = self._client.start_observation(trace_context=trace_context, **kwargs)
+        # M-T8：归巢观测是既有 trace 的后代，创建瞬间带上 app-root 认领声明
+        # （baggage langfuse_trace_id==trace_id → SDK 不标 is_app_root=true）。
+        # 仅当锚点带父观测（_oid_hex）时声明；无父 = 该 trace 的真 root，不声明。
+        token = _attach_app_root_claim(self._tid_hex) if self._oid_hex else None
+        try:
+            span = self._client.start_observation(
+                trace_context=trace_context, **kwargs
+            )
+        finally:
+            if token is not None:
+                try:
+                    from opentelemetry import context as otel_context
+
+                    otel_context.detach(token)
+                except Exception:  # noqa: BLE001
+                    pass
         try:
             span._otel_span.set_attribute("langfuse.trace.name", _LEAF_TRACE_NAME)
         except Exception:  # noqa: BLE001
@@ -552,6 +615,10 @@ def _patch_handler_for_trace_nesting(handler) -> None:
                 )
                 non_recording = otel_trace.NonRecordingSpan(span_context)
                 ctx = otel_trace.set_span_in_context(non_recording)
+                # M-T8：归巢 root chain 上下文同时带 app-root 认领声明——该 root obs
+                # 归入父 trace，不再被 SDK 标 is_app_root=true（否则会话/项目 Traces
+                # 列表一行 trace 渲染成 N 行）。与 M-T7 _AnchoredClient 声明同机制。
+                ctx = _with_app_root_claim(ctx, parent_tid)
                 token = otel_context.attach(ctx)
                 _logger.info(
                     "[langfuse_m3] %s root chain → 注入父 trace context %s "
