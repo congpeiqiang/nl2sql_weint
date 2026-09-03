@@ -311,7 +311,17 @@ def schedule_judge(
         trace_id: 写分目标 trace（sql_biz_correct → 子 trace；report → 主 trace）
         question_thread: 从该 thread 的 state 读用户问题（子 agent 是子线程，主 agent 是主线程）
     """
+    # 离线隔离：run_experiment 实验 worker 设 NL2SQL_EVAL_JUDGE_QUEUE=0 → 不把 LLM-judge
+    # 任务入队、不起 drainer。原因：worker 与在线生产共用同一
+    # {AGENT_DATA_ROOT}/eval_queue.sqlite，worker 起 drainer 时 _drain_loop 启动即
+    # reset_running_to_pending() 会把在线 drainer 正在跑的 running 行重置 → 重复打分。
+    # 实验的 sql_biz_correct 由 run_experiment._score_record 同步直评（不依赖本队列），
+    # 确定性分（sql_valid/exec/schema）仍同步写实验 trace → 关掉入队不丢任何分。
     try:
+        gate = (os.getenv("NL2SQL_EVAL_JUDGE_QUEUE", "1") or "1").strip().lower()
+        if gate in ("0", "false", "no", "off"):
+            _logger.debug("[eval] LLM-judge 入队已禁用（NL2SQL_EVAL_JUDGE_QUEUE=%s）", gate)
+            return
         from agent.eval.eval_queue import enqueue, ensure_worker
 
         enqueue(kind, trace_id, question_thread, sql=sql, result=result, report=report)

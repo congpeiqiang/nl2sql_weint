@@ -284,7 +284,7 @@ rubric 修改 / judge 模型切换 / 埋点（final 标记等）改动：
 | 期 | 内容 | 验收 |
 |----|------|------|
 | **P0 可靠交付** | 优雅停机 flush + judge 落盘待评队列（幂等） | 进程重启后 pending 自动续跑不丢分；模拟 kill 验证补评 → ✅ **2026-09-02 已实施**（本地模拟 6 场景全过；fetch_question 代理劫持隐患一并修复；生产待发版+重启验证） |
-| **P1 评估单元收口** | final 标记、结果摘要、报告正文、question 属性、收尾组装单元 | 抽样 N 条真实查询人工核对单元字段齐全/正确；探值 run_sql 均无 final |
+| **P1 评估单元收口** | final 标记、结果摘要、报告正文、question 属性、收尾组装单元 | 抽样 N 条真实查询人工核对单元字段齐全/正确；探值 run_sql 均无 final → **片1（评估单元脊柱）已实施（2026-09-02，本地验证 39/39 过）**：新增 `src/agent/eval/eval_subject.py`（纯逻辑组装/落盘）+ `langfuse_span.py` 工具边界证据 sidecar（run_sql 完整数字载荷/report 正文头部）+ 主 agent `after_agent` 收尾组装写 `{workspace}/nl2sql_process_data/{session}/eval-subject/{subject8}.json`；final_sql 复用 check 内嵌 `sql`（=`_extract_last_sql`，天然排除探值/核查）；Q1 抽样核对与 E2E 待后端发版+重启后在 192.168.25.64 真跑 |
 | **P2 rubric 工程化** | rubric 迁 Langfuse prompt（3 维）+ 本地兜底；code-judge 改读 | UI 改 rubric 不发版生效；回滚 label 生效 |
 | **P3 校准回路** | 回归集标定脚本 + 一致率/阈值报告 + 门禁流程 | 对 badcase/goodcase 出一期一致率报告，给出阈值切点 |
 | **P4 报告维提权 + 回评工具** | 报告采样 1.0、`eval_worker --replay` | 报告维一致率达标；rubric 改动能回评存量 |

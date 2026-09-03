@@ -164,10 +164,23 @@ def collect(days: int = 1, threshold: float = DEFAULT_THRESHOLD,
     new_count = 0
     status_items: list[dict] = []  # 积累新条目，循环结束后批量注册状态
     for sid, ts in by_session.items():
+        # 隔离离线 A/B 实验（run_experiment）：worker trace 的 session 恒为
+        # exp:{label}:{run}（run_experiment.py 注入 langfuse_session_id）。list_user_traces
+        # 按 type=AGENT+root 全量枚举、无 environment 过滤，候选臂是坏版本时执行失败
+        # SQL（sql_exec_success=0）会污染 Dataset:badcase → 标注队列/门禁基线失真。
+        # 前缀过滤是廉价精确信号（生产 session=线程 uuid，不以 exp: 开头）。
+        if str(sid).startswith("exp:"):
+            _logger.debug("[badcase] 跳过实验 session %s（离线 A/B trace 不进 badcase）", sid[:12])
+            continue
         rep = _main_of(sid, ts)
         if not rep:
             continue
         rep_id = rep["trace_id"]
+        # 兜底：实验 root trace 名也是 exp:{label}:{idx}（worker 注入 langfuse_trace_name），
+        # session 缺失（sid 回退 trace_id）时按 trace 名同样排除。
+        if str(rep.get("name") or "").startswith("exp:"):
+            _logger.debug("[badcase] 跳过实验 root trace %s（离线 A/B trace 不进 badcase）", rep_id[:12])
+            continue
         if rep_id in collected and not force:
             continue
         metadata = get_trace_metadata(rep_id)

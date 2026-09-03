@@ -553,6 +553,10 @@ def _run_worker(
         _logger.info("[worker] skill 版本 A/B override: %s", skill_ref)
     # 评审模型也走同供应商；强制 judge 恒真（本 worker 内直接调用，不受采样影响）
     os.environ["NL2SQL_EVAL_JUDGE_SAMPLE"] = "1.0"
+    # 队列隔离：本 worker 不把 LLM-judge 任务入 {AGENT_DATA_ROOT}/eval_queue.sqlite、
+    # 不起 drainer（该 sqlite 与在线生产共用，多进程 drainer 会 reset 在线在途任务）。
+    # 实验的 sql_biz_correct 由 _score_record 同步直评；确定性分同步写实验 trace。
+    os.environ["NL2SQL_EVAL_JUDGE_QUEUE"] = "0"
     # 实验 trace 与生产隔离：Environment 属性（UI 一等公民筛选，Environment 列一眼区分）。
     # 官方 run_experiment 用 "sdk-experiment"；这里用更可读的 "experiment"。
     # 只在 worker 进程设置 → 生产后端（不设此变量）trace 保持默认环境。

@@ -36,7 +36,13 @@ from agent.eval.evaluators import (
     schedule_judge,
     should_sample,
 )
-from agent.trace.langfuse_client import create_score, get_client, langfuse_enabled
+from agent.eval import eval_subject  # P1 评估单元：工具边界证据 sidecar + 收尾组装
+from agent.trace.langfuse_client import (
+    create_score,
+    get_client,
+    get_thread_trace_context,
+    langfuse_enabled,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -594,6 +600,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
             raise
         self._finish_span(span, result, tool_name, _tool_call_id(request))
         self._dump_process_data(tool_name, args, result, thread_id, display, heuristic)
+        self._record_subject_evidence(tool_name, heuristic, display, args, result, thread_id)
         self._maybe_score(tool_name, heuristic, args, result, ok=True, span=span,
                           exec_thread=exec_thread, error="")
         return result
@@ -619,6 +626,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
             raise
         self._finish_span(span, result, tool_name, _tool_call_id(request))
         self._dump_process_data(tool_name, args, result, thread_id, display, heuristic)
+        self._record_subject_evidence(tool_name, heuristic, display, args, result, thread_id)
         self._maybe_score(tool_name, heuristic, args, result, ok=True, span=span,
                           exec_thread=exec_thread, error="")
         return result
@@ -673,6 +681,148 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                                        report=report_text)
         except Exception as e:  # noqa: BLE001
             _logger.debug("[langfuse_span] 评分写入失败: %s", e)
+
+    # ── P1 评估单元：工具边界证据 sidecar + 主 agent run 收尾组装 ──
+    # （docs/langfuse平台/NL2SQL-评估精准化设计方案.md §4，P1 片1。旁路容错：
+    # 任何异常仅 debug 日志，不改 agent 状态、不改现有 span/分数/process_data。）
+
+    def _record_subject_evidence(self, tool_name: str, heuristic: str, display: str,
+                                 args: dict, result: Any, thread_id: str) -> None:
+        """工具成功返回后，把 run_sql 完整数字载荷 / report 正文头部写入证据 sidecar。
+
+        主线程看不到子 agent 线程 run_sql 的 row_count/head_rows（check 摘要只有
+        文本且 MessageSlimmer 已瘦身）→ 在此边界（完整 payload 还在）落盘，主 run
+        收尾组装评估单元时读盘补齐。subject_id 用 _question_id()：子线程工具执行时
+        返回主 run trace id → 同一次查询（= 一条 chat-turn trace）的证据归一到同一
+        sidecar。
+        """
+        if not langfuse_enabled():
+            return
+        try:
+            subject_id = _question_id()
+            root = _active_workspace_path()
+            if not subject_id or not thread_id or not root:
+                return
+            if heuristic == "sql-execution":
+                sql = str(args.get("sql", "") or "")
+                if not sql:
+                    return
+                payload = _result_payload(result)
+                result_txt = _result_text(result)
+                err = ""
+                if result_txt and looks_like_exec_error(result_txt):
+                    err = result_txt  # dbmcp 等把 DB 报错当返回值
+                entry = eval_subject.run_sql_evidence_entry(
+                    sql, ok=not looks_like_exec_error(result_txt), error=err,
+                    skill=display, payload=payload,
+                )
+                eval_subject.append_evidence(root, thread_id, subject_id, run_sql=entry)
+            elif heuristic in ("artifact-write", "artifact-read"):
+                # report 类产物（镜像 _maybe_score report 分支守卫：排除 SKILL.md 读取）
+                vfs = _vfs_path_from_args(tool_name, args)
+                if _skill_name_from_path(vfs):
+                    return
+                if _is_report_artifact(vfs):
+                    rep = eval_subject.report_evidence_entry(args)
+                    if rep:
+                        eval_subject.append_evidence(root, thread_id, subject_id, report=rep)
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[langfuse_span] 评估单元证据捕获失败: %s", e)
+
+    def after_agent(self, state: Any, runtime: Any) -> dict | None:
+        try:
+            self._assemble_subject(state, runtime)
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[langfuse_span] 评估单元组装失败: %s", e)
+        return None  # 恒不改 agent state（本中间件不做状态更新）
+
+    async def aafter_agent(self, state: Any, runtime: Any) -> dict | None:
+        try:
+            self._assemble_subject(state, runtime)
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[langfuse_span] 评估单元组装失败: %s", e)
+        return None
+
+    def _assemble_subject(self, state: Any, runtime: Any) -> None:
+        """主 agent（chat_agent）run 收尾：读证据 + 组评估单元 + 落盘。
+
+        auto-continue 多 run 幂等：非终结 run（子任务未完成，主消息无产出 SQL）
+        组不出 subject → 不写；终结 run（成功 check + 最终回答在）→ 写出。
+        subject_id = chat-turn trace id（_THREAD_TRACE_MAP 只在「新查询」覆盖 →
+        auto-continue run 也返回本查询原 trace）。
+        """
+        if self._agent_name != "chat_agent":
+            return  # nl2sql 子 agent 实例空转（给子图加了个空节点，安全）
+        if not langfuse_enabled():
+            return
+        try:
+            messages = state.get("messages") if isinstance(state, dict) else getattr(
+                state, "messages", None,
+            )
+            if not messages:
+                return
+            meta, configurable = self._assemble_config(runtime)
+            session_thread_id = str(meta.get("langfuse_session_id", "")
+                                    or configurable.get("thread_id", "") or "")
+            if not session_thread_id:
+                return
+            subject_id = get_thread_trace_context(session_thread_id)[0]
+            if not subject_id:
+                subject_id = str(meta.get("langfuse_parent_trace_id", "") or "")
+            if not subject_id:
+                subject_id = _question_id()
+            if not subject_id:
+                return
+            root = _active_workspace_path()
+            if not root:
+                return
+            question = str(meta.get("user_question", "") or "")
+            if not question:
+                turn = eval_subject.messages_since_last_human(list(messages))
+                for m in reversed(turn):
+                    if eval_subject._msg_role(m) not in ("human", "user"):
+                        continue
+                    question = eval_subject._msg_content_text(m).strip()
+                    if question:
+                        break
+            db_name = str(meta.get("db_name", "") or configurable.get("db_name", "") or "")
+            evidence = eval_subject.read_evidence(root, session_thread_id, subject_id)
+            subject = eval_subject.compose_subject(
+                context={
+                    "subject_id": subject_id,
+                    "ts": eval_subject._now(),
+                    "question": question,
+                    "db_name": db_name,
+                    "session_thread_id": session_thread_id,
+                },
+                messages=list(messages),
+                evidence=evidence,
+            )
+            if subject:
+                eval_subject.write_subject(root, session_thread_id, subject_id, subject)
+                _logger.info(
+                    "[langfuse_span] 评估单元已组装 subject=%s sql=%s", subject_id[:8],
+                    (subject.get("final_sql") or "")[:60].replace("\n", " "),
+                )
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[langfuse_span] 评估单元组装失败: %s", e)
+
+    @staticmethod
+    def _assemble_config(runtime: Any) -> tuple[dict, dict]:
+        """after_agent 内读请求 metadata/configurable（get_config 存活则用，否则 runtime.config）。"""
+        cfg: Any = None
+        try:
+            from langgraph.config import get_config as _lg_get_config
+            cfg = _lg_get_config()
+        except Exception:  # noqa: BLE001
+            cfg = None
+        if cfg is None:
+            cfg = getattr(runtime, "config", None)
+        if isinstance(cfg, dict):
+            return dict(cfg.get("metadata") or {}), dict(cfg.get("configurable") or {})
+        meta = getattr(cfg, "metadata", None) or {}
+        conf = getattr(cfg, "configurable", None) or {}
+        return dict(meta), dict(conf)
 
     # ── Langfuse 封装（全部容错，监控旁路）────────────────
 
