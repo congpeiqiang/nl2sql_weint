@@ -203,7 +203,8 @@ async def _build_report_coro(
     md_parts = [
         f"# {report_name}\n",
         f"> 生成时间：{now}",
-        f"> 数据来源：NL2SQL 查询结果\n",
+        f"> 数据来源：NL2SQL 查询结果",
+        f"> 数据截至：{now}（活库数据，可能随时间变动）\n",
         "## 1. 数据结果\n",
         str(result_text),
     ]
