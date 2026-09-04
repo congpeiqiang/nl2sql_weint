@@ -21,6 +21,7 @@ db_mcp_server 直连。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -39,13 +40,34 @@ _logger = logging.getLogger(__name__)
 
 
 def wrenai_server_name(db_name: str) -> str:
-    """由 db_name 推导 wrenai MCP server 名 / 工具前缀（纯函数，调用方统一用）。
+    r"""由 db_name 推导 wrenai MCP server 名 / 工具前缀（纯函数，调用方统一用）。
 
     `tool_name_prefix`（langchain_mcp_adapters）把 server 名与工具名纯拼接
-    （`f"{server_name}_{tool.name}"`，无 sanitize），故 server 名必须合法标识符：
-    保留 unicode 字母数字与下划线，其余字符（空格/斜杠/点等）替换为下划线。
+    （`f"{server_name}_{tool.name}"`，无 sanitize），而 OpenAI 兼容端点校验函数名
+    只允许 `^[a-zA-Z0-9_-]+$`，故 server 名必须是纯 ASCII 合法标识符。
+
+    陷阱：Python `\W` 是 Unicode 词符——中文/西里尔等是词符，不会被
+    `re.sub(r"\W+", "_", ...)` 折叠（2026-09 生产事故：库名
+    `WIT运营管理平台数据库` 直出工具名 `wrenai_WIT运营管理平台数据库_run_sql`
+    → 400 invalid tools[].function.name）。因此第一遍 `\W` 折叠（兼容旧行为，
+    空格/斜杠/点等 → 下划线）后，再剔除残留的非 ASCII 字符并追加原名的短哈希
+    （防不同中文库折叠后撞名）。纯 ASCII 库名输出与旧逻辑逐字节一致，零回归。
     """
-    return "wrenai_" + re.sub(r"\W+", "_", db_name or "").strip("_")
+    return "wrenai_" + _server_slug(db_name)
+
+
+def _server_slug(db_name: str) -> str:
+    """db_name → 合法 server 名片段（匹配 `^[a-zA-Z0-9_-]+$`，非空、确定）。"""
+    name = db_name or ""
+    # 第一遍：沿用旧规则折叠非词符（空格/斜杠/点/连字符 → 下划线）
+    base = re.sub(r"\W+", "_", name).strip("_")
+    if base and re.fullmatch(r"[A-Za-z0-9_-]+", base):
+        return base  # 纯 ASCII 合法 → 原样返回（与旧实现一致）
+    # 中文等 Unicode 词符漏网 → 剔成 ASCII 骨架
+    skeleton = re.sub(r"[^A-Za-z0-9_-]", "", base)
+    skeleton = re.sub(r"_+", "_", skeleton).strip("_")
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    return f"{skeleton}_{digest}" if skeleton else digest
 
 
 # ── 语义库 A/B：WREN_SEMANTIC_OVERRIDE 版本物化 ───────────────

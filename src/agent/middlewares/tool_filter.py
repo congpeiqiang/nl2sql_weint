@@ -47,9 +47,15 @@ class ToolFilterMiddleware(AgentMiddleware):
         return ""
 
     def _get_wrenai_prefix(self, db_name: str) -> str:
-        """由 db_name 推导 wrenai 工具前缀，如 'imdb' → 'wrenai_imdb_'。"""
-        import re
-        return "wrenai_" + re.sub(r"\W+", "_", db_name or "").strip("_") + "_"
+        r"""由 db_name 推导 wrenai 工具前缀，如 'imdb' → 'wrenai_imdb_'。
+
+        统一走 semantic_db.wrenai_server_name（唯一的净化源），避免二次实现
+        净化逻辑漂移：库名含中文时旧 `\W+` 规则不折叠 CJK，过滤前缀会带着
+        中文匹配不上 ASCII 工具名（见 semantic_db._server_slug 注释）。
+        """
+        from agent.utils.semantic_db import wrenai_server_name
+
+        return wrenai_server_name(db_name) + "_"
 
     def _filter_tools(self, tools: list, db_name: str) -> list:
         """按 db_name 过滤工具列表。
