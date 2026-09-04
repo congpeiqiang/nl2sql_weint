@@ -165,9 +165,15 @@ def _get_sub_server_config() -> Dict[str, Any]:
         if not project:
             continue
         server_name = wrenai_server_name(db_name)
-        # 冲突兜底：sanitize 后撞名（极罕见）时告警跳过，避免 tool 前缀歧义
+        # 冲突兜底：不同中文库折到同一 ASCII 骨架（去哈希后同骨架，极罕见）时
+        # 告警跳过，避免 tool 前缀歧义。处置：给库名补 ASCII 区分段（如 WIT库A/WIT库B）
+        # 或让后端仅建模其一，改完重启生效。
         if server_name in servers:
-            _logger.warning("[mcp] wrenai server 名冲突: %r 跳过 %r", server_name, db_name)
+            _logger.warning(
+                "[mcp] wrenai server 名冲突: %r 跳过 %r（去哈希后同骨架；"
+                "请在 db_config 库名里补 ASCII 区分段）",
+                server_name, db_name,
+            )
             continue
 
         # 从 db_config 同步连接信息到 Wren profile，通过 --profile 直传。

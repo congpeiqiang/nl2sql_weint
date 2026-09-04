@@ -50,24 +50,37 @@ def wrenai_server_name(db_name: str) -> str:
     `re.sub(r"\W+", "_", ...)` 折叠（2026-09 生产事故：库名
     `WIT运营管理平台数据库` 直出工具名 `wrenai_WIT运营管理平台数据库_run_sql`
     → 400 invalid tools[].function.name）。因此第一遍 `\W` 折叠（兼容旧行为，
-    空格/斜杠/点等 → 下划线）后，再剔除残留的非 ASCII 字符并追加原名的短哈希
-    （防不同中文库折叠后撞名）。纯 ASCII 库名输出与旧逻辑逐字节一致，零回归。
+    空格/斜杠/点等 → 下划线）后，再剔除残留的非 ASCII 字符得到可读 ASCII 骨架
+    （`WIT运营管理平台数据库` → `WIT`）。纯 ASCII 库名输出与旧逻辑逐字节一致，零回归。
+
+    2026-09-04 起**不再给骨架拼 8 位哈希**：哈希段对模型无语义又长，deepseek 系
+    模型抄工具名时会在哈希段多写/漏写字符（生产实证
+    `wrenai_WIT_d4cdc1c1d2_get_instructions`，c1 串抄错），且 Langfuse 里显示难懂。
+    骨架非空 → 直接用可读骨架，工具名（`wrenai_WIT_run_sql`）模型易抄、显示清晰。
+    仅当骨架为空（库名全中文/纯符号，如 `运营管理平台`）才退回 sha1[:8] 保证非空合法。
     """
     return "wrenai_" + _server_slug(db_name)
 
 
 def _server_slug(db_name: str) -> str:
-    """db_name → 合法 server 名片段（匹配 `^[a-zA-Z0-9_-]+$`，非空、确定）。"""
+    """db_name → 合法 server 名片段（匹配 `^[a-zA-Z0-9_-]+$`，非空、确定）。
+
+    撞名兜底：两个不同中文库折到同骨架（极罕见）时，mcp_tool._get_sub_server_config
+    对 wrenai server 名做冲突检测并告警跳过该库（提示改库名），不再由哈希静默区分
+    ——宁缺毋滥，避免两库工具前缀歧义污染提示词。Langfuse 显示层另有
+    langfuse_client.display_wrenai_tool_name 把净化前缀换回库名全名。
+    """
     name = db_name or ""
     # 第一遍：沿用旧规则折叠非词符（空格/斜杠/点/连字符 → 下划线）
     base = re.sub(r"\W+", "_", name).strip("_")
     if base and re.fullmatch(r"[A-Za-z0-9_-]+", base):
         return base  # 纯 ASCII 合法 → 原样返回（与旧实现一致）
-    # 中文等 Unicode 词符漏网 → 剔成 ASCII 骨架
+    # 中文等 Unicode 词符漏网 → 剔成 ASCII 骨架（去哈希，保留可读性）
     skeleton = re.sub(r"[^A-Za-z0-9_-]", "", base)
     skeleton = re.sub(r"_+", "_", skeleton).strip("_")
-    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
-    return f"{skeleton}_{digest}" if skeleton else digest
+    if skeleton:
+        return skeleton
+    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
 
 
 # ── 语义库 A/B：WREN_SEMANTIC_OVERRIDE 版本物化 ───────────────

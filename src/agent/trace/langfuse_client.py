@@ -526,6 +526,47 @@ def _fallback_thread_route(metadata: dict) -> tuple[str, str, str]:
     return "", "", "auto-continue(no-thread)"
 
 
+# ── wrenai 工具名显示映射（Langfuse 展示，2026-09-04）───────────
+# 运行时 wrenai 工具名必须 ASCII（OpenAI 兼容端点只许 `^[a-zA-Z0-9_-]+$`），中文
+# 库名被 semantic_db._server_slug 折叠成骨架（`WIT运营管理平台数据库` → `WIT`，
+# 2026-09-04 起去哈希）。这里把 span/observation 的 name 里净化前缀换回 db_config
+# 库名全名（`wrenai_WIT_run_sql` → `wrenai_WIT运营管理平台数据库_run_sql`），仅供
+# Langfuse UI / Session 页阅读。只替换显示名：不参与运行/路由/打分，metadata 里
+# 的原始 tool 名（真实工具名）保持不动。
+_wrenai_display_cache: Optional[tuple] = None
+
+
+def _wrenai_display_pairs() -> tuple:
+    """已建模库的 (slug, db_name)，slug 长→短（防 A 是 B 的前缀时误匹配）。"""
+    global _wrenai_display_cache
+    if _wrenai_display_cache is not None:
+        return _wrenai_display_cache
+    pairs: list = []
+    try:
+        from agent.utils.semantic_db import get_detector, wrenai_server_name
+
+        for db in get_detector().discover():
+            slug = wrenai_server_name(db)[len("wrenai_"):]
+            if slug:
+                pairs.append((slug, str(db)))
+        pairs.sort(key=lambda p: len(p[0]), reverse=True)
+    except Exception:  # noqa: BLE001  取不到建模集时不改写（按原样显示）
+        pass
+    _wrenai_display_cache = tuple(pairs)
+    return _wrenai_display_cache
+
+
+def display_wrenai_tool_name(name: Any) -> str:
+    """wrenai 工具显示名净化前缀 → 库名全名；非 wrenai / 未建模 → 原样返回。"""
+    if not isinstance(name, str) or not name.startswith("wrenai_"):
+        return name if name is not None else ""
+    tail = name[len("wrenai_"):]
+    for slug, db in _wrenai_display_pairs():
+        if tail == slug or tail.startswith(slug + "_"):
+            return "wrenai_" + db + tail[len(slug):]
+    return name
+
+
 def _patch_handler_for_trace_nesting(handler) -> None:
     """M-T3/T3b/T3d：monkey-patch CallbackHandler.on_chain_start。
 
@@ -690,6 +731,30 @@ def _patch_handler_for_trace_nesting(handler) -> None:
         return result
 
     handler.on_chain_start = _patched_on_chain_start
+
+    # 2026-09-04：wrenai 原生 TOOL observation 的显示名换回库名全名。真实工具名
+    # 必须 ASCII（带净化前缀），改 obs name 只影响 Langfuse 展示；ToolNode 匹配 /
+    # 打分 / 分类全部读真实名，不受影响。观测 name 优先级 kwargs["name"] 最高，
+    # 无则 serialized["name"]（langchain on_tool_start 只传后者）→ 取当前名改写后
+    # 塞 kwargs["name"] 覆盖。仅当映射后名不同才替换；非 wrenai 工具逐字节不变。
+    _orig_tool_start = handler.on_tool_start
+
+    def _tool_display_name(serialized, input_str, *args, **kwargs):
+        try:
+            cur = kwargs.get("name")
+            if cur is None and isinstance(serialized, dict):
+                cur = serialized.get("name")
+            if isinstance(cur, str) and cur:
+                friendly = display_wrenai_tool_name(cur)
+                if friendly != cur:
+                    kwargs = dict(kwargs)
+                    kwargs["name"] = friendly
+        except Exception:  # noqa: BLE001
+            pass
+        return _orig_tool_start(serialized, input_str, *args, **kwargs)
+
+    handler.on_tool_start = _tool_display_name
+    _logger.info("[langfuse_display] wrenai 工具 obs 显示名映射已挂载")
 
     # M-T7：叶子归巢补丁。整段仅当开关开启时装配；关闭即返回，on_chain_start 既有
     # 补丁不受影响。_LEAF_ANCHOR ContextVar 在同一线程/任务同步调用栈内由叶子包装器
