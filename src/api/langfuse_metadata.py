@@ -170,6 +170,18 @@ class LangfuseMetadataMiddleware:
         db_name = configurable.get("db_name", "")
         if db_name and "db_name" not in merged:
             merged["db_name"] = db_name
+        # S5 数据漂移可观测化：数据快照（时间戳 + 库名）写入 trace metadata，
+        # 供跨 run 比对「是否同一数据窗口」——离线评测按快照分组，指纹/时点不同
+        # 不当作模型差异比较（同题多跑归因 S5）。
+        if "data_snapshot" not in merged:
+            try:
+                from datetime import datetime, timezone
+                merged["data_snapshot"] = {
+                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "db_name": db_name or "",
+                }
+            except Exception:  # noqa: BLE001
+                pass
         # 用户查询原文（供 Langfuse UI metadata 过滤 + evaluator 变量引用）
         if "user_question" not in merged:
             q = self._extract_question_summary(body, max_len=200)

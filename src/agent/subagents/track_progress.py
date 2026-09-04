@@ -17,6 +17,70 @@ def _progress_path(thread_id: str) -> str:
     return os.path.join(_progress_dir(), f"{fname}.json")
 
 
+def record_todos_progress(thread_id: str, todos_list: list[dict]) -> bool:
+    """把一次 write_todos 快照写入本地进度文件（含状态转换 diff / 每步计时）。
+
+    供两个来源共用，保证 step_history 与每步耗时连续：
+    - ProgressTrackerMiddleware：从模型消息里的 write_todos ToolMessage 解析后调用；
+    - ProgressBoundaryMiddleware：确定性 after_model 推进 state.todos 后调用。
+
+    todos_list: [{"content": str, "status": "pending|in_progress|completed"}, ...]
+    返回是否成功写入。
+    """
+    if not todos_list or not thread_id:
+        return False
+    try:
+        now = time.time()
+        fpath = _progress_path(thread_id)
+
+        # 读取上一次的进度，用于检测状态变化
+        prev_todos = {}
+        step_history = []
+        started_at = now
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as pf:
+                    old = json.load(pf)
+                step_history = old.get("step_history", [])
+                started_at = old.get("started_at", now)
+                for t in old.get("todos", []):
+                    prev_todos[t["content"]] = t["status"]
+            except Exception:
+                pass
+
+        # 检测状态变化，记录转换时间
+        for t in todos_list:
+            prev_status = prev_todos.get(t["content"])
+            curr_status = t["status"]
+            if prev_status != curr_status:
+                step_history.append({
+                    "step": t["content"],
+                    "from": prev_status,
+                    "to": curr_status,
+                    "ts": now,
+                })
+
+        completed = sum(1 for t in todos_list if t["status"] == "completed")
+        progress = {
+            "task_id": thread_id,
+            "todos": todos_list,
+            "total": len(todos_list),
+            "completed": completed,
+            "in_progress": sum(1 for t in todos_list if t["status"] == "in_progress"),
+            "started_at": started_at,
+            "last_updated_at": now,
+            "step_history": step_history,
+        }
+
+        with open(fpath, 'w', encoding='utf-8') as pf:
+            json.dump(progress, pf, ensure_ascii=False, indent=2)
+        _logger.info(f"[Progress] wrote {completed}/{len(todos_list)}")
+        return True
+    except Exception as e:
+        _logger.error(f"[Progress] error: {e}", exc_info=True)
+        return False
+
+
 class ProgressTrackerMiddleware(AgentMiddleware):
     def wrap_model_call(self, request, handler):
         return handler(request)
@@ -49,52 +113,7 @@ class ProgressTrackerMiddleware(AgentMiddleware):
                         thread_id = rt.execution_info.thread_id
                 except Exception:
                     pass
-
-                now = time.time()
-                fpath = _progress_path(thread_id)
-
-                # 读取上一次的进度，用于检测状态变化
-                prev_todos = {}
-                step_history = []
-                started_at = now
-                if os.path.exists(fpath):
-                    try:
-                        with open(fpath, "r", encoding="utf-8") as pf:
-                            old = json.load(pf)
-                        step_history = old.get("step_history", [])
-                        started_at = old.get("started_at", now)
-                        for t in old.get("todos", []):
-                            prev_todos[t["content"]] = t["status"]
-                    except Exception:
-                        pass
-
-                # 检测状态变化，记录转换时间
-                for t in todos_list:
-                    prev_status = prev_todos.get(t["content"])
-                    curr_status = t["status"]
-                    if prev_status != curr_status:
-                        step_history.append({
-                            "step": t["content"],
-                            "from": prev_status,
-                            "to": curr_status,
-                            "ts": now,
-                        })
-
-                completed = sum(1 for t in todos_list if t["status"] == "completed")
-                progress = {
-                    "task_id": thread_id,
-                    "todos": todos_list,
-                    "total": len(todos_list),
-                    "completed": completed,
-                    "in_progress": sum(1 for t in todos_list if t["status"] == "in_progress"),
-                    "started_at": started_at,
-                    "last_updated_at": now,
-                    "step_history": step_history,
-                }
-
-                with open(fpath, 'w', encoding='utf-8') as pf:
-                    json.dump(progress, pf, ensure_ascii=False, indent=2)
-                _logger.info(f"[Progress] wrote {completed}/{len(todos_list)}")
+                record_todos_progress(thread_id, todos_list)
             else:
                 _logger.info("[Progress] no write_todos found in messages")
         except Exception as e:

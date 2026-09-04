@@ -34,6 +34,22 @@ WRITE_TODOS_PROTOCOL = """\
    系统会自动从工具调用序列推导进度，无需手动维护。
 3. **禁止为"了解流程"而 read_file 读取 SKILL.md**：系统提示词已包含完整流程，
    直接开始执行 Step 0。
+
+### 中途更新是免费的：与干活工具同一条消息并行发出（重要）
+
+**write_todos 必须与"完成该步的那个实质工具调用"放在同一条 assistant 消息里并行发出**，
+禁止单独为写 todo 多发一轮（那是白费的延迟和 token）。
+
+- 并行完全合法：唯一禁止是**同一条消息里 ≥2 个 `write_todos`**；`write_todos` + `run_sql`
+  或 `write_todos` + `describe_schema` 等并行不受限。
+- 正确节奏（在发实质工具调用的同一轮里带上 write_todos）：
+  - 首次 schema 检索工具（`describe_schema`/`get_mdl`/`get_context`/`recall_queries` 等）
+    发出时 → 把 `Knowledge Loader`（或澄清步）completed、`Schema Linking` in_progress；
+  - 首个执行工具（`dry_run`/`run_sql`/`query_cube`）发出时 → 把 `Schema Linking`、
+    `Subproblem分解`、`Query Plan生成`、`SQL生成与验证`、`性能优化` completed、
+    `查询执行` in_progress；
+  - run_sql 返回后 → 把 `查询执行` completed、`结果汇总` in_progress（最终回复真正写完
+    才把最后一步标 completed，禁止提前全勾）。
 """
 
 

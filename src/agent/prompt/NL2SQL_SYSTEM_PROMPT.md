@@ -256,6 +256,10 @@ SQL生成并dry_run通过 → write_todos([{SQL生成与验证: completed},{性�
 进度状态必须真实反映当前执行位置。**禁止**把尚未开始或正在进行的步骤标成
 completed；**禁止**在一次 write_todos 里把后续步骤一次性全部勾完。
 
+**中途更新零成本（必须并行发，不要单独占一轮）：** `write_todos` 与同轮实质工具调用
+（`describe_schema` / `run_sql` 等）在**同一条消息里并行发出**即可——唯一禁止是同一消息里
+≥2 个 `write_todos`，`write_todos` + 其它工具并行合法。禁止为更新进度单独多发一轮模型调用。
+
 run_sql 执行成功返回结果后，正确节奏是：
 1. 先把「查询执行」标 completed，同时把下一个真正要做的步骤（「结果汇总」）标 in_progress；
 2. **真正生成完最终回复之后**，才把最后一步标 completed。

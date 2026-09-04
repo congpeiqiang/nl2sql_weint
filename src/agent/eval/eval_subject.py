@@ -303,7 +303,13 @@ def _now() -> str:
 
 
 def eval_root_dir(root: str, session_thread_id: str) -> Path:
-    return Path(root) / "nl2sql_process_data" / session_thread_id / "eval-subject"
+    # S2-2：评估单元落盘移出 agent 可达区。root 现为 data_root（VFS `/`），
+    # 落盘到 `<data_root>/eval_runs/{session_thread}/eval-subject/`，对应 VFS
+    # `/eval_runs/...`——不在 /shared、/workspace 任何 allow 规则内，agent 的
+    # read_file/ls/glob/grep 均被静态层 deny（在线 agent 无论如何摸不到参考答案）。
+    # 原先落在 `/workspace/nl2sql_process_data/{session_thread}/eval-subject/`，
+    # 与其它 run 的中间产物同区，被 T1 在线 agent 直接读到 final_answer（泄题）。
+    return Path(root) / "eval_runs" / session_thread_id / "eval-subject"
 
 
 def subject_path(root: str, session_thread_id: str, subject_id: str) -> Path:

@@ -22,9 +22,11 @@ from agent.middlewares.tool_filter import ToolFilterMiddleware
 from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
 from agent.middlewares.query_result_offload import QueryResultOffloadMiddleware
 from agent.middlewares.write_todos import WriteTodosProtocolMiddleware
+from agent.middlewares.progress_boundary import ProgressBoundaryMiddleware
 from agent.tools.mcp_tool import sub_tools as mcp_tools
 from agent.subagents.track_progress import ProgressTrackerMiddleware
-from agent.settings.file_permissions import FILE_PERMISSIONS
+from agent.settings.file_permissions import NL2SQL_FILE_PERMISSIONS
+from agent.middlewares.filesystem_thread_guard import FilesystemThreadGuardMiddleware
 from agent.middlewares.trace_recorder import TraceRecorderMiddleware
 from agent.trace.langfuse_client import get_langfuse_callbacks
 from agent.utils.skills_versioning import effective_skills_sources
@@ -177,6 +179,25 @@ def dynamic_prompt(request: ModelRequest) -> str:
     except Exception:  # noqa: BLE001  路由注入失败不影响正常流程
         pass
 
+    # ── S3-1 口径护栏：注入权威默认口径（命中敏感术语才注入，未命中零干预）──
+    try:
+        from agent.settings.caliber_spec import caliber_constraint_text
+        from langgraph.config import get_config as _cfg2
+
+        _q = ""
+        _db = ""
+        try:
+            _cfgv = _cfg2()
+            _q = str((_cfgv.get("metadata", {}) or {}).get("user_question", "") or "")
+            _db = str((_cfgv.get("configurable", {}) or {}).get("db_name", "") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        constraint = caliber_constraint_text(_q, _db)
+        if constraint:
+            prompt += constraint
+    except Exception:  # noqa: BLE001  口径护栏失败不影响正常流程
+        pass
+
     return prompt
 
 # ── 构建 Agent ─────────────────────────────────────────
@@ -190,11 +211,18 @@ _middleware = [
     ),
     skills_middleware,
     ProgressTrackerMiddleware(),
+    # 层2 监督机：after_model 确定性推进 write_todos（模型中途不自发更新也保证
+    # 每阶段边界推进；本轮模型自己已写 write_todos 时自动跳过，不打架）。
+    ProgressBoundaryMiddleware(),
     # 与主 agent 同构：按 configurable.llm_route/llm_model 重建模型。
     # 否则子 agent 用模块级 deepseek_model（import 时按 active provider 创建），
     # 前端切模型（如 DeepSeek 官方 API）只对主 agent 生效，子 agent 仍打旧 provider。
     ThinkingToggleMiddleware(),
     ToolFilterMiddleware(),
+    # S2-1：文件读线程级护栏（禁跨线程读其它会话/其它 run 的 process_data，
+    # 含 eval-subject 参考答案）。静态层 NL2SQL_FILE_PERMISSIONS 已 deny 掉
+    # conversation_history/report；本护栏补足「process_data 只读自有线程」。
+    FilesystemThreadGuardMiddleware(),
     # 大结果表落盘 + 消息瘦身（431 部门人数 228s 静默治本）：
     # 必须在 LangfuseSpan 之前（外层）——langchain wrap_tool_call 链 first=outermost，
     # 外层在 handler 返回后做后处理，故 LangfuseSpan 的 span output / LLM-judge /
@@ -218,7 +246,7 @@ agent = create_deep_agent(
     tools=resolved_tools,
     middleware=_middleware,
     backend=composite_backend,
-    permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写（独立 graph，须单独传）
+    permissions=NL2SQL_FILE_PERMISSIONS,  # 文件读写安全控制：读收窄（禁 conversation_history/report 等跨线程目录），写仅 workspace（独立 graph，须单独传）
     # 注意：不在此处硬编码 imdb——当前数据库由下方 dynamic_prompt 从 configurable
     # 动态注入（「查询通道路由」段），此处的"默认 imdb"会与注入冲突，
     # 导致切库后子 agent 仍按 imdb 执行（2026-08-11 实证）。

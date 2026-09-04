@@ -702,7 +702,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
             return
         try:
             subject_id = _question_id()
-            root = _active_workspace_path()
+            root = _data_root_path()
             if not subject_id or not thread_id or not root:
                 return
             if heuristic == "sql-execution":
@@ -775,7 +775,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                 subject_id = _question_id()
             if not subject_id:
                 return
-            root = _active_workspace_path()
+            root = _data_root_path()
             if not root:
                 return
             question = str(meta.get("user_question", "") or "")
@@ -1118,5 +1118,19 @@ def _active_workspace_path() -> str:
     try:
         from agent.workspace_manager import get_workspace_manager
         return str(get_workspace_manager().active_workspace)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _data_root_path() -> str:
+    """读 VFS 根后端目录（= data_root，AGENT_DATA_ROOT 或旧部署 src/agent/）。
+
+    评估单元（eval-subject）落盘根从 active workspace 迁到此处（S2-2）：对应 VFS
+    `/eval_runs/...`，落在 /shared、/workspace 之外，agent 文件读权限静态层 deny，
+    从物理上封堵在线 agent 读到 eval 参考答案（泄题）。
+    """
+    try:
+        from agent.workspace_manager import get_workspace_manager
+        return str(get_workspace_manager().data_root)
     except Exception:  # noqa: BLE001
         return ""

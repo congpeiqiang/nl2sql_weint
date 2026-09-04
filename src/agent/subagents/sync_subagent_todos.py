@@ -60,24 +60,24 @@ _SUBAGENT_MARKER = "🔍"
 _SUBAGENT_PREFIX = "└ "  # 树状缩进，HTML 中可见
 
 # ── run 终态（P1-7）─────────────────────────────────────────────
-# deepagents 的终态集包含 cancelled/timeout/interrupted（见
-# async_subagents._TERMINAL_STATUSES）。此前只认 success/error，
+# deepagents 的终态集虽包含 cancelled/timeout/interrupted，但 interrupted 对
+# nl2sql 已不是终态（审批闸门移除后它是会自恢复的瞬时暂停），故此处不纳入，
+# 单独用 INTERRUPTED_STUCK_TIMEOUT 兜底。此前只认 success/error，
 # 被取消的任务会在超时兜底后被覆写成 error（cancelled 被盖掉）。
-_RUN_DONE_STATUSES = ("success", "error", "cancelled", "timeout", "interrupted")
+_RUN_DONE_STATUSES = ("success", "error", "cancelled", "timeout")
 # 终态 → 最终步骤头的展示文案
 _DONE_LABELS = {
     "success": "已完成",
     "error": "执行失败",
     "cancelled": "已取消",
     "timeout": "超时终止",
-    "interrupted": "已中断",
 }
 
 # ── P1-3 SQL 审批等待 ─────────────────────────────────────────
-# 子 run 被审批闸门 interrupt 时状态为 "interrupted"，但这是「暂停等用户」，
-# 不是终态：不能写终态 async_tasks、不能清 active_queries、不能退出循环。
-# 等待期间把 HITL payload 中转到主线程 async_tasks[task].awaiting_approval，
-# 前端据此渲染审批卡。等待超上限才按 timeout 兜底收尾。
+# 该注释已过期：2026-08-28 审批闸门升级为只读硬拦截（不再 raise interrupt），
+# 子 run 的 interrupted 不再是「等审批」，而是 deepagents 上下文压缩的瞬时暂停。
+# 同步器已在 _RUN_DONE_STATUSES 移除 interrupted（不把瞬时暂停当终态），并用
+# INTERRUPTED_STUCK_TIMEOUT 兜底防永久卡死。此常量仅历史审批路径保留。
 _AWAIT_APPROVAL_TIMEOUT = 7200  # 等待审批上限 2h（超了按 timeout 强制收尾）
 
 
@@ -251,10 +251,12 @@ async def _async_sync_loop(
     approval_relayed = False          # awaiting_approval 已写入主线程 async_tasks
     approval_clear_written = False    # 恢复后已清除 awaiting_approval（写入新条目）
     approval_wait_start: Optional[float] = None
+    interrupted_since: Optional[float] = None  # 子 run 进入 interrupted（瞬时暂停态）的时间点
     completion_write_retries = 0  # async_tasks 写入失败重试次数
     completion_started_at: Optional[float] = None  # 进入完成分支的时间点（重试上限判定起点）
     POST_COMPLETE_MAX_CYCLES = 20           # 完成后继续监控 10s (20 × 0.5s) 让耗时稳定
     STALE_RUN_TIMEOUT = 600                 # 子 run 运行时长上限 10min（P1-7，对齐 guards timeout-policy）：超过视为卡死，强制结束（兜底）
+    INTERRUPTED_STUCK_TIMEOUT = 120         # 子 run 停在 interrupted 的上限 2min（summarization 瞬时暂停远短于此）：超过视为卡死，强制结束
     COMPLETE_WRITE_MAX_SECONDS = 300        # 完成态写入重试上限：主线程持续 in-flight 时放弃（防僵尸线程）
 
     # 主智能体步骤耗时追踪（保留原逻辑，仅用于日志/展示，不写回 state）
@@ -413,6 +415,33 @@ async def _async_sync_loop(
                         _logger.warning(
                             "[sync] 写审批后 async_tasks 失败(将重试): %s", str(e)[:100]
                         )
+
+                # interrupted 瞬时暂停态兜底：summarization 等会自恢复，几秒内回到
+                # running/success；但若持续不恢复（真卡死），单独按 timeout 收尾，避免
+                # 0.5s 空转轮询永不结束。注意：不能用 loop_start（那是任务总时长，会误杀
+                # 「第 10 分钟才短暂 interrupted、随后正常完成」的合法长查询）。
+                if run_status == "interrupted":
+                    if interrupted_since is None:
+                        interrupted_since = time.monotonic()
+                    elif (time.monotonic() - interrupted_since) > INTERRUPTED_STUCK_TIMEOUT:
+                        _logger.warning(
+                            "[sync] 子 run 停留在 interrupted 超过 %ds，视为卡死，强制结束（分类为 timeout）",
+                            INTERRUPTED_STUCK_TIMEOUT,
+                        )
+                        run_status = "timeout"
+                        try:
+                            _stale_run_id = (task or {}).get("run_id")
+                            if _stale_run_id:
+                                await client.runs.cancel(
+                                    thread_id=sub_thread_id, run_id=_stale_run_id
+                                )
+                                _logger.info(
+                                    "[sync] 已取消卡死 interrupted 子 run: %s", sub_thread_id[:8]
+                                )
+                        except Exception as e:  # noqa: BLE001
+                            _logger.warning("[sync] 取消卡死 interrupted 子 run 失败: %s", e)
+                else:
+                    interrupted_since = None
 
                 # 运行时长保护：子 run 一直 running 且超过上限，视为卡死，
                 # 强制按 timeout 处理（P1-7 失败分类：不再冒充 error），
@@ -698,7 +727,7 @@ async def _async_sync_loop(
                             base["description"] = _lookup_task_description(
                                 sub_thread_id, query_header_entry
                             )
-                        base["status"] = run_status  # "success" / "error" / "cancelled" / "timeout" / "interrupted"
+                        base["status"] = run_status  # "success" / "error" / "cancelled" / "timeout"
                         # 终态错误详情透传（方案2）：非 success 时取 run.error 截断写入，
                         # 供前端侧边栏展示具体失败原因（此前恒为 None，用户看不到任何原因）。
                         _err_text = await _terminal_error(
@@ -1134,18 +1163,59 @@ def _compute_step_durations(
 
 
 async def _extract_subagent_todos(client, sub_thread_id: str) -> list:
-    """从子智能体线程提取最新的 write_todos 结果（含每步耗时）。"""
+    """从子智能体线程提取最新 todos（含每步耗时）。
+
+    2026-09-04（层2 监督机配套）改权威源：**优先读子线程 state 的 `todos` 通道**——
+    它由每次 write_todos（模型自发）与 ProgressBoundaryMiddleware（确定性 after_model 推进）
+    共同更新；且 todos 通道独立于 messages，不随 auto-compress 剪消息而丢失。
+    messages 反扫（写 AI tool_calls / ToolMessage）仅作 state.todos 为空时的兜底。
+    """
     try:
         state = await client.threads.get_state(thread_id=sub_thread_id)
-        messages = (state.get("values") or {}).get("messages", [])
+        values = state.get("values") or {}
+        messages = values.get("messages", [])
 
-        # 读取本地进度文件获取耗时
-        # 传入 completed_steps：write_todos 中 status=completed 的 step 集合，
-        # 避免进度文件缺 completed 事件时误输出 "Xs..."（已完成还在计时）。
-        durations = _compute_step_durations(sub_thread_id)
+        def _render(todo_list: list) -> list:
+            """把 todos 渲染成 [{content, status}]，并按本地进度文件附耗时后缀。"""
+            items = []
+            for t in todo_list:
+                if not isinstance(t, dict):
+                    continue
+                content = str(t.get("content", "") or "").strip()
+                if not content:
+                    continue
+                items.append({
+                    "content": content,
+                    "status": t.get("status", "pending"),
+                })
+            if not items:
+                return []
+            completed_steps = {
+                it["content"] for it in items if it["status"] == "completed"
+            }
+            # 传入 completed_steps：已完成的 step 强制固定耗时（不带 "..."），
+            # 避免进度文件缺 completed 事件时误输出 "Xs..."（已完成还在计时）。
+            durations = _compute_step_durations(sub_thread_id, completed_steps)
 
-        def _with_duration(content: str) -> str:
-            dur = durations.get(content, "")
+            def _with_duration(content: str) -> str:
+                dur = durations.get(content, "")
+                return f"{content} ({dur})" if dur else content
+
+            return [
+                {"content": _with_duration(it["content"]), "status": it["status"]}
+                for it in items
+            ]
+
+        # 权威源：state.todos（模型 write_todos + 监督机确定性更新都落这里）
+        raw_todos = values.get("todos") or []
+        if isinstance(raw_todos, list) and raw_todos:
+            rendered = _render(raw_todos)
+            if rendered:
+                return rendered
+
+        # 兜底：反扫 messages 找最后一次 write_todos（state.todos 为空 / 旧存档线程）
+        def _with_duration_fb(content: str) -> str:
+            dur = _compute_step_durations(sub_thread_id).get(content, "")
             return f"{content} ({dur})" if dur else content
 
         # 从后往前找最新的 write_todos
@@ -1170,7 +1240,7 @@ async def _extract_subagent_todos(client, sub_thread_id: str) -> list:
                             )
                             return [
                                 {
-                                    "content": _with_duration(t.get("content", "")),
+                                    "content": _with_duration_fb(t.get("content", "")),
                                     "status": t.get("status", "pending"),
                                 }
                                 for t in todos
@@ -1192,7 +1262,7 @@ async def _extract_subagent_todos(client, sub_thread_id: str) -> list:
                             sub_thread_id, completed_steps
                         )
                         return [
-                            {"content": _with_duration(c), "status": s}
+                            {"content": _with_duration_fb(c), "status": s}
                             for c, s in items
                         ]
         return []

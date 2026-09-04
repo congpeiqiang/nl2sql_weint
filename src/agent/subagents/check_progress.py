@@ -378,6 +378,18 @@ def _session_thread_id() -> str:
     return ""
 
 
+def _current_db_name() -> str:
+    """读当前库名（主 agent configurable.db_name，S3-2 口径护栏用）。"""
+    try:
+        from langgraph.config import get_config as _lg_get_config
+        cfg = _lg_get_config()
+        if cfg:
+            return str((cfg.get("configurable") or {}).get("db_name", "") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def _collect_dry_run_sqls(messages) -> set:
     """收集本子任务干跑（dry_run）过的 SQL。
 
@@ -528,6 +540,15 @@ def apply_patch():
                 # sql-generation process_data 回填为产出 run_sql（若 dry_run 与
                 # 实际执行 SQL 不一致），保证中间产物与前端/报告 SQL 同源
                 _backfill_process_data_sql(messages, sql)
+                # S3-2 口径后置护栏：最终 SQL 命中「禁止表」→ 告警（软提醒，随 check
+                # 结果透传给主 agent，主 agent 决定改默认口径或说明依据）
+                try:
+                    from agent.settings.caliber_spec import caliber_sql_warning
+                    _warn = caliber_sql_warning(sql, _current_db_name())
+                    if _warn:
+                        result["caliber_warning"] = _warn
+                except Exception:  # noqa: BLE001
+                    pass
             # 大结果全量文件指针（QueryResultOffload 落盘）附到 result，
             # build_report 读盘后把完整结果表嵌入报告正文（0 模型开销）
             full_files = _collect_full_result_files(messages)
@@ -540,14 +561,15 @@ def apply_patch():
                 else "The async subagent encountered an error."
             )
         elif run["status"] == "interrupted":
-            # P1-3：审批闸门暂停。前端会渲染审批卡，用户操作后自动恢复，
-            # 主 agent 无需处理（不要取消、不要重新委派）。
-            result["awaiting_user_approval"] = True
+            # 审批闸门已移除（2026-08-28 起 sql_approval 只读硬拦截、不再 raise
+            # interrupt），当前 interrupted 是 deepagents 上下文压缩等「会自恢复的
+            # 瞬时暂停」。归一为 running，让主 agent 继续轮询 check_async_task，
+            # 而非误判「等待 SQL 审批」。
+            result["status"] = "running"
             result["note"] = (
-                "The subagent is paused waiting for the user to approve a SQL "
-                "execution (approval card is shown in the frontend). It will "
-                "resume automatically once the user decides. Do NOT cancel or "
-                "re-delegate; just tell the user the task awaits their approval."
+                "The subagent is briefly paused (e.g. context summarization) and "
+                "will resume automatically. Do NOT cancel or re-delegate; check "
+                "again later."
             )
         # running / 其他中间态：提取进度
         if messages:
