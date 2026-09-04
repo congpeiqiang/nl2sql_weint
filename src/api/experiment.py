@@ -137,6 +137,54 @@ def _trace_url(trace_id: str) -> str:
     return f"{base}/project/{pid}/traces/{trace_id}"
 
 
+def _model_block(body: dict) -> dict:
+    """run 级模型块（与聊天所选一致）：归一为字符串三元组。
+
+    route/model 空串 = 跟随 active/模块默认（前端未显式选）；enable_thinking 恒
+    "true"/"false"。API 提交恒带该块 → orchestrator/worker 权威强制（忽略题目级字段，
+    见 run_experiment._effective_model_fields）。三字段 is not None 语义对 API 恒成立。
+    """
+    return {
+        "llm_route": str(body.get("llm_route") or ""),
+        "llm_model": str(body.get("llm_model") or ""),
+        "enable_thinking": str(body.get("enable_thinking") or ""),
+    }
+
+
+def _resolve_model_label(route: str, model: str) -> str:
+    """溯源 run 卡片的模型 chip：'{provider}/{model}'。
+
+    空 route/model = 跟随 active/首个 provider 的默认模型（与
+    run_experiment._resolve_effective_model 同款回退链）。仅用于展示标注，不参与真实
+    模型选择（真实模型仍由 worker configurable → ThinkingToggleMiddleware 解析）。
+    异常给可读占位；只读 name/default_model/models，绝不打印 api_key。
+    """
+    provider, model_id = route, model
+    try:
+        from agent.settings.model_config_store import get_store
+
+        store = get_store()
+        provs = store.get_all_decrypted()
+        active = store.get_active()
+        cfg = next((p for p in provs if p.name == route), None) if route else None
+        if cfg is None:
+            cfg = next((p for p in provs if p.name == active), None) or (provs[0] if provs else None)
+        if cfg is not None:
+            provider = cfg.name
+            if not model_id:
+                model_id = cfg.default_model
+                if not model_id:
+                    for m in cfg.models or []:
+                        if isinstance(m, dict) and m.get("id"):
+                            model_id = str(m["id"])
+                            break
+    except Exception:  # noqa: BLE001 —— 标注失败不影响提交
+        pass
+    if not provider:
+        return model_id or "(跟随默认)"
+    return f"{provider}/{model_id}" if model_id else provider
+
+
 # ── 元数据枚举 ─────────────────────────────────────────────
 
 
@@ -369,6 +417,8 @@ async def create_run(request: Request):
 
     # 实验级 Description（整轮一条）：截断保护，Langfuse run 描述 + 自研 run 记录共用
     description = str(body.get("description") or "").strip()[:_DESC_MAX]
+    # run 级模型块（与聊天所选一致 2026-09-04）：前端提交恒带 → 权威强制
+    mb = _model_block(body)
 
     stamp = _stamp()
     status = {
@@ -383,6 +433,9 @@ async def create_run(request: Request):
             "judge": bool(body.get("judge")),
             "threshold": float(body.get("threshold") or 0.05),
             "description": description,
+            **mb,
+            # 溯源标注（展示用）：route/model 空串已归一为 active 默认可读名
+            "model_label": _resolve_model_label(mb["llm_route"], mb["llm_model"]),
         },
         "error": "",
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -474,6 +527,8 @@ async def _execute_run(stamp: str, body: dict) -> None:
             threshold=float(body.get("threshold") or 0.05),
             timeout=int(body.get("timeout") or 1800),
             description=str(body.get("description") or "").strip()[:_DESC_MAX],
+            # run 级模型块：非 None（可为空串）→ orchestrator append CLI flags → worker 权威强制
+            **_model_block(body),
         )
 
         cur = _read_status(stamp) or {}
@@ -652,6 +707,7 @@ async def list_runs(request: Request):
                     "started_at": st.get("started_at", ""),
                     "finished_at": st.get("finished_at", ""),
                     "description": (st.get("request") or {}).get("description", "") or "",
+                    "model_label": (st.get("request") or {}).get("model_label", "") or "",
                 }
             except Exception as e:  # noqa: BLE001
                 _logger.warning("[experiment] 读 manifest %s 失败: %s", mf.name, e)
@@ -677,6 +733,7 @@ async def list_runs(request: Request):
                 "started_at": st.get("started_at", ""),
                 "finished_at": st.get("finished_at", ""),
                 "description": (st.get("request") or {}).get("description", "") or "",
+                "model_label": (st.get("request") or {}).get("model_label", "") or "",
             }
     ordered = sorted(runs.values(), key=lambda r: r["stamp"], reverse=True)
     return json_response({"runs": ordered})
@@ -742,6 +799,7 @@ async def get_run(request: Request):
             "started_at": (st or {}).get("started_at", ""),
             "finished_at": (st or {}).get("finished_at", ""),
             "description": ((st or {}).get("request") or {}).get("description", "") or "",
+            "model_label": ((st or {}).get("request") or {}).get("model_label", "") or "",
             "manifest": manifest,
             "items": items,
             "gate": gate,

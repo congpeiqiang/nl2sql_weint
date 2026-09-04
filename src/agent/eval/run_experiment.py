@@ -75,6 +75,32 @@ AUX_DIMS = ("schema_match_score",)
 _DEFAULT_ROUTE = ""
 _DEFAULT_MODEL = ""
 
+
+def _effective_model_fields(
+    q: dict,
+    llm_route: str | None,
+    llm_model: str | None,
+    enable_thinking: str | None,
+) -> tuple[str, str, bool | None]:
+    """解析每题实际 (llm_route, llm_model, enable_thinking)。
+
+    run 级模型块（API/前端「与聊天所选一致」2026-09-04）：
+    - 三字段 is not None = 权威强制（空串 → active/模块默认），**忽略题目级字段**；
+    - None = 缺失 → 走逐题字段 → 模块默认 _DEFAULT_ROUTE/_DEFAULT_MODEL /
+      enable_thinking None（跟随主模型）。
+    最终三值进 configurable（与在线聊天同语义），由 ThinkingToggleMiddleware
+    create_model(enable_thinking=…, route=…, model_name=…) 重建模型。
+    """
+    route = str(llm_route) if llm_route is not None else str(q.get("llm_route", "") or _DEFAULT_ROUTE)
+    model = str(llm_model) if llm_model is not None else str(q.get("llm_model", "") or _DEFAULT_MODEL)
+    if enable_thinking is not None:
+        raw = str(enable_thinking).strip().lower()
+        thinking: bool | None = raw in ("true", "1", "yes", "on") if raw else None
+    else:
+        raw = q.get("enable_thinking")
+        thinking = None if raw is None else str(raw).strip().lower() in ("true", "1", "yes", "on")
+    return route, model, thinking
+
 # ── 运行中「停止」协作取消 ──────────────────────────────
 # 三层进程（API / orchestrator / worker 子进程）共用同一**停止标记文件**做协作取消：
 # API cancel 端点写标记 → orchestrator 每臂顶部 / worker 每题顶部检查 → 自然断点干净退出。
@@ -640,6 +666,9 @@ def _run_worker(
     prompt_label: str | None = None,
     cancel_file: str = "",
     description: str = "",
+    llm_route: str | None = None,
+    llm_model: str | None = None,
+    enable_thinking: str | None = None,
 ) -> int:
     """单 label（arm）跑完全部查询，写 JSONL。返回 0=成功（含中途停止的部分结果） 1=worker 内部失败。
 
@@ -649,6 +678,9 @@ def _run_worker(
     （worker 仍返回 0），避免退出码语义被取消路径污染。
     description：整轮实验的人类可读说明（实验级单个，所有 arm/条目同值），写入
     Langfuse run 描述（Dataset Run run_description + root span langfuse.experiment.description）。
+    llm_route/llm_model/enable_thinking：run 级模型块（API「与聊天所选一致」提交）。
+    is not None = 权威强制（空串 → active/模块默认，忽略题目级字段）；
+    None（CLI 手工跑 / 旧调用缺省）→ 逐题 q 字段 → 模块默认。见 _effective_model_fields。
     """
     # ── import 前注入 label（进程级 A/B 的显式优先项）+ 语义库版本（A/B 语义库）
     #    + skill 版本（A/B skill，git ref 物化）──
@@ -713,12 +745,8 @@ def _run_worker(
             if not question:
                 continue
             db_name = str(q.get("db_name", "") or os.getenv("NL2SQL_EVAL_DB", "chinook_aliyun"))
-            route = str(q.get("llm_route", "") or _DEFAULT_ROUTE)
-            model = str(q.get("llm_model", "") or _DEFAULT_MODEL)
-            # enable_thinking：不强制，缺省 None = 跟随主模型默认（无覆盖时节点用
-            # 模块级 deepseek_model，deepseek 思考开）；queries 内可逐题 "true"/"false" 覆盖。
-            _th_raw = q.get("enable_thinking")
-            thinking = None if _th_raw is None else str(_th_raw).lower() in ("true", "1", "yes", "on")
+            # run 级模型块权威强制：is not None 的字段覆盖题目级；全 None → 逐题 → 模块默认
+            route, model, thinking = _effective_model_fields(q, llm_route, llm_model, enable_thinking)
             model_label = _resolve_effective_model(route, model)
             rec: dict = {
                 "label": label,
@@ -1023,6 +1051,14 @@ def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
         # 实验级 Description：整轮一条，透传给每个 arm worker → Langfuse run 描述
         if getattr(args, "description", "") or "":
             cmd += ["--description", str(args.description)]
+        # run 级模型块（与聊天所选一致）：仅在 is not None 时透传 → worker 权威强制。
+        # 缺字段（旧 API / 直调）→ 不传 → 旧逐题语义。空串也会传（显式「跟随默认」）。
+        if getattr(args, "llm_route", None) is not None:
+            cmd += ["--llm-route", str(args.llm_route)]
+        if getattr(args, "llm_model", None) is not None:
+            cmd += ["--llm-model", str(args.llm_model)]
+        if getattr(args, "enable_thinking", None) is not None:
+            cmd += ["--enable-thinking", str(args.enable_thinking)]
         if args.judge:
             cmd.append("--judge")
         _logger.info("[orchestrator] spawn: %s", " ".join(cmd[-12:]))
@@ -1264,6 +1300,11 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=1800, help="单 worker 超时秒（默认 1800）")
     parser.add_argument("--cancel-file", default="", help="worker 模式：停止标记文件路径（每题前检查，存在即中止）")
     parser.add_argument("--description", default="", help="实验级描述（整轮一条，透传所有臂写入 Langfuse run description）")
+    # run 级模型块（与聊天所选一致）：default=None（≠ ""）区分「缺失」与「显式空串」。
+    # None = 不传 flag → 旧逐题语义；空串 = 显式传 → worker 权威空 = active/模块默认。
+    parser.add_argument("--llm-route", default=None, help="run 级模型块：provider/route（空串=active 默认；None=逐题）")
+    parser.add_argument("--llm-model", default=None, help="run 级模型块：model id（空串=provider 默认；None=逐题）")
+    parser.add_argument("--enable-thinking", default=None, help="run 级模型块：'true'/'false'/'1'/'0'（空串=None 跟随主模型；None=逐题）")
     args = parser.parse_args()
 
     if args.worker:
@@ -1280,6 +1321,9 @@ def main() -> None:
             prompt_label=args.prompt_label,
             cancel_file=args.cancel_file,
             description=args.description,
+            llm_route=args.llm_route,
+            llm_model=args.llm_model,
+            enable_thinking=args.enable_thinking,
         ))
 
     # ── 解析查询集：--dataset 选 Langfuse 数据集（可与 --queries 合并、去重、归一化）──
