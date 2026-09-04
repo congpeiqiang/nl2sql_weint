@@ -78,6 +78,120 @@ _M_LEAF_NAMES = (
 )
 
 
+# ── 中文 input/output 序列化修复（2026-09-04）────────────────────
+# 根因：langfuse SDK 的 EventSerializer 继承 json.JSONEncoder，但调用点
+# json.dumps(..., cls=EventSerializer) 未传 ensure_ascii=False（默认 True）→
+# 所有非 ASCII（中文）被序列化成 \uXXXX 字面量存进 ClickHouse → Langfuse UI
+# session 页 Input/Output 显示乱码（查询…）。这里强制 EventSerializer
+# ensure_ascii=False，中文以 UTF-8 原文落库，UI 即正常。只改序列化，不动业务
+# 逻辑 / 观测树。仅在进程 import 时执行一次，先于任何 trace 导出。
+def _patch_langfuse_ensure_ascii() -> None:
+    try:
+        from langfuse._utils.serializer import EventSerializer
+
+        _orig_init = EventSerializer.__init__
+
+        def _patched_init(self, *args, **kwargs):
+            kwargs["ensure_ascii"] = False
+            _orig_init(self, *args, **kwargs)
+
+        EventSerializer.__init__ = _patched_init
+        _logger.info("[langfuse] EventSerializer 强制 ensure_ascii=False（中文落库修复）")
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[langfuse] patch EventSerializer 失败: %s", e)
+
+
+_patch_langfuse_ensure_ascii()
+
+
+# ── trace input 瘦身（会话级展示，2026-09-04）──────────────
+# 线程续跑 run 的 chat_agent root input = 完整 checkpoint state（整段历史），
+# Langfuse 拿它当该 trace 的 input → 打开续跑 trace 看到整段历史回显（含此前
+# 所有轮次/重复提问，读起来像「上一问又出现了」）。实际上模型只处理追加的
+# 当前轮。这里仅把「展示给 Langfuse 的 input」替换为瘦身版（system + 自最后一
+# 个真实用户问题起的当前轮），真实执行、打分、_is_auto_continue / 任务路由等
+# 仍读原始 inputs，逐字节不变。单条 trace 一行（root obs 数）不受影响。
+_INPUT_TRIM_MIN_MESSAGES = 6
+
+
+def _trim_msg_role(m: Any) -> str:
+    """取消息 role/type（兼容 dict 与 langchain BaseMessage）。"""
+    try:
+        if isinstance(m, dict):
+            return str(m.get("role") or m.get("type") or "")
+        return str(getattr(m, "type", "") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _trim_msg_text(m: Any) -> str:
+    """取消息 content 纯文本（content-block 内层 text 拼接）。"""
+    try:
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+    except Exception:  # noqa: BLE001
+        content = None
+    if isinstance(content, list):
+        parts = [
+            str(b.get("text", "") or "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        content = "".join(parts)
+    try:
+        return str(content or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _msg_count(inputs: Any) -> str:
+    try:
+        if isinstance(inputs, dict):
+            msgs = inputs.get("messages")
+            if isinstance(msgs, (list, tuple)):
+                return str(len(msgs))
+    except Exception:  # noqa: BLE001
+        pass
+    return "-"
+
+
+def _trim_trace_input(inputs: Any) -> Any:
+    """root run 的 input 瘦身（仅 messages 列表被替换，其余键原样保留）。
+
+    规则：messages 不足 _INPUT_TRIM_MIN_MESSAGES 或非 dict 结构 → 原样返回
+    （首查询/离线实验等本就短，零干预）。否则从「最后一个非[系统 的 human/user」
+    起保留当前轮；其前的 system 前缀（通常 messages[0]）一并保留供排查 prompt。
+    整段都是 [系统 通知无真实用户时 → 原样返回，不误删。
+    """
+    if not isinstance(inputs, dict):
+        return inputs
+    msgs = inputs.get("messages")
+    if not isinstance(msgs, (list, tuple)):
+        return inputs
+    msgs = list(msgs)
+    if len(msgs) < _INPUT_TRIM_MIN_MESSAGES:
+        return inputs
+    last_human = -1
+    for i in range(len(msgs) - 1, -1, -1):
+        role = _trim_msg_role(msgs[i])
+        if role in ("human", "user"):
+            text = _trim_msg_text(msgs[i])
+            if text and not text.startswith("[系统"):
+                last_human = i
+                break
+    if last_human < 1:
+        return inputs  # 无可用锚点（全系统通知/结构异常）→ 不瘦身
+    kept = list(msgs[last_human:])
+    sys_idx = -1
+    for i in range(last_human):
+        if _trim_msg_role(msgs[i]) == "system":
+            sys_idx = i
+    if sys_idx >= 0:
+        kept = [msgs[sys_idx]] + kept
+    out = dict(inputs)
+    out["messages"] = kept
+    return out
+
+
 def _leaf_nesting_enabled() -> bool:
     v = (os.getenv("LANGFUSE_LEAF_NESTING_ENABLE", "1") or "1").strip().lower()
     return v not in ("0", "false", "no", "off")
@@ -672,9 +786,27 @@ def _patch_handler_for_trace_nesting(handler) -> None:
                 _logger.debug("[langfuse_m3] 注入父 trace context 失败: %s", e)
                 token = None
 
+        # trace input 瘦身：仅对 root run 生效。续跑/线程回放的 chat_agent root
+        # input = 完整 checkpoint state（整段历史），Langfuse 拿它当 trace input →
+        # 打开最新 trace 整段历史回显。这里把「展示给 Langfuse 的 input」替换为
+        # 瘦身版（system + 当前轮）；真实执行、打分、_is_auto_continue / 任务路由
+        # 仍用原始 inputs，不受影响。仅替换展示，不改变观测树 → Tracing 行数不变。
+        record_inputs = inputs
+        if parent_run_id is None and inputs is not None:
+            try:
+                trimmed = _trim_trace_input(inputs)
+                if trimmed is not inputs:
+                    _logger.info(
+                        "[langfuse_trim] root input 瘦身: msgs %s → %s (case=%s)",
+                        _msg_count(inputs), _msg_count(trimmed),
+                        parent_case or "new-query",
+                    )
+                    record_inputs = trimmed
+            except Exception as e:  # noqa: BLE001
+                _logger.debug("[langfuse_trim] 瘦身失败，保留原 input: %s", e)
         try:
             result = original_on_chain_start(
-                serialized, inputs, run_id=run_id,
+                serialized, record_inputs, run_id=run_id,
                 parent_run_id=parent_run_id, tags=tags,
                 metadata=metadata, **kwargs,
             )

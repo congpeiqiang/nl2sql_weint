@@ -40,6 +40,7 @@ from agent.eval import eval_subject  # P1 评估单元：工具边界证据 side
 from agent.trace.langfuse_client import (
     _attach_app_root_claim,
     create_score,
+    display_wrenai_tool_name,
     get_client,
     get_thread_trace_context,
     langfuse_enabled,
@@ -836,8 +837,10 @@ class LangfuseSpanMiddleware(AgentMiddleware):
             # M-T2 方案 B：deepagents 异步线程丢失 OTel context，
             # 从 config.metadata 读主线程注入的 parent trace_id，
             # 通过 trace_context 让 skill span 嵌套到主 agent trace 下。
+            # 2026-09-04：span 显示名里 wrenai 净化前缀换回库名全名（display-only；
+            # metadata["tool"] 仍是真实工具名，打分/分类/落盘不受影响）。
             obs_kwargs = {
-                "name": f"skill:{skill}:{tool_name}",
+                "name": f"skill:{skill}:{display_wrenai_tool_name(tool_name)}",
                 "as_type": "span",
                 "input": _compact(args, 2000),
                 "metadata": self._span_meta(tool_name, skill, thread_id, db_name, args, heuristic),
