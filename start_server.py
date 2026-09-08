@@ -106,7 +106,10 @@ def preflight_check():
 
     # ── 检查 MCP 工具 ──
     try:
-        from agent.tools.mcp_tool import tools, _mcp_server_results, MCPToolsLoadError
+        from agent.tools.mcp_tool import (
+            tools, _mcp_server_results, _mcp_server_tool_counts,
+            evaluate_mcp_preflight, MCPToolsLoadError,
+        )
     except ImportError as e:
         print(f"\n🚫 预检失败: MCP 工具模块导入失败（缺少依赖）: {e}", flush=True)
         sys.exit(1)
@@ -118,10 +121,10 @@ def preflight_check():
         print(f"\n🚫 就绪门控: MCP 工具列表为空，服务不启动。", flush=True)
         sys.exit(1)
 
-    # 报告各服务器状态
+    # 报告各服务器状态（带工具数）
     for name, status in _mcp_server_results.items():
         icon = "✅" if status == "ok" else "❌"
-        label = "正常" if status == "ok" else status
+        label = f"正常 ({_mcp_server_tool_counts.get(name, 0)} tools)" if status == "ok" else status
         print(f"  {icon} MCP [{name}]: {label}", flush=True)
 
     # ── 检查 Langfuse 连通性（总开关关闭则跳过；告警不阻断启动）──
@@ -136,7 +139,35 @@ def preflight_check():
     except Exception as e:  # noqa: BLE001
         print(f"  ⚠️ Langfuse: 预检异常（仍启动）: {e}", flush=True)
 
-    print(f"✅ 预检通过: {len(tools)} 个 MCP 工具就绪\n", flush=True)
+    # ── 按 server 的预检判决（2026-09-08 教训：wrenai_WIT 加载失败被总数
+    #    "✅ 预检通过: 20" 掩盖 → 语义层静默缺失，建模库查询全线退化成
+    #    10 分钟撞墙 + 僵尸续跑。关键 server（wrenai_*/dbmcp）缺失 = 拒绝启动；
+    #    MCP_ALLOW_DEGRADED=1 可显式降级）──
+    v = evaluate_mcp_preflight()
+    if v["ok"]:
+        breakdown = ", ".join(f"{n}={c}" for n, c in sorted(v["counts"].items())) or "-"
+        print(f"✅ 预检通过: {len(tools)} 个 MCP 工具就绪（{breakdown}）\n", flush=True)
+        return
+
+    print("\n" + "!" * 64, flush=True)
+    print("❌❌❌ MCP 启动预检失败 —— 以下 server 未就绪 ❌❌❌", flush=True)
+    for n, reason in v["failed"].items():
+        crit = "  [CRITICAL]" if n in v["critical_failed"] else ""
+        print(f"  ❌ {n}{crit}: {reason}", flush=True)
+    print("!" * 64, flush=True)
+    print("  排障提示:", flush=True)
+    print("  - wrenai_*: 检查语义库项目目录（前端设置→语义库面板）target/mdl.json 是否存在；", flush=True)
+    print("    缺失 → 「🔄 更新」/「从远程仓库拉取」或 wren context build 后重启后端", flush=True)
+    print("  - dbmcp: 检查 db_config 与 fastmcp 依赖", flush=True)
+    print("  - mcp-server-echarts: 检查 node/npx 可用性（非关键，可降级）", flush=True)
+
+    if v["block_startup"]:
+        print(f"\n🚫 预检失败: 关键 MCP server 不可用（{', '.join(v['critical_failed'])}），服务不启动。", flush=True)
+        print("   确需降级启动（不建议：语义层/SQL 执行不可用，建模库查询整体失效）:", flush=True)
+        print("   设置 MCP_ALLOW_DEGRADED=1 后重启\n", flush=True)
+        sys.exit(1)
+    print(f"\n⚠️ 预检失败(降级启动): 非关键 server 缺失（{', '.join(v['failed'])}），"
+          f"可用工具 {len(tools)} 个\n", flush=True)
 
 
 def main():

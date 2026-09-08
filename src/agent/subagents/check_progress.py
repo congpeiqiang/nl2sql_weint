@@ -299,6 +299,151 @@ def _final_table_headers(messages) -> set:
     return set()
 
 
+def _run_sql_cell_values(messages, i) -> set:
+    """解析第 i 条 run_sql 工具结果 JSON 的 rows[] 单元值集合（去空白）。
+
+    大结果被 QueryResultOffload 瘦身时 rows 只留前 N 样例，仍用样例做值匹配；
+    错误文本（非 JSON）返回空集。
+    """
+    m = messages[i]
+    try:
+        obj = json.loads(_msg_content_str(m))
+    except (json.JSONDecodeError, ValueError):
+        return set()
+    if not isinstance(obj, dict):
+        return set()
+    vals = set()
+    for r in obj.get("rows") or []:
+        if not isinstance(r, dict):
+            continue
+        for v in r.values():
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s:
+                vals.add(s)
+    return vals
+
+
+def _final_answer_data_rows(messages) -> list:
+    """最后一条 AI 消息里所有 Markdown 数据表的数据行（每行=归一化单元格列表）。
+
+    跳过表头行/分隔行/空行/“（续）”标记（兼容“（续）”拆分的多段表，每段表头只
+    首行、不计入）。值匹配 tier 用这些行去命中 run_sql 返回值，不依赖列名与表头
+    语言，兼容“最终答案中文表头 vs run_sql 英文列”的错配。
+    """
+    for m in reversed(messages):
+        if isinstance(m, dict):
+            role = m.get("role") or m.get("type")
+        else:
+            role = getattr(m, "type", "")
+        if role not in ("ai", "assistant"):
+            continue
+        rows = []
+        in_table = False  # 每张表首行内容行是表头，不计入
+        for line in _msg_content_str(m).split("\n"):
+            s = line.strip()
+            if not s.startswith("|"):
+                in_table = False
+                continue
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if all(set(c) <= set("-: ") for c in cells):
+                continue  # 分隔行
+            if not in_table:
+                in_table = True  # 新表：首行=表头
+                continue
+            rows.append(cells)
+        if rows:
+            return rows
+    return []
+
+
+def _final_row_covered_by(cells, vals) -> bool:
+    """一行最终表数据行是否被候选 run_sql 返回值集合“整行覆盖”。
+
+    行内每个非空单元格都须被候选某值命中：归一化+小写后，单元格含该值 或 该值含
+    单元格（兼容 run_sql 返回时间戳 2026-08-23 00:00:00 而答案只写 2026-08-23）。
+    仅对 len>=2 的值做子串命中，防纯短数字（如 “1”）跨行大面积误命中；单元格两端
+    先剥 ** 加粗。
+    """
+    for c in cells:
+        cc = c.strip().strip("*").strip().lower()
+        if not cc:
+            continue
+        covered = False
+        for v in vals:
+            if not v or not v.strip():
+                continue
+            vv = v.strip().lower()
+            if not vv:
+                continue
+            # 纯短数字（<3 位）只精确相等命中、禁子串：防分布类计数/日期的 “1”“12”
+            # 子串误伤；单字中文（姓）不受此限——须参与整行覆盖才能选中（中文 len=1）
+            if vv.isdigit() and len(vv) < 3 and vv != cc:
+                continue
+            if vv in cc or cc in vv:
+                covered = True
+                break
+        if not covered:
+            return False
+    return True
+
+
+def _is_plain_number(s) -> bool:
+    """去千分位逗号/尾随 % 后可按 float 解析 → 视为纯数字（tier0b 标量对齐用）。"""
+    if not isinstance(s, str):
+        s = str(s)
+    t = s.strip().replace(",", "").rstrip("%").strip()
+    if not t:
+        return False
+    try:
+        float(t)
+        return True
+    except ValueError:
+        return False
+
+
+def _final_numeric_values(messages) -> set | None:
+    """最终答案若是「单数值列」摘要表 → 数值 float 集。
+
+    tier0b 专用：产出标量 SQL 的返回单元格值集需覆盖这些数值。识别条件是摘要表
+    内每行宽度一致(>=2)，且**恰有一列**整列全为纯数字（其余列是指标名/口径等说明
+    文字）。兼容两种答案形态：
+      - 「指标|数值」两列摘要（trace d60b 部门数量|431 / 部门人数|1736）；
+      - 「统计项|口径|数量」三列口径表（trace 01a07043 部门总数 431 / 去重员工
+        总数 280，数值在第 3 列）——原先恰 2 列前提让三列口径表直接 None → tier0b
+        跳过 → 2 行 deleted 分布探值凭「行数最多」误选。
+    0 个或 ≥2 个全数字列 = 明细/歧义表（id|name|parent_id 两列都数字）→ 返回 None
+    不启用本层级，防把明细表的纯数字列当摘要；单列纯数字答案同理不启用。
+    """
+    rows = _final_answer_data_rows(messages)
+    if not rows:
+        return None
+    w = len(rows[0])
+    if w < 2:
+        return None
+    num_cols = set()
+    for j in range(w):
+        ok = True
+        for cells in rows:
+            if len(cells) != w:
+                return None  # 宽度不一致（多表拼接）→ 不启用
+            v = cells[j].strip().strip("*").strip()
+            if not v or not _is_plain_number(v):
+                ok = False
+                break
+        if ok:
+            num_cols.add(j)
+    if len(num_cols) != 1:
+        return None
+    j = next(iter(num_cols))
+    nums = set()
+    for cells in rows:
+        v = cells[j].strip().strip("*").strip()
+        nums.add(float(v.replace(",", "").rstrip("%").strip()))
+    return nums if nums else None
+
+
 def _extract_last_sql(messages) -> str:
     """从子线程消息提取真实执行 SQL，供报告装配（build_report）使用。
 
@@ -311,11 +456,25 @@ def _extract_last_sql(messages) -> str:
     结果表的 SQL（trace 8ccef016 曾把 HAVING 重名核查 SQL 误当执行 SQL 附给报告）。
 
     启发式（按优先级）：
+      0) 值匹配：候选 run_sql 返回值集合能整行覆盖最终 AI 消息数据表的行数最多者
+         （同命中优先 rows==命中 的精确对齐、其次消息序后者）。最终答案是中文表头
+         （工号|姓名…）而 run_sql 列全是英文时，列名∩表头恒空、“行数最多”会选中
+         探值分布——trace 99903681 曾把 24 行 date×status GROUP BY 探值误当 12 行
+         反连接明细附给报告。值匹配按“行单元值”而非列名/行数，天然选中真正产出
+         明细表的那条；纯探值（CURRENT_DATE/MIN-MAX/分布）返回值不进最终表 → hit=0。
+      0b) 标量摘要对齐：最终表是「单数值列」摘要表时（整行匹配因中文指标名/口径
+         说明无对应返回值而必然落空），选返回单元格值集**覆盖全部最终数值**的候选——
+         产出标量（单行多列，如两个 COUNT(*)）是唯一全覆盖者；分布/DISTINCT/Top-N
+         探值至多覆盖部分数值 → 出局。识别不限定列数：指标|数值 两列（trace d60b
+         431/1736）与 统计项|口径|数量 三列口径表（trace 01a07043 431/280）都启用，
+         只要恰有一列整列纯数字。trace d60b 曾把部门人数 Top-5 明细（5 行）误当
+         “行数最多”附给 431/1736 标量答案；01a07043 曾把 2 行 deleted 分布误当产出
+         附给三列标量答案。同全覆盖者优先行数少、再消息序后者。
       1) 结果列名与子 agent 最终答案表格表头匹配的 run_sql；
       2) 返回行数最多的 run_sql（最终数据表通常是最大结果集）；
       3) 兜底：最后一条 run_sql。
     """
-    sqls = []  # [{sql, rows, cols}]
+    sqls = []  # [{sql, rows, cols, values}]
     for i, m in enumerate(messages):
         if isinstance(m, dict):
             role = m.get("role") or m.get("type")
@@ -326,23 +485,148 @@ def _extract_last_sql(messages) -> str:
         if role not in ("tool", "tool_result") or "run_sql" not in name:
             continue
         sql, rows, cols = _run_sql_meta(messages, i)
-        if sql:
-            sqls.append({"sql": sql, "rows": rows, "cols": cols})
+        if not sql:
+            continue
+        sqls.append(
+            {
+                "sql": sql,
+                "rows": rows,
+                "cols": cols,
+                "values": _run_sql_cell_values(messages, i),
+            }
+        )
 
     if not sqls:
         return ""
 
+    # ── tier 0：值匹配（最高优先）────────────────────────────────
+    final_rows = _final_answer_data_rows(messages)
+    if final_rows:
+        best_sql, best_hit, best_aligned = None, 0, False
+        for c in sqls:  # 消息序正序，同质量时后者优先
+            if not c["values"]:
+                continue
+            hit = sum(
+                1 for cells in final_rows if _final_row_covered_by(cells, c["values"])
+            )
+            if hit <= 0:
+                continue
+            aligned = c["rows"] > 0 and c["rows"] == hit
+            if hit > best_hit or (hit == best_hit and aligned >= best_aligned):
+                best_sql, best_hit, best_aligned = c["sql"], hit, aligned
+        if best_sql:
+            return best_sql
+
+    # ── tier 0b：标量摘要对齐（最终表=指标|数值 摘要表）──────────
+    # tier0 整行匹配要求每格（含中文指标名）都被候选值命中，数据型返回值不含中文
+    # 指标名 → 恒落空；掉到「行数最多」会把更晚的 Top-N 探值（5 行）误选成产出
+    # 单行标量（trace d60b 部门数/人数 431/1736：LIMIT 5 明细被附进报告）。
+    # 标量产出 SQL 返回单元格值集 == 最终全部数值 → 数值全覆盖者即产出者。
+    if final_rows:
+        final_nums = _final_numeric_values(messages)
+        if final_nums:
+            full_cover = []
+            for _idx, c in enumerate(sqls):
+                if not c["values"] or c["rows"] <= 0:
+                    continue
+                cnums = {
+                    float(v.strip().replace(",", "").rstrip("%").strip())
+                    for v in c["values"] if _is_plain_number(v)
+                }
+                if final_nums <= cnums:
+                    full_cover.append((c, _idx))
+            if full_cover:
+                # 全覆盖者：行数少（单行标量）优先，其次消息序靠后
+                c, _ = min(full_cover, key=lambda t: (t[0]["rows"], -t[1]))
+                return c["sql"]
+
+    # ── tier 1：列名 ∩ 表头 ───────────────────────────────────────
     final_headers = _final_table_headers(messages)
     if final_headers:
         for s in reversed(sqls):
             if s["cols"] and set(s["cols"]) & final_headers:
                 return s["sql"]
 
+    # ── tier 2：行数最多 ──────────────────────────────────────────
     best = max(sqls, key=lambda s: s["rows"])
     if best["rows"] > 0:
         return best["sql"]
 
+    # ── tier 3：兜底最后一条 ──────────────────────────────────────
     return sqls[-1]["sql"]
+
+
+# 选中 SQL 若为多行明细（整表复现最终“明细”数据表），随 check 结果给 build_report
+# 附一行口径注：报告里的汇总口径数值（应报工池/已报工等）来自伴生计数查询，不能
+# 用这条明细去对 186/174 这类汇总数（trace 99903681 报告「执行 SQL」错选同类背景）。
+_DETAIL_SQL_NOTE = (
+    "本条 SQL 可直接运行，运行结果即上方『明细』数据表。"
+    "报告中的汇总口径数值（如应报工池/已报工总数）由伴生计数查询得出，"
+    "请结合『数据结果』口径说明理解本条明细的统计范围。"
+)
+
+# wren 语义层通道注记：wrenai_*_run_sql 执行的 SQL 是 wren/PG 方言，由 wren
+# 引擎编译为目标库（MySQL）SQL 后执行——「可直接运行」只对语义层成立，用户拿它
+# 到 DBeaver 直连 MySQL 必报语法错（2026-09-08 实锤：报告 SQL 含
+# `CURRENT_DATE - INTERVAL '1 year'`，PG 字面量，MySQL 需 `INTERVAL 1 YEAR`）。
+_WREN_DIALECT_NOTE = (
+    "本条 SQL 经 wren 语义层（{tool}）执行，为 wren/PG 方言，"
+    "引擎已自动编译为目标库 SQL 后运行。"
+    "在 MySQL 客户端（如 DBeaver）直接运行需先转换方言，"
+    "如 `INTERVAL '1 year'` → `INTERVAL 1 YEAR`、"
+    "`date_trunc('week', d)` → MySQL 日期函数（YEARWEEK/DATE_SUB 等）。"
+)
+_DETAIL_TAIL_NOTE = (
+    "运行结果即上方『明细』数据表。"
+    "报告中的汇总口径数值（如应报工池/已报工总数）由伴生计数查询得出，"
+    "请结合『数据结果』口径说明理解本条明细的统计范围。"
+)
+
+
+def _selected_sql_exec_meta(messages, sql) -> tuple[str, int]:
+    """执行过选中 SQL 的 run_sql 工具名与返回行数（如 ("wrenai_WIT_run_sql", 42)）。
+
+    找不到返回 ("", 0)。工具名用于执行通道判别：
+    wrenai_* = wren 语义层（wren/PG 方言，引擎编译为目标库）；
+    dbmcp_*  = 直连执行（目标库原生方言，「可直接运行」成立）。
+    """
+    for i, m in enumerate(messages):
+        if isinstance(m, dict):
+            role = m.get("role") or m.get("type")
+            name = m.get("name") or ""
+        else:
+            role = getattr(m, "type", "")
+            name = getattr(m, "name", "") or ""
+        if role not in ("tool", "tool_result") or "run_sql" not in name:
+            continue
+        s, rows, _ = _run_sql_meta(messages, i)
+        if s == sql:
+            return name, rows
+    return "", 0
+
+
+def _selected_sql_is_detail(messages, sql) -> bool:
+    """选中的 SQL 是否曾以多行明细（rows>1）返回——是则报告附口径注。"""
+    _, rows = _selected_sql_exec_meta(messages, sql)
+    return rows > 1
+
+
+def _build_sql_note(messages, sql) -> str:
+    """通道感知的报告 SQL 注记（report_builder 渲染为「执行 SQL」节 blockquote）。
+
+    - wren 语义层通道：一律附方言提示（明细再加口径尾巴）——不论明细与否，
+      该 SQL 都不能在 MySQL 客户端直跑；
+    - 直连/未知通道：仅多行明细时附旧版口径注（「可直接运行」声明此时成立）。
+    """
+    tool_name, rows = _selected_sql_exec_meta(messages, sql)
+    if tool_name.startswith("wrenai_"):
+        note = _WREN_DIALECT_NOTE.format(tool=tool_name)
+        if rows > 1:
+            note += _DETAIL_TAIL_NOTE
+        return note
+    if rows > 1:
+        return _DETAIL_SQL_NOTE
+    return ""
 
 
 # ── sql-generation process_data 回填：SQL 与产出最终结果表的 run_sql 对齐 ────
@@ -537,6 +821,13 @@ def apply_patch():
             sql = _extract_last_sql(messages)
             if sql:
                 result["sql"] = sql
+                # 通道感知 SQL 注记（_build_sql_note）：wren 语义层通道的 SQL 是
+                # wren/PG 方言（引擎编译为目标库执行），「可直接运行」不成立 →
+                # 附方言转换提示；直连通道多行明细仍附旧版口径注（别拿明细去对
+                # 186/174 之类汇总数）。
+                _note = _build_sql_note(messages, sql)
+                if _note:
+                    result["sql_note"] = _note
                 # sql-generation process_data 回填为产出 run_sql（若 dry_run 与
                 # 实际执行 SQL 不一致），保证中间产物与前端/报告 SQL 同源
                 _backfill_process_data_sql(messages, sql)

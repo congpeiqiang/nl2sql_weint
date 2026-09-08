@@ -49,13 +49,17 @@ from agent.trace.langfuse_client import (
 _logger = logging.getLogger(__name__)
 
 # 工具名后缀 → skill 分类（启发式；wrenai_imdb_run_sql / dbmcp_run_sql 均命中后缀）。
-# get_context/get_instructions/get_all_knowledge 是澄清/知识检索的真实工作（此前不在
-# map 里 → 无 span，clarification 的语义检索在 trace 里完全不可见），补进独立族
-# knowledge-retrieval（新族不进 _maybe_score 分支，不产生打分）。
+# knowledge-retrieval 族是「理解建模(nl2sql-understand)」的信息收集真实工作：不在 map 里
+# → 无 span，语义检索/schema 探查在 trace 里完全不可见。get_context/get_instructions/
+# get_all_knowledge 曾补入；SKILL.md 写的能力性工具名（describe_schema/get_all_knowledge）
+# 与实际部署的 wrenai 工具面有出入（老 wren 只有 describe_model/list_knowledge/
+# get_data_source），本次补齐这三个真实工具名。该族不进 _maybe_score 分支 → 不产生打分。
 TOOL_SKILL_MAP = {
     "get_db_info": "schema-linking",
     "get_mdl": "schema-linking",
     "describe_schema": "schema-linking",
+    "describe_model": "knowledge-retrieval",
+    "get_data_source": "knowledge-retrieval",
     "list_models": "schema-linking",
     "list_cubes": "schema-linking",
     "describe_cube": "schema-linking",
@@ -63,6 +67,7 @@ TOOL_SKILL_MAP = {
     "get_context": "knowledge-retrieval",
     "get_instructions": "knowledge-retrieval",
     "get_all_knowledge": "knowledge-retrieval",
+    "list_knowledge": "knowledge-retrieval",
     "recall_queries": "recall-queries",
     "run_sql": "sql-execution",
     "dry_run": "sql-generation",
@@ -172,31 +177,38 @@ def _set_active_skill(thread_id: str, skill: str) -> None:
 #   被误标 clarification"）；长度 >1 = 共享工具 → 活动 skill 是 owner 才继承。
 _TOOL_OWNER_SKILLS: dict[str, tuple[str, ...]] = {
     # ── 唯一归属（覆盖过期活动 skill）──
-    "list_models": ("nl2sql-sql-of-thought",),
-    "list_cubes": ("nl2sql-sql-of-thought",),
-    "describe_cube": ("nl2sql-sql-of-thought",),
-    "query_cube": ("nl2sql-sql-of-thought",),
-    "run_sql": ("nl2sql-sql-of-thought",),
+    # 注意 owner 拼写必须 = 真实 skill 目录名（read_file 命中 SKILL.md 时
+    # _skill_name_from_path 返回目录名）。顶层编排器目录名是 sql-of-thought
+    # （无 nl2sql- 前缀），此前写 "nl2sql-sql-of-thought" → 同一 skill 两种 tag
+    # （skill:sql-of-thought:read_file vs skill:nl2sql-sql-of-thought:list_models），
+    # 按 skill 过滤/聚合会被拆开。已统一为真实目录名。
+    "list_models": ("sql-of-thought",),
+    "list_cubes": ("sql-of-thought",),
+    "describe_cube": ("sql-of-thought",),
+    "query_cube": ("sql-of-thought",),
+    # run_sql 执行专属 skill（2026-09-05 新增 nl2sql-execution，Step6 查询执行）。
+    # 展示从编排器 sql-of-thought 挪到真实执行步。
+    "run_sql": ("nl2sql-execution",),
     "dry_plan": ("nl2sql-sql-generation",),
-    "get_all_knowledge": ("nl2sql-knowledge-loader",),
+    # 前段三合一后，检索/知识/Schema 工具的唯一前端 owner = nl2sql-understand。
+    # 全部唯一化（不再共享给 sql-of-thought）：这些工具只会在理解建模里被正向调用，
+    # 唯一归属可覆盖「活动 skill 过期/未设」的 stale 状态，杜绝 heuristic 名
+    # （knowledge-retrieval / schema-linking 等）泄漏到展示。
+    # 2026-09-06：补 list_knowledge / get_data_source（此前只进了 TOOL_SKILL_MAP，
+    # 未在 owner 表 → 展示回退 heuristic 名 knowledge-retrieval）。
+    "get_context": ("nl2sql-understand",),
+    "get_instructions": ("nl2sql-understand",),
+    "get_all_knowledge": ("nl2sql-understand",),
+    "list_knowledge": ("nl2sql-understand",),
+    "recall_queries": ("nl2sql-understand",),
+    "describe_schema": ("nl2sql-understand",),
+    "describe_model": ("nl2sql-understand",),
+    "get_data_source": ("nl2sql-understand",),
+    "get_mdl": ("nl2sql-understand",),
+    "get_db_info": ("nl2sql-understand",),
     # ── 共享（活动 skill 在 owners 内才继承）──
-    "get_context": (
-        "nl2sql-clarification", "nl2sql-schema-linking",
-        "nl2sql-sql-generation", "nl2sql-sql-of-thought",
-    ),
-    "get_instructions": (
-        "nl2sql-clarification", "nl2sql-knowledge-loader",
-        "nl2sql-schema-linking", "nl2sql-sql-of-thought",
-    ),
-    "recall_queries": (
-        "nl2sql-knowledge-loader", "nl2sql-schema-linking",
-        "nl2sql-sql-of-thought", "nl2sql-sql-generation",
-    ),
-    "describe_schema": ("nl2sql-schema-linking", "nl2sql-sql-of-thought"),
-    "get_mdl": ("nl2sql-schema-linking", "nl2sql-sql-of-thought"),
-    "get_db_info": ("nl2sql-schema-linking", "nl2sql-sql-of-thought"),
     "dry_run": (
-        "nl2sql-sql-generation", "nl2sql-sql-of-thought",
+        "nl2sql-sql-generation", "sql-of-thought",
         "nl2sql-correction", "nl2sql-performance-optimization",
     ),
 }
@@ -305,9 +317,9 @@ def _thread_id(request: Any) -> str:
             if meta.get("langfuse_session_id"):
                 return str(meta["langfuse_session_id"])
             configurable = cfg.get("configurable") or {}
-            if configurable.get("trace_parent_thread_id"):
+            if configurable.get("trace_parent_thread_id", None):
                 return str(configurable["trace_parent_thread_id"])
-            if configurable.get("thread_id"):
+            if configurable.get("thread_id", None):
                 return str(configurable["thread_id"])
     except Exception:
         pass

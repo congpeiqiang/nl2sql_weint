@@ -50,18 +50,24 @@ _B_EXEC = 3
 
 # 工具名子串 → 桶。wrenai_<库名>_run_sql / dbmcp_run_sql 等带前缀，故用子串包含匹配。
 _EXEC_TOOL_SUB = ("run_sql", "query_cube", "dry_run", "dry_plan")
+# schema 里程碑 = merged 「理解建模」(nl2sql-understand) 的 Schema 建模起点。
+# get_context/recall_queries/list_stored_queries 是理解建模的轻/知识检索（归 KNOW），
+# 不触发里程碑——否则 merged 第一步 get_context 就把「理解建模-清晰度与知识」误勾掉。
 _SCHEMA_TOOL_SUB = (
     "describe_schema", "describe_model", "describe_cube",
-    "get_mdl", "list_models", "get_db_info", "get_context",
-    "recall_queries", "list_stored_queries", "list_cubes",
-    "list_functions", "get_data_source",
+    "get_mdl", "list_models", "get_db_info",
+    "list_cubes", "list_functions", "get_data_source",
 )
-_KNOW_TOOL_SUB = ("get_all_knowledge", "get_instructions", "list_knowledge")
+_KNOW_TOOL_SUB = (
+    "get_all_knowledge", "get_instructions", "list_knowledge",
+    "get_context", "recall_queries", "list_stored_queries",
+)
 
 # todos content 语义别名（规范化后子串匹配）
 # 当前 in_progress 已是这些阶段 → schema 里程碑不再推进（避免误跳）
 _SCHEMA_PHASE_ALIASES = (
     "schemalinking", "结构链接", "schema链接", "库表结构", "表结构理解", "获取schema",
+    "schema提取", "schema裁剪", "schema建模", "提取与裁剪",
 )
 # exec 里程碑的目标项（「查询执行」语义）
 _EXEC_PHASE_ALIASES = (

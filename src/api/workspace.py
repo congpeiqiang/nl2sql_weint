@@ -4,7 +4,8 @@
     GET    /api/workspaces              列表（含活跃标记）
     POST   /api/workspaces              注册工作区（需目录路径）
     PUT    /api/workspaces/{name}/activate  切换活跃工作区（即时生效）
-    DELETE /api/workspaces/{name}       取消注册（不删文件）
+    DELETE /api/workspaces/{name}       取消注册（默认不删文件）
+    DELETE /api/workspaces/{name}?delete_files=1   彻底删除（含服务器目录，不可恢复）
     GET    /api/workspaces/active       获取当前活跃工作区信息
 """
 from __future__ import annotations
@@ -95,18 +96,32 @@ async def activate_workspace(request: Request):
 
 
 async def unregister_workspace(request: Request):
-    """取消注册工作区（不删除文件）。"""
+    """取消注册工作区。
+
+    默认只移除注册表条目（不删文件，安全默认）；带 `?delete_files=1` 时彻底删除
+    （取消注册 + 删除该工作区服务器目录，不可恢复），后端有路径护栏（禁 default /
+    禁活跃工作区 / 禁 data_root 外与保留目录），失败返回 400 并说明原因。
+    """
     name = request.path_params["name"]
     if name == "default":
         return json_response({"error": "不能删除默认工作区"}, status=400)
+
+    delete_files = (request.query_params.get("delete_files") or "").lower() in (
+        "1", "true", "yes", "on"
+    )
 
     from agent.workspace_manager import get_workspace_manager
 
     wm = get_workspace_manager()
     try:
+        if delete_files:
+            result = wm.delete_workspace(name)
+            return json_response({"ok": True, "name": name, **result})
         ok = wm.unregister_workspace(name)
         if ok:
             return json_response({"ok": True, "name": name})
+        return json_response({"error": f"工作区 '{name}' 不存在"}, status=404)
+    except KeyError:
         return json_response({"error": f"工作区 '{name}' 不存在"}, status=404)
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)

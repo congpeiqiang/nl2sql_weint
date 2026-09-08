@@ -26,7 +26,11 @@ tar -cf $tar `
   --exclude=.idea --exclude=docs --exclude=.tmp --exclude=__pycache__ `
   --exclude=docker --exclude="*.bin" --exclude="*.log" `
   --exclude=.env --exclude=.env.prod --exclude=src/agent/workspace `
+  --exclude=src/agent/workspace_manager/workspaces.json `
   -C $LocalRoot .
+# ↑ workspaces.json 是运行时注册表（dev 机条目），随 tar 上生产会覆盖服务器
+#   注册表（2026-09-08 ee/cpq 工作区消失事故）；治本后注册表住数据卷，此排除
+#   为双保险（服务器 backend/ 里的旧残留仍会进镜像，但新代码不再读它）。
 if ($LASTEXITCODE -ne 0) { throw "打包失败" }
 Write-Host "   打包完成：$(([math]::Round((Get-Item $tar).Length/1MB,1))) MB"
 
@@ -43,7 +47,8 @@ ssh "${SshUser}@${Server}" "cd ${AppDir} && docker-compose stop langgraph-api &&
 
 Write-Host "== 5/5 等待启动并验证 ==" -ForegroundColor Cyan
 Start-Sleep -Seconds 75
-ssh "${SshUser}@${Server}" "curl -s -o /dev/null -w 'backend_ok:%{http_code}' --max-time 6 http://127.0.0.1:2026/ok; echo; docker logs nl2sql-app_langgraph-api_1 2>&1 | grep -E 'MCP 工具加载完成|预检通过' | tail -2"
+ssh "${SshUser}@${Server}" "curl -s -o /dev/null -w 'backend_ok:%{http_code}' --max-time 6 http://127.0.0.1:2026/ok; echo; docker logs nl2sql-app_langgraph-api_1 2>&1 | grep -E 'MCP 工具加载完成|预检通过|预检失败' | tail -4"
 
 Write-Host ""
-Write-Host "OK 后端发布完成。期望：backend_ok:200 + 预检通过: N 个 MCP 工具就绪" -ForegroundColor Green
+Write-Host "OK 后端发布完成。期望：backend_ok:200 + 预检通过: N 个 MCP 工具就绪（echarts=18, wrenai_*=27±, dbmcp=2 逐项 breakdown）" -ForegroundColor Green
+Write-Host "⚠ 若见「预检失败」或 backend_ok 非 200：关键 MCP server（wrenai_*/dbmcp）加载失败会拒绝启动，按日志排障提示处理" -ForegroundColor Yellow

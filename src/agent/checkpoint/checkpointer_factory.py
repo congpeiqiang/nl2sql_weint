@@ -61,6 +61,13 @@ class _PostgresCheckpointer:
     checkpoint_writes / checkpoint_blobs / checkpoint_migrations）需显式 setup 创建，
     新部署的空库首次使用即自动建表，避免 ``relation "checkpoints" does not exist``。
     setup() 幂等（CREATE TABLE IF NOT EXISTS），每次会话打开执行开销可忽略。
+
+    ⚠ 运维注意（2026-09-08 实测教训）：langgraph_api 的 _checkpointer/_adapter.py
+    会**跨请求复用**已建立的 PG 连接（并非每次 run 新建）。重建/重启 postgres 容器
+    会掐断旧连接 → 之后所有 run 与 GET /threads/{id}/state 全部报
+    psycopg.OperationalError "the connection is closed"。
+    **postgres 容器 recreate 后必须重启 langgraph-api**（v1 compose 用 stop/rm/up
+    三步，直接 up -d 会炸 KeyError ContainerConfig）。
     """
 
     def __init__(self, uri: str) -> None:
@@ -87,7 +94,10 @@ _PG_URI = os.environ.get("CHECKPOINT_DB_URI", "")
 if _PG_URI.startswith("postgresql://"):
     # PostgreSQL 模式（生产环境）——首次使用自动建表
     checkpointer = _PostgresCheckpointer(_PG_URI)
-    print(f"✅ Checkpointer: PostgreSQL ({_PG_URI.split('@')[-1] if '@' in _PG_URI else 'configured'})，首次使用自动建表")
+    # 注意：不用 emoji——Windows GBK 控制台 print 会 UnicodeEncodeError 炸 import
+    # （生产容器 LANG=C.UTF-8 无碍，但宿主机 GBK 终端设 URI 测 PG 模式会中招）。
+    # 只打 @ 后半段，不泄密码。
+    print(f"[OK] Checkpointer: PostgreSQL ({_PG_URI.split('@')[-1] if '@' in _PG_URI else 'configured'})，首次使用自动建表")
 else:
     # SQLite 模式（开发环境）
     checkpointer = _DynamicCheckpointer()

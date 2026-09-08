@@ -22,6 +22,7 @@ POST /api/threads/{thread_id}/compact
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -54,6 +55,12 @@ _MIN_KEEP_MESSAGES = 8
 
 # 压缩触发下限：少于 20 条消息不压缩（压缩无意义）
 _MIN_MESSAGES_TO_COMPACT = 20
+
+# 收益护栏（2026-09-08：thread 01a07fd4 点手动压缩只总结 1 条/保留 111 条，
+# 圆环 55% 纹丝不动，但 state 被 REMOVE_ALL 重写了一遍——零收益全风险）：
+# 待总结消息数与预计节省 tokens 双下限，不达标直接 skipped 返回，不调 LLM 不写 state。
+_MIN_SUMMARIZE_MESSAGES = 5
+_MIN_COMPACT_GAIN_TOKENS = 2000
 
 # 摘要生成用的提示词
 _SUMMARY_SYSTEM_PROMPT = """你是一个对话摘要助手。请将以下对话历史总结为简洁的摘要，保留关键信息：
@@ -89,11 +96,33 @@ def _msg_text(msg: dict) -> str:
     return str(content) if content else ""
 
 
+def _msg_wire_chars(msg: dict) -> int:
+    """一条消息上 LLM wire 的近似字符量：content 文本 + tool_calls（name+args）。
+
+    2026-09-08 修复：此前只算 content 文本——AI 工具调用消息 content="" 而
+    args 里装着整段 echarts option JSON / SQL（实测该线程 args 合计 ~6.8k
+    tokens 全被漏记），账面 14.7k vs 真实 ~41.7k → 「保留最近 12k」的边界
+    一路滑到线程头部，手动压缩退化成总结 1 条的 no-op。id/metadata 等
+    langchain 内部字段不上 wire，不计。
+    """
+    n = len(_msg_text(msg))
+    for tc in msg.get("tool_calls") or []:
+        if isinstance(tc, dict):
+            n += len(str(tc.get("name") or ""))
+            args = tc.get("args")
+            if args:
+                try:
+                    n += len(json.dumps(args, ensure_ascii=False))
+                except (TypeError, ValueError):
+                    n += len(str(args))
+    return n
+
+
 def _estimate_tokens(messages: list[dict]) -> int:
-    """估算消息列表的总 token 数（字符数 / 4）。"""
+    """估算消息列表上 wire 的总 token 数（wire 字符量 / 4）。"""
     total = 0
     for m in messages:
-        total += len(_msg_text(m))
+        total += _msg_wire_chars(m)
     return total // _CHARS_PER_TOKEN
 
 
@@ -102,6 +131,7 @@ def _split_messages(messages: list[dict]) -> tuple[list[dict], list[dict]]:
 
     保留策略：至少保留 _MIN_KEEP_MESSAGES 条，且保留部分不超过
     _KEEP_FRACTION * _MAX_CONTEXT_TOKENS tokens（约 12000 tokens）。
+    token 记账用 _msg_wire_chars（含 tool_calls args，与 LLM 实际输入对齐）。
     """
     if len(messages) <= _MIN_KEEP_MESSAGES:
         return messages, []
@@ -113,7 +143,7 @@ def _split_messages(messages: list[dict]) -> tuple[list[dict], list[dict]]:
     preserved_tokens = 0
     for m in reversed(messages):
         preserved.insert(0, m)
-        preserved_tokens += len(_msg_text(m)) // _CHARS_PER_TOKEN
+        preserved_tokens += _msg_wire_chars(m) // _CHARS_PER_TOKEN
         if len(preserved) >= _MIN_KEEP_MESSAGES and preserved_tokens >= keep_target:
             break
 
@@ -133,13 +163,19 @@ async def _generate_summary(messages: list[dict]) -> str:
             _logger.warning("[thread_compact] 无可用模型，使用简单截断摘要")
             return _fallback_summary(messages)
 
-        # 构建对话文本
+        # 构建对话文本（AI 工具调用消息 content 为空也要留痕：摘要提示词要求
+        # 保留"助手执行的主要操作"，此前这类消息被整条跳过，摘要丢失全部
+        # 查询/图表操作脉络，只剩用户问题与最终答复）
         conversation_parts = []
         for m in messages:
             typ = m.get("type") or m.get("role") or "unknown"
             text = _msg_text(m)
+            tcs = [str(tc.get("name") or "") for tc in (m.get("tool_calls") or [])
+                   if isinstance(tc, dict) and tc.get("name")]
             if text.strip():
                 conversation_parts.append(f"[{typ}]: {text[:2000]}")  # 截断单条消息
+            elif tcs:
+                conversation_parts.append(f"[{typ}] 调用工具: {', '.join(tcs)}")
         conversation_text = "\n\n".join(conversation_parts)
 
         if not conversation_text.strip():
@@ -239,7 +275,7 @@ async def compact_thread(request: Request):
                 "message_count": len(messages),
             })
 
-        # 2. 分割消息
+        # 2. 分割消息（wire 口径记账，含 tool_calls args）
         to_summarize, preserved = _split_messages(messages)
         if not to_summarize:
             return json_response({
@@ -249,11 +285,31 @@ async def compact_thread(request: Request):
                 "message_count": len(messages),
             })
 
+        # 2b. 收益护栏：待总结太少或预计节省太小 → skipped（不调 LLM、不重写 state。
+        #     no-op 压缩不是无害的：REMOVE_ALL+回写会重建整个线程消息历史）
+        gain_tokens = _estimate_tokens(to_summarize)
+        if len(to_summarize) < _MIN_SUMMARIZE_MESSAGES or gain_tokens < _MIN_COMPACT_GAIN_TOKENS:
+            reason = (
+                f"压缩收益不足：待总结 {len(to_summarize)} 条 / 预计节省 ~{gain_tokens} tokens"
+                f"（下限 {_MIN_SUMMARIZE_MESSAGES} 条 / {_MIN_COMPACT_GAIN_TOKENS} tokens），跳过"
+            )
+            _logger.info("[thread_compact] %s", reason)
+            return json_response({
+                "ok": True,
+                "skipped": True,
+                "reason": reason,
+                "message_count": len(messages),
+                "est_gain_tokens": gain_tokens,
+            })
+
         # 3. 生成摘要
         summary = await _generate_summary(to_summarize)
         _logger.info(
-            "[thread_compact] 压缩完成: 总结 %d 条消息 → %d chars 摘要, 保留 %d 条",
-            len(to_summarize), len(summary), len(preserved),
+            "[thread_compact] 压缩完成: 总结 %d 条消息(~%d tokens) → %d chars 摘要, "
+            "保留 %d 条(~%d tokens)，线程 wire 总量 ~%d → ~%d tokens",
+            len(to_summarize), gain_tokens, len(summary),
+            len(preserved), _estimate_tokens(preserved),
+            _estimate_tokens(messages), _estimate_tokens(preserved) + len(summary) // _CHARS_PER_TOKEN,
         )
 
         # 4. 写入新 state：RemoveMessage(ALL) + 摘要 + 保留的消息

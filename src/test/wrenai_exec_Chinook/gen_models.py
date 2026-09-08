@@ -18,6 +18,9 @@ TYPE_MAP = {
     "DOUBLE": "DOUBLE", "REAL": "DOUBLE",
     "DATETIME": "TIMESTAMP", "TIMESTAMP": "TIMESTAMP", "DATE": "DATE",
     "BOOLEAN": "BOOLEAN", "BOOL": "BOOLEAN",
+    # MySQL bit(1)（deleted 等标志位）→ INTEGER，与 db_introspect.py 保持一致
+    # （此前缺条目兜底 VARCHAR，WIT 库 201 列错标，2026-09-08 修复）
+    "BIT": "INTEGER",
 }
 
 CONN_FILE = sys.argv[1] if len(sys.argv) > 1 else "config/connection.json"

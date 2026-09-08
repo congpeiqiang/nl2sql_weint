@@ -31,6 +31,11 @@ TYPE_MAP: dict[str, str] = {
     "NUMERIC": "DOUBLE", "DECIMAL": "DOUBLE", "FLOAT": "DOUBLE", "DOUBLE": "DOUBLE",
     "DATETIME": "TIMESTAMP", "TIMESTAMP": "TIMESTAMP", "DATE": "DATE",
     "BOOLEAN": "BOOLEAN", "BOOL": "BOOLEAN",
+    # MySQL bit(1)（软删/标志位惯用类型，如 deleted）→ INTEGER：取值 0/1，
+    # 存量 SQL 语料全部是 deleted=0 数值比较，映射 BOOLEAN 会诱导 true/false
+    # 且 wren 严格校验风险未知；此前缺条目 → 兜底 VARCHAR（WIT 库 201 列中招，
+    # 2026-09-08 修复，语义库 witops-wrenai v1.0.2 同步批改）。
+    "BIT": "INTEGER",
     "BLOB": "VARCHAR", "LONGBLOB": "VARCHAR",
     # ClickHouse
     "STRING": "VARCHAR", "FIXEDSTRING": "VARCHAR",

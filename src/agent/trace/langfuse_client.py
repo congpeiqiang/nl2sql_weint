@@ -223,14 +223,16 @@ def _resolve_leaf_anchor(metadata) -> tuple[str, str, str] | None:
         for k in ("thread_id", "langfuse_session_id"):
             thr = str(md.get(k) or "").strip()
             if thr:
-                rec = _THREAD_TRACE_MAP.get(thr)
+                # 经 get_thread_trace_context：内存未命中 → 落盘镜像兜底（重启后
+                # 叶子仍归回 pre-restart 查询 trace）并回填内存。
+                rec = get_thread_trace_context(thr)
                 if rec and rec[0]:
                     return (rec[0], rec[1], f"thread:{k}")
         cfg = md.get("configurable")
         if isinstance(cfg, dict):
             thr = str(cfg.get("thread_id") or "").strip()
             if thr:
-                rec = _THREAD_TRACE_MAP.get(thr)
+                rec = get_thread_trace_context(thr)
                 if rec and rec[0]:
                     return (rec[0], rec[1], "thread:configurable")
     except Exception:  # noqa: BLE001
@@ -473,9 +475,27 @@ def get_thread_trace_context(thread_id: str) -> tuple[str, str]:
     """查 thread 最近一次「新查询」的 (trace_id, root_observation_id)（M-T3d）。
 
     auto-continue run 启动时用它把续跑 observations 复用回原 trace。
-    找不到 → ("", "")（auto-continue 照常新开 trace，既有行为）。
+    内存未命中 → 落盘镜像（trace_bind.sqlite）兜底并回填内存（重启后恢复
+    pre-restart 绑定，续跑不再「照常新开」）；仍无 → ("", "")（既有行为）。
     """
-    return _THREAD_TRACE_MAP.get(thread_id, ("", ""))
+    _hit = _THREAD_TRACE_MAP.get(thread_id)
+    if _hit and _hit[0]:
+        return _hit
+    if thread_id:
+        try:
+            from agent.trace.trace_bind_store import get_store  # 惰性，防 import 环
+
+            _rec = get_store().get_thread(thread_id)
+            if _rec and _rec[0]:
+                _THREAD_TRACE_MAP[thread_id] = _rec
+                _logger.info(
+                    "[langfuse_m3d] thread=%s trace 绑定从持久层恢复 trace=%s obs=%s",
+                    thread_id[:12], _rec[0][:16], (_rec[1] or "∅")[:16],
+                )
+                return _rec
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[langfuse_m3d] 持久层 thread 读取失败: %s", e)
+    return ("", "")
 
 
 # ── M-T5：任务级注册表（task_id → 发起该任务的那次查询）────────────────
@@ -511,6 +531,15 @@ def register_task_trace_context(
         question or "",
         description or "",
     )
+    try:
+        from agent.trace.trace_bind_store import get_store  # 惰性，防 import 环
+
+        get_store().set_task(
+            task_id=task_id, main_thread_id=main_thread_id, trace_id=trace_id,
+            root_obs_id=root_obs_id, question=question, description=description,
+        )
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[langfuse_m5] 落盘 task 绑定失败: %s", e)
     _logger.info(
         "[langfuse_m5] task=%s registered → trace=%s obs=%s thread=%s q=%s desc=%s",
         task_id[:12], trace_id[:16], (root_obs_id or "∅")[:16],
@@ -523,7 +552,9 @@ def get_task_trace_context(task_id: str) -> tuple[str, str, str, str, str]:
     """按 task_id 查发起该任务的那次查询的 trace 上下文（M-T5）。
 
     支持前缀匹配（auto-continue 正文里「任务 X（」是短 id 前 8 位）。
-    找不到 → ("", "", "", "", "")（调用方回退线程级映射）。
+    内存未命中 → 落盘镜像（trace_bind.sqlite）兜底并回填内存（重启后恢复
+    pre-restart task → trace 绑定）；仍无 → ("", "", "", "", "")（调用方回退
+    线程级映射）。
     """
     if not task_id:
         return ("", "", "", "", "")
@@ -534,6 +565,20 @@ def get_task_trace_context(task_id: str) -> tuple[str, str, str, str, str]:
         for tid, entry in _TASK_TRACE_MAP.items():
             if tid.startswith(task_id):
                 return entry
+    try:
+        from agent.trace.trace_bind_store import get_store  # 惰性，防 import 环
+
+        _rec = get_store().get_task(task_id)
+        if _rec and _rec[1][1]:
+            _full_id, _value5 = _rec
+            _TASK_TRACE_MAP[_full_id] = _value5
+            _logger.info(
+                "[langfuse_m5] task=%s 绑定从持久层恢复 → trace=%s obs=%s",
+                _full_id[:12], _value5[1][:16], (_value5[2] or "∅")[:16],
+            )
+            return _value5
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[langfuse_m5] 持久层 task 读取失败: %s", e)
     return ("", "", "", "", "")
 
 
@@ -842,6 +887,16 @@ def _patch_handler_for_trace_nesting(handler) -> None:
                             )
                             if _thr:
                                 _THREAD_TRACE_MAP[_thr] = (tid, oid)
+                                # 落盘镜像：重启后 auto-continue/build_report 续跑仍能
+                                # 找回本查询 trace（内存被清），避免「照常新开」分裂。
+                                try:
+                                    from agent.trace.trace_bind_store import get_store  # noqa: E501 惰性，防 import 环
+
+                                    get_store().set_thread(_thr, tid, oid)
+                                except Exception as e:  # noqa: BLE001
+                                    _logger.debug(
+                                        "[langfuse_m3d] 落盘 thread 绑定失败: %s", e
+                                    )
                         _logger.info(
                             "[langfuse_m3b] root obs recorded: trace=%s obs=%s "
                             "otel_span_id=%s handler.last_trace_id=%s "

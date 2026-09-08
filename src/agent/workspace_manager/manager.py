@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 from pathlib import Path
 from typing import Optional
@@ -45,12 +46,6 @@ _logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
 
-# 默认注册表路径：工作区注册表（可被 .env WORKSPACE_REGISTRY_PATH 覆盖）
-_DEFAULT_REGISTRY_PATH = os.getenv(
-    "WORKSPACE_REGISTRY_PATH",
-    str(Path(__file__).resolve().parent / "workspaces.json"),
-)
-
 # 仓库内置种子目录锚点（随 git 分发）：manager.py 在 workspace_manager/ 子目录，
 # 上两层到 src/agent/。shared 与 workspace 的仓库种子从这里拷贝到外部基础目录。
 _REPO_AGENT_DIR = Path(__file__).resolve().parent.parent
@@ -59,6 +54,18 @@ _REPO_AGENT_DIR = Path(__file__).resolve().parent.parent
 # 配置后：shared → <AGENT_DATA_ROOT>/shared，默认工作区 → <AGENT_DATA_ROOT>/workspace。
 # 为空 = 未配置，回退仓库内 src/agent/（旧行为，兼容现有部署）。
 _DATA_ROOT = os.getenv("AGENT_DATA_ROOT", "").strip()
+
+# 注册表旧位置（代码树内）。生产 = 镜像内路径，且该文件被 git 跟踪、带 dev 机
+# 条目——每次发版 tar 都把本地 dev 注册表覆盖上生产（2026-09-08 事故：服务器
+# 用户建的 ee/cpq 工作区从前端消失，active 被指向不存在的 Windows 路径）。
+_LEGACY_REGISTRY_PATH = Path(__file__).resolve().parent / "workspaces.json"
+
+# 默认注册表路径优先级：WORKSPACE_REGISTRY_PATH env → <AGENT_DATA_ROOT>/workspaces.json
+# （数据卷，随容器 recreate/发版存活）→ 代码树旧位置（dev 未配 data root 时回退）。
+_DEFAULT_REGISTRY_PATH = os.getenv("WORKSPACE_REGISTRY_PATH", "").strip() or (
+    str(Path(_DATA_ROOT) / "workspaces.json") if _DATA_ROOT
+    else str(_LEGACY_REGISTRY_PATH)
+)
 
 # 默认工作区目录：AGENT_DATA_ROOT/workspace（配置时）→ src/agent/workspace（回退）
 _DEFAULT_WORKSPACE_DIR = (
@@ -84,7 +91,30 @@ class WorkspaceManager:
         self._registry_path = Path(registry_path or _DEFAULT_REGISTRY_PATH)
         self._cache: Optional[dict] = None
         self._cache_valid = False
+        self._migrate_registry_once()  # 注册表从代码树迁往数据卷（一次性）
         self._seed_data_root_once()  # 首次运行：外部基础目录缺失时从仓库种子初始化
+
+    def _migrate_registry_once(self) -> None:
+        """注册表一次性迁移：新位置（数据卷）缺失且代码树旧位置存在时原样拷贝。
+
+        2026-09-08：注册表默认位置从代码树（生产=镜像内，发版即被 tar 带来的
+        dev 版覆盖）迁到 <AGENT_DATA_ROOT>/workspaces.json（数据卷，随容器
+        recreate 存活）。首次以新路径启动时搬运旧文件保留既有条目；此后旧文件
+        不再被读取。新位置已存在（如运维预置）则不动。
+        """
+        try:
+            if self._registry_path == _LEGACY_REGISTRY_PATH:
+                return  # 未配 data root / env：仍在旧位置，无迁移语义
+            if self._registry_path.exists() or not _LEGACY_REGISTRY_PATH.exists():
+                return
+            self._registry_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(_LEGACY_REGISTRY_PATH, self._registry_path)
+            _logger.info(
+                "[workspace] 注册表已迁移: %s → %s（旧文件不再读取）",
+                _LEGACY_REGISTRY_PATH, self._registry_path,
+            )
+        except OSError as e:
+            _logger.warning("[workspace] 注册表迁移失败（按空注册表继续）: %s", e)
 
     # ── 注册表读写 ──────────────────────────────────────────
 
@@ -484,6 +514,71 @@ class WorkspaceManager:
 
             _logger.info("[workspace] 取消注册工作区 '%s'", name)
             return True
+
+    def delete_workspace(self, name: str) -> dict:
+        """彻底删除工作区：取消注册 + 删除该工作区目录（含语义库/报告/中间数据，不可恢复）。
+
+        2026-09-08 新增：此前只有「取消注册（不删文件）」一个档位，废弃的空壳工作区
+        （如前端误建）只能手动上服务器 rm。删除走安全护栏，防误删共享数据：
+          - 拒绝删除 default 工作区；
+          - 拒绝删除**当前活跃**工作区（须先切换到其它工作区再删，避免删掉正在用的目录）；
+          - 只允许删除 data_root **之内**的已注册目录，且目录 ≠ data_root 本身、
+            ≠ 默认工作区目录、≠ 共享资源目录（shared）——注册表里路径若被改写指向
+            这些禁区，删除在此被拦下，防路径穿越误伤；
+          - 目录在 data_root 之外（dev 里手动注册任意路径）→ 拒绝删文件，仅提示
+            「取消注册 + 手动删除」，不越界碰文件；
+          - 目录已不存在 → 退化为仅移除注册条目。
+        成功返回 {"ok": True, "removed_dir": str|None}；失败抛 ValueError / KeyError。
+        """
+        if name == "default":
+            raise ValueError("不能删除默认工作区")
+        with _LOCK:
+            reg = self._read_registry()
+            workspaces = reg.get("workspaces", {})
+            ws = workspaces.get(name)
+            if not ws or not ws.get("path"):
+                raise KeyError(name)
+            if reg.get("active") == name:
+                raise ValueError(
+                    f"工作区 '{name}' 是当前活跃工作区，请先切换到其它工作区再删除"
+                )
+
+            p = Path(ws["path"]).resolve()
+            root = self.data_root.resolve()
+            default_dir = _DEFAULT_WORKSPACE_DIR.resolve()
+            shared_dir = _SHARED_RESOURCES_DIR.resolve()
+
+            # 路径护栏：必须是 data_root 的严格后代（p.relative_to 成功且 p != root）
+            try:
+                p.relative_to(root)
+            except ValueError:
+                raise ValueError(
+                    f"工作区 '{name}' 目录不在数据根目录（{root}）内，"
+                    f"出于安全仅支持取消注册，请手动删除文件: {p}"
+                ) from None
+            if p == root or p == default_dir or p == shared_dir:
+                raise ValueError(f"工作区 '{name}' 目录是保留目录（{p}），拒绝删除")
+
+            if not p.exists():
+                # 目录已不存在：退化为仅取消注册
+                del workspaces[name]
+                reg["workspaces"] = workspaces
+                self._write_registry(reg)
+                self._cache = reg
+                self._cache_valid = True
+                _logger.info("[workspace] 彻底删除工作区 '%s'：目录不存在，仅移除注册", name)
+                return {"ok": True, "removed_dir": None}
+            if not p.is_dir():
+                raise ValueError(f"工作区 '{name}' 路径不是目录: {p}")
+
+            shutil.rmtree(p)
+            del workspaces[name]
+            reg["workspaces"] = workspaces
+            self._write_registry(reg)
+            self._cache = reg
+            self._cache_valid = True
+            _logger.info("[workspace] 彻底删除工作区 '%s' 及其目录: %s", name, p)
+            return {"ok": True, "removed_dir": str(p)}
 
     def _init_workspace_dirs(self, root: Path) -> None:
         """初始化工作区子目录结构（如不存在则创建）。"""

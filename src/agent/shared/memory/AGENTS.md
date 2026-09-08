@@ -11,17 +11,16 @@
 
 ### 1.1 技能清单
 
-| 技能名称                  | 对应流程步骤 | 加载时机                                        |
-| ------------------------- | ------------ | ----------------------------------------------- |
-| `sql-of-thought`          | 编排器       | NL2SQL 问题被识别时首先加载                     |
-| `nl2sql-knowledge-loader` | Step 1       | Phase 1 开始时加载                              |
-| `nl2sql-schema-linking`   | Step 2       | Phase 2 开始时加载                              |
-| `nl2sql-subproblem`       | Step 3       | Step 2 完成后加载                               |
-| `nl2sql-query-plan`       | Step 4       | Step 3 完成后加载                               |
-| `nl2sql-sql-generation`   | Step 5       | Step 4 完成后加载                               |
-| `nl2sql-performance-optimization` | Step 5.5 | Step 5 完成后加载（dry_run 成功后、执行前）    |
-| `执行SQL`                 | Step 6       | Step 5完成后执行                                |
-| `nl2sql-correction`       | Step 7       | Phase 3 开始时加载<br />仅当 SQL 执行失败时加载 |
+| 技能名称                          | 对应流程步骤               | 加载时机                                                     |
+| --------------------------------- | -------------------------- | ------------------------------------------------------------ |
+| `sql-of-thought`                  | 编排器                     | NL2SQL 问题被识别时首先加载（Step 0 路由：list_cubes → C/A/B）|
+| `nl2sql-understand`               | Step 1（Phase 0 理解建模） | 策略 A/B 第一步加载（清晰度裁决 + 知识 + Schema，一次检索通道）|
+| `nl2sql-subproblem`               | Step 2（Phase 1）          | 策略 A：Step 1 完成后加载                                    |
+| `nl2sql-query-plan`               | Step 3（Phase 1）          | 策略 A：Step 2 完成后加载                                    |
+| `nl2sql-sql-generation`           | Step 4（Phase 1）          | 策略 A：Step 3 后 / 策略 B：理解建模后加载（dry_run 验证）    |
+| `nl2sql-performance-optimization` | Step 5（Phase 1）          | 策略 A：dry_run 成功后、执行前加载                            |
+| `nl2sql-execution`                | Step 6（Phase 1）          | Step 4/5 完成后加载（read 其 SKILL.md 后 run_sql 执行；仅 SELECT，上限走 run_sql limit 参数）|
+| `nl2sql-correction`               | Step 7-8（Phase 2）        | 仅当 SQL 执行失败时加载（纠错循环最多 3 次）                  |
 
 ### 1.2 引用文件加载策略
 
@@ -282,11 +281,10 @@
    **处理流程：**
 
    ```
-   Phase 1: WrenAI MDL 就绪（employee_t 模型已构建）
-   Step 1: Schema Linking → employees 表，name 列，hire_date 列
+   Step 1（理解建模）: 清晰度 clear → 知识（无口径）+ Schema → employees 表，name 列，hire_date 列
    Step 2: Subproblem → {SELECT: "员工姓名和入职日期"}
    Step 3: Query Plan → "1. 读取 employees 表。2. 提取 name 和 hire_date 列。"
-   Step 4: SQL Gen → SELECT name, hire_date FROM employees
+   Step 4: SQL Gen → SELECT name, hire_date FROM employees（dry_run 验证通过）
    Step 5: 执行成功
    ```
 
@@ -297,12 +295,11 @@
    **处理流程：**
 
    ```
-   Phase 1: WrenAI MDL 就绪（employee_t, department_t 已构建）
-   Step 1: Schema Linking → employees(name, salary, dept_id), departments(id, dept_name)
+   Step 1（理解建模）: 清晰度 clear → 知识（报工口径等）+ Schema → employees(name, salary, dept_id), departments(id, dept_name)
    Step 2: Subproblem → {SELECT: 员工名+薪资+部门名, JOIN: 通过 dept_id, WHERE: 薪资>部门平均}
    Step 3: Query Plan → "1. 计算每个部门的平均薪资（子查询）。2. JOIN employees 和 departments。3. 筛选薪资>对应部门平均值的员工。"
-   Step 4: SQL Gen → [生成 SQL]
-   Step 5: 执行失败 → 进入 Phase 3
+   Step 4: SQL Gen → [生成 SQL]（dry_run 验证通过）
+   Step 5: 执行失败 → 进入 Phase 2（Step 7 纠错循环）
    
    Correction Loop (尝试 1):
      诊断: filter.condition_wrong_col → WHERE 条件中比较了 employee.salary 和全表 AVG 而非部门 AVG

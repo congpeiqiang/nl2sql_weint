@@ -10,8 +10,8 @@ token），且极易在途中漏掉/改写 iframe 导致报告不可交互。
 
 - `check_async_task` 最近一次 success 的 ToolMessage：其 content 是 JSON，
   内含格式化的数据表 + 洞察 + SQL（约 1.2k chars）。
-- `generate_echarts` 最近一次的 ToolMessage：content 内含可交互 iframe
-  （约 3.5k chars，base64 内嵌）。
+- `generate_echarts` 的 ToolMessage（全部，多图按出现顺序去重收集）：
+  content 内含可交互 iframe（每张约 3.5k chars，base64 内嵌）。
 
 文件名含时分秒：`{report_name}_{YYYY-MM-DD_HH-mm-ss}.md`（满足「报告生成
 包含时分秒」要求），落盘到当前活跃工作区 report/ 目录，返回 VFS 路径。
@@ -33,6 +33,28 @@ _RE_IFRAME = re.compile(r"<iframe[\s\S]*?</iframe>", re.IGNORECASE)
 _SAFE_FNAME = re.compile(r'[\\/:*?"<>|\r\n]+')
 # 全量结果表内嵌上限：超过则只给路径链接（防病理性超大表把报告文件撑爆）
 _EMBED_MAX_BYTES = 4 * 1024 * 1024
+
+# 数据结果文本内 ```sql 围栏块（子 agent 常在结果里自带产出 SQL，防报告重复成节）
+_SQL_FENCE_RE = re.compile(r"```sql[ \t]*\n?([\s\S]*?)```", re.IGNORECASE)
+
+
+def _result_already_contains_sql(result_text, sql) -> bool:
+    """result_text 是否已含与 sql 同一条 SQL（免报告重复生成「执行 SQL」节）。
+
+    ① 任一 ```sql 围栏块归一化（折叠空白）后 == sql —— 子 agent 把产出 SQL 以多行
+    围栏写在结果里时，换行/缩进逐字节不等，归一化后视为同一 SQL（trace d60b
+    标量双计数）；② 或 sql 以原文出现在 result_text（保留旧语义防原样重复）。
+    """
+    if not sql:
+        return True
+    text = str(result_text or "")
+    if not text:
+        return False
+    norm = lambda s: " ".join(str(s).split())
+    for m in _SQL_FENCE_RE.finditer(text):
+        if norm(m.group(1)) == norm(sql):
+            return True
+    return sql in text
 
 
 def _full_table_section(result_obj) -> str:
@@ -145,14 +167,63 @@ def _find_last_check_result(messages, task_id: str):
     return best
 
 
-def _find_last_iframe(messages) -> str:
-    """最近一个 generate_echarts 返回的完整 iframe 标签（原样保留）。"""
-    best = ""
-    for m in messages:
-        m = _RE_IFRAME.search(_msg_content(m))
-        if m:
-            best = m.group(0)
-    return best
+def _find_all_iframes(messages) -> list[str]:
+    """全部 generate_echarts 返回的完整 iframe 标签（原样保留，按出现顺序去重）。
+
+    2026-09-08 修复：此前只取最后一张（_find_last_iframe），会话生成两张图时
+    报告附录只嵌第 2 张（thread 01a07fd4 堆叠条形图+热力图只剩热力图）。
+    去重防同一 iframe 被模型在最终回复里复述时重复嵌入。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for msg in messages:
+        for m in _RE_IFRAME.finditer(_msg_content(msg)):
+            tag = m.group(0)
+            if tag not in seen:
+                seen.add(tag)
+                out.append(tag)
+    return out
+
+
+def _current_turn_start(messages) -> int:
+    """当前问题轮次的起点：最后一条真实用户消息的下标。
+
+    跳过 [系统自动通知] 注入（子任务超时/完成续跑的系统消息，非用户新问题）——
+    超时接管流程里图表生成在通知之后，锚定真实提问才能把它们收进来。
+    找不到则回退 0（整个历史，兼容无 human 消息的合成场景）。
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if isinstance(m, dict):
+            role = m.get("type") or m.get("role")
+            text = _msg_content(m)
+        else:
+            role = getattr(m, "type", "")
+            text = _msg_content(m)
+        if role in ("human", "user") and not text.lstrip().startswith("[系统自动通知]"):
+            return i
+    return 0
+
+
+def _turn_chart_iframes(messages) -> list[str]:
+    """当前问题轮次 generate_echarts 产出的全部图表 iframe（按序去重）。
+
+    作用域双重收窄（2026-09-08，用户要求报告只保存当前问题的图）：
+    1. 轮次：只扫最后一条真实用户消息之后的片段 → 历史问题的图不进本报告；
+    2. 消息角色：只认 tool 结果（图表必然以 generate_echarts 的 ToolMessage
+       到达）；AI 文本里的 iframe 复述一律不计——既天然去重本轮复述，也排除
+       模型在答复里引用历史轮次图表的边界情况。
+    """
+    turn = messages[_current_turn_start(messages):]
+    tool_msgs = []
+    for m in turn:
+        if isinstance(m, dict):
+            role = m.get("type") or m.get("role")
+        else:
+            role = getattr(m, "type", "")
+        if role in ("tool", "tool_result"):
+            tool_msgs.append(m)
+    return _find_all_iframes(tool_msgs)
 
 
 class BuildReportSchema(BaseModel):
@@ -194,7 +265,9 @@ async def _build_report_coro(
     sql = _obj.get("sql", "") if isinstance(_obj, dict) else ""
     sql = sql.strip() if isinstance(sql, str) else ""
 
-    iframe = _find_last_iframe(messages)
+    # 只收「当前问题」轮次的图表（_turn_chart_iframes：轮次锚定 + 仅 tool 结果），
+    # 历史问题生成的 iframe 不进本报告（用户明确要求：报告只保存当前 trace 的图）
+    iframes = _turn_chart_iframes(messages)
 
     now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     safe_name = _SAFE_FNAME.sub("_", report_name).strip(" ._") or "report"
@@ -214,18 +287,33 @@ async def _build_report_coro(
     if full_table:
         md_parts += [f"\n## {next_section}. 完整数据表\n", full_table]
         next_section += 1
-    # 模型最终回复若已含该 SQL（result_text 命中）则不重复成节
-    if sql and sql not in str(result_text):
-        md_parts += [f"\n## {next_section}. 执行 SQL\n", f"```sql\n{sql}\n```"]
-        next_section += 1
+    # 模型最终回复若已含同一条 SQL（原文或围栏块归一化相等）则不重复成节。
+    # 注记（sql_note：wren 通道方言提示 / 明细口径注）在跳节时也照样渲染——
+    # 否则内嵌 SQL 的 wren/PG 方言没有任何警示，用户直连 MySQL 跑必炸
+    # （2026-09-08 INTERVAL '1 year' 实例）。
+    if sql:
+        _sql_note = _obj.get("sql_note") if isinstance(_obj, dict) else ""
+        if _result_already_contains_sql(str(result_text), sql):
+            _logger.info("[build_report] 数据结果已含同 SQL（原文/围栏归一化），跳过追加「执行 SQL」节")
+            if _sql_note:
+                md_parts += ["", f"> {_sql_note}"]
+        else:
+            md_parts += [f"\n## {next_section}. 执行 SQL\n", f"```sql\n{sql}\n```"]
+            if _sql_note:
+                md_parts += ["", f"> {_sql_note}"]
+            next_section += 1
     md_parts += [f"\n## {next_section}. 分析解读\n", str(analysis).strip()]
     next_section += 1
-    if iframe:
-        md_parts += [
-            f"\n## {next_section}. 附录：交互式图表\n",
-            iframe,
-            "\n\n> 💡 可交互图表：鼠标悬停查看数值、可缩放。",
-        ]
+    if iframes:
+        md_parts += [f"\n## {next_section}. 附录：交互式图表\n"]
+        for _i, _ifr in enumerate(iframes, 1):
+            if len(iframes) > 1:
+                # 多图各加小节标题（前端 MarkdownContent 按 iframe 切分原位渲染，
+                # 小节标题不影响切分）；单图保持旧版排版不加标题
+                md_parts += [f"### 图表 {_i}", _ifr, ""]
+            else:
+                md_parts += [_ifr]
+        md_parts += ["\n> 💡 可交互图表：鼠标悬停查看数值、可缩放。"]
     else:
         md_parts.append(f"\n## {next_section}. 附录\n\n（本次任务未生成交互式图表）")
 
@@ -252,7 +340,7 @@ async def _build_report_coro(
         f"报告已生成：{vfs_path}\n"
         f"- 标题：{report_name}\n"
         f"- 生成时间：{now}\n"
-        f"- 内容：数据结果、分析解读" + ("、内嵌交互式图表" if iframe else "") + "\n"
+        f"- 内容：数据结果、分析解读" + (f"、内嵌交互式图表×{len(iframes)}" if iframes else "") + "\n"
         "请在最终回复中告知用户报告文件路径。"
     )
 

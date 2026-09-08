@@ -5,6 +5,7 @@ MCP 工具管理模块 - 支持主智能体和子智能体工具独立加载
 import logging
 import os
 import sys
+import time
 import asyncio
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -38,6 +39,13 @@ _sub_tools: Optional[List] = None  # 子智能体工具 (wrenai)
 _all_tools: Optional[List] = None  # 所有工具（向后兼容）
 _tools_loaded = False
 _mcp_server_results: Dict[str, str] = {}  # server_name → "ok" | error message
+_mcp_server_tool_counts: Dict[str, int] = {}  # server_name → 成功加载的工具数（失败=0）
+
+# 关键 server 前缀：语义层（wrenai_*）与 SQL 直连执行（dbmcp）——缺任何一个，
+# 建模库查询整体失效（2026-09-08 事故：wrenai_WIT 加载失败被总数"✅ 预检通过: 20"
+# 掩盖，子 agent 0 语义工具，查询退化成 10 分钟撞墙+僵尸续跑）。
+# 关键 server 失败 → 启动预检拒绝启动（MCP_ALLOW_DEGRADED=1 可显式降级）。
+_CRITICAL_SERVER_PREFIXES = ("wrenai_", "dbmcp")
 
 
 class MCPToolsLoadError(RuntimeError):
@@ -71,55 +79,67 @@ def _load_mcp_servers(servers: Dict[str, Any], server_type: str = "unknown") -> 
 
     try:
         for name, config in servers.items():
-            try:
-                print(f"  ⏳ [{server_type}] 连接 {name}...", flush=True)
+            # 每 server 两次尝试（子进程偶发起步慢/瞬断，一次重试消掉大部分误报；
+            # 持久性故障如 target/mdl.json 缺失重试无济于事，照常记 FAILED）
+            wrapped = None
+            last_msg = ""
+            for attempt in (1, 2):
+                try:
+                    suffix = "" if attempt == 1 else f"（重试 {attempt}/2）"
+                    print(f"  ⏳ [{server_type}] 连接 {name}{suffix}...", flush=True)
 
-                # 捕获 MCP 客户端的冗余输出
-                f = io.StringIO()
-                with redirect_stdout(f), redirect_stderr(f):
-                    client = MultiServerMCPClient({name: config}, tool_name_prefix=True)
-                    tools = loop.run_until_complete(
-                        asyncio.wait_for(
-                            client.get_tools(),
-                            timeout=60.0
+                    # 捕获 MCP 客户端的冗余输出
+                    f = io.StringIO()
+                    with redirect_stdout(f), redirect_stderr(f):
+                        client = MultiServerMCPClient({name: config}, tool_name_prefix=True)
+                        tools = loop.run_until_complete(
+                            asyncio.wait_for(
+                                client.get_tools(),
+                                timeout=60.0
+                            )
                         )
-                    )
 
-                # Wren 语义层工具注入 project_path，供 wrap_tool 快速路径使用
-                # （get_context / recall_queries 在主进程直接调用 wren API，
-                #  绕过 MCP 子进程 + MemoryStore 420MB 嵌入模型加载）
-                if name.startswith("wrenai_"):
-                    try:
-                        from agent.utils.semantic_db import get_detector, wrenai_server_name
-                        _det = get_detector()
-                        _injected = 0
-                        for _t in tools:
-                            for _db in _det.discover():
-                                _proj = _det.project_path_for(_db)
-                                if _proj and name == wrenai_server_name(_db):
-                                    _t._wren_project_path = str(_proj)
-                                    _injected += 1
-                                    break
-                        if _injected > 0:
-                            _logger.info("[MCP] %s: 已注入 _wren_project_path 到 %d 个工具", name, _injected)
-                        else:
-                            _logger.warning("[MCP] %s: 未匹配到任何数据库，fast-path 将不可用", name)
-                    except Exception as e:
-                        _logger.warning("[MCP] %s: _wren_project_path 注入失败（%s: %s），fast-path 将不可用", name, type(e).__name__, e)
+                    # Wren 语义层工具注入 project_path，供 wrap_tool 快速路径使用
+                    # （get_context / recall_queries 在主进程直接调用 wren API，
+                    #  绕过 MCP 子进程 + MemoryStore 420MB 嵌入模型加载）
+                    if name.startswith("wrenai_"):
+                        try:
+                            from agent.utils.semantic_db import get_detector, wrenai_server_name
+                            _det = get_detector()
+                            _injected = 0
+                            for _t in tools:
+                                for _db in _det.discover():
+                                    _proj = _det.project_path_for(_db)
+                                    if _proj and name == wrenai_server_name(_db):
+                                        _t._wren_project_path = str(_proj)
+                                        _injected += 1
+                                        break
+                            if _injected > 0:
+                                _logger.info("[MCP] %s: 已注入 _wren_project_path 到 %d 个工具", name, _injected)
+                            else:
+                                _logger.warning("[MCP] %s: 未匹配到任何数据库，fast-path 将不可用", name)
+                        except Exception as e:
+                            _logger.warning("[MCP] %s: _wren_project_path 注入失败（%s: %s），fast-path 将不可用", name, type(e).__name__, e)
 
-                wrapped = [wrap_tool(t) for t in tools]
+                    wrapped = [wrap_tool(t) for t in tools]
+                    break
+                except asyncio.TimeoutError:
+                    last_msg = "连接超时 (60秒)"
+                except Exception as e:
+                    last_msg = f"{type(e).__name__}: {e}"
+                if attempt == 1:
+                    print(f"  ⚠️ [{server_type}] {name}: {last_msg} —— 3 秒后重试", flush=True)
+                    time.sleep(3)
+
+            if wrapped is None:
+                _mcp_server_results[name] = last_msg
+                _mcp_server_tool_counts[name] = 0
+                print(f"  ❌ [{server_type}] {name}: FAILED — {last_msg}（含重试共 2 次尝试）", flush=True)
+            else:
                 all_tools.extend(wrapped)
                 _mcp_server_results[name] = "ok"
+                _mcp_server_tool_counts[name] = len(wrapped)
                 print(f"  ✅ [{server_type}] {name}: {len(wrapped)} tools loaded", flush=True)
-
-            except asyncio.TimeoutError:
-                msg = f"连接超时 (60秒)"
-                _mcp_server_results[name] = msg
-                print(f"  ❌ [{server_type}] {name}: {msg}", flush=True)
-            except Exception as e:
-                msg = f"{type(e).__name__}: {e}"
-                _mcp_server_results[name] = msg
-                print(f"  ❌ [{server_type}] {name}: FAILED — {msg}", flush=True)
     finally:
         loop.close()
 
@@ -256,7 +276,14 @@ def load_main_tools() -> List:
     servers = _get_main_server_config()
     _main_tools = _load_mcp_servers(servers, "main")
 
-    print(f"✅ 主智能体 MCP 工具加载完成: {len(_main_tools)} 个工具", flush=True)
+    # 组内任一 server 失败 → 汇总行不许再打 ✅（2026-09-08：wrenai 挂了
+    # 汇总仍是"✅ ...加载完成"，把失败盖住）
+    failed_here = [n for n in servers if _mcp_server_results.get(n) != "ok"]
+    if failed_here:
+        print(f"⚠️ 主智能体 MCP 工具加载完成: {len(_main_tools)} 个工具"
+              f"（失败 server: {', '.join(failed_here)}，详见上方 ❌）", flush=True)
+    else:
+        print(f"✅ 主智能体 MCP 工具加载完成: {len(_main_tools)} 个工具", flush=True)
     return _main_tools
 
 
@@ -273,7 +300,13 @@ def load_sub_tools() -> List:
     servers = _get_sub_server_config()
     _sub_tools = _load_mcp_servers(servers, "sub")
 
-    print(f"✅ 子智能体 MCP 工具加载完成: {len(_sub_tools)} 个工具", flush=True)
+    # 同 load_main_tools：组内有失败 server 时汇总行降级为 ⚠️ 并点名
+    failed_here = [n for n in servers if _mcp_server_results.get(n) != "ok"]
+    if failed_here:
+        print(f"⚠️ 子智能体 MCP 工具加载完成: {len(_sub_tools)} 个工具"
+              f"（失败 server: {', '.join(failed_here)}，详见上方 ❌）", flush=True)
+    else:
+        print(f"✅ 子智能体 MCP 工具加载完成: {len(_sub_tools)} 个工具", flush=True)
     return _sub_tools
 
 
@@ -317,6 +350,44 @@ def check_mcp_readiness():
         print("⚠️  主智能体工具加载失败，图表生成功能不可用", flush=True)
     if not sub_ok:
         print("⚠️  子智能体工具加载失败，NL2SQL 功能不可用", flush=True)
+
+
+def mcp_allow_degraded() -> bool:
+    """MCP_ALLOW_DEGRADED=1/true/yes/on 时允许关键 server 缺失仍降级启动。
+
+    默认 False：wrenai_*/dbmcp 加载失败 → 启动预检拒绝启动（响亮失败）。
+    降级启动仅用于明确知道语义层/直连不可用仍要保住其余功能（echarts/报告/闲聊）
+    的运维场景——建模库查询会整体失效，勿常态使用。
+    """
+    return (os.getenv("MCP_ALLOW_DEGRADED", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def evaluate_mcp_preflight() -> Dict[str, Any]:
+    """按 server 的启动预检判决（纯函数，读模块级加载结果；可离线单测）。
+
+    2026-09-08 教训：wrenai_WIT 加载失败被"✅ 预检通过: 20 个 MCP 工具就绪"
+    的总数掩盖（18 echarts + 2 dbmcp），语义层静默缺失 → 建模库查询全线退化。
+    本函数把判决粒度落到每个 server：
+
+    Returns:
+        {"ok": 全部 server 成功,
+         "failed": {name: 失败原因},
+         "critical_failed": [命中 _CRITICAL_SERVER_PREFIXES 的失败 server 名],
+         "counts": {name: 工具数},
+         "allow_degraded": MCP_ALLOW_DEGRADED 开关,
+         "block_startup": 关键 server 失败且未允许降级 → 调用方应 sys.exit(1)}
+    """
+    failed = {n: s for n, s in _mcp_server_results.items() if s != "ok"}
+    critical = [n for n in failed if n.startswith(_CRITICAL_SERVER_PREFIXES)]
+    allow = mcp_allow_degraded()
+    return {
+        "ok": not failed,
+        "failed": failed,
+        "critical_failed": critical,
+        "counts": dict(_mcp_server_tool_counts),
+        "allow_degraded": allow,
+        "block_startup": bool(critical) and not allow,
+    }
 
 
 # ── 8. 获取工具状态 ──────────────────────────────────────

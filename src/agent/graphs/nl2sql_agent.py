@@ -18,11 +18,14 @@ from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
 from agent.middlewares.quota_error import QuotaErrorMiddleware
 from agent.middlewares.model_timeout import ModelTimeoutMiddleware
 from agent.middlewares.sql_approval import build_sql_approval_middleware
+from agent.middlewares.query_gate import QueryGateMiddleware
 from agent.middlewares.tool_filter import ToolFilterMiddleware
 from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
+from agent.middlewares.message_slimmer import MessageSlimmerMiddleware
 from agent.middlewares.query_result_offload import QueryResultOffloadMiddleware
 from agent.middlewares.write_todos import WriteTodosProtocolMiddleware
 from agent.middlewares.progress_boundary import ProgressBoundaryMiddleware
+from agent.middlewares.dangling_tool_calls import DanglingToolCallsMiddleware
 from agent.tools.mcp_tool import sub_tools as mcp_tools
 from agent.subagents.track_progress import ProgressTrackerMiddleware
 from agent.settings.file_permissions import NL2SQL_FILE_PERMISSIONS
@@ -214,6 +217,11 @@ _middleware = [
     # 层2 监督机：after_model 确定性推进 write_todos（模型中途不自发更新也保证
     # 每阶段边界推进；本轮模型自己已写 write_todos 时自动跳过，不打架）。
     ProgressBoundaryMiddleware(),
+    # 400 兜底：每轮 model 前为 orphan tool_call_id 补合成 ToolMessage(status=error)
+    # （模型单轮并发 thinking 偶发坏 JSON → invalid_tool_call → 下轮 payload 少 tool
+    # 响应 → DeepSeek 400「insufficient tool messages」；见 dangling_tool_calls.py docstring）。
+    # run 级 PatchToolCalls 只管起点存量，本中间件补 run 中途新产生的（before_model 每轮触发）。
+    DanglingToolCallsMiddleware(),
     # 与主 agent 同构：按 configurable.llm_route/llm_model 重建模型。
     # 否则子 agent 用模块级 deepseek_model（import 时按 active provider 创建），
     # 前端切模型（如 DeepSeek 官方 API）只对主 agent 生效，子 agent 仍打旧 provider。
@@ -223,6 +231,15 @@ _middleware = [
     # 含 eval-subject 参考答案）。静态层 NL2SQL_FILE_PERMISSIONS 已 deny 掉
     # conversation_history/report；本护栏补足「process_data 只读自有线程」。
     FilesystemThreadGuardMiddleware(),
+    # 通用大结果裁剪（与 main_agent MessageSlimmer 同构；2026-09-07 补）：
+    # 此前仅 QueryResultOffload 管 run_sql，read_file/grep/describe_schema 等
+    # 80KB 级结果原样进 state → 私有 Ollama num_ctx 前截断丢 user 查询 → 500
+    # （trace d5ba61f 的 grep 80,070 字符）。须在 QueryResultOffload 之外层：
+    # wrap_tool_call 链 first=outermost，外层后处理最后跑——run_sql 先被内层
+    # QueryResultOffload 结构化瘦成 {row_count, rows, full_result_file}（<8000
+    # 本层直接放行），read_file/grep 等非 run_sql 大结果由本层统一截断
+    # head+tail+文件指针，落 /workspace/large_tool_results/<tool_call_id>。
+    MessageSlimmerMiddleware(backend=composite_backend),
     # 大结果表落盘 + 消息瘦身（431 部门人数 228s 静默治本）：
     # 必须在 LangfuseSpan 之前（外层）——langchain wrap_tool_call 链 first=outermost，
     # 外层在 handler 返回后做后处理，故 LangfuseSpan 的 span output / LLM-judge /
@@ -233,6 +250,12 @@ _middleware = [
     LangfuseSpanMiddleware(),
     dynamic_prompt,
 ]
+# 前段理解建模软兜底：run_sql/dry_run/dry_plan 执行前检查是否做过任一获取
+# （get_context/get_instructions/recall_queries/describe_schema/...），一个都没做 →
+# 返回指导性错误 ToolMessage 提醒先按 nl2sql-understand 完成清晰度裁决+知识+Schema。
+# 软提示非硬拦、每线程至多一次、Cube 通道豁免。须在 LangfuseSpan 内层（被拦工具仍
+# 在 span 里可见）、SqlReadOnly 硬闸外层（写/DDL 仍由硬闸兜底）。
+_middleware.append(QueryGateMiddleware())
 if sql_approval_middleware is not None:
     _middleware.append(sql_approval_middleware)
 _middleware.append(WriteTodosProtocolMiddleware())

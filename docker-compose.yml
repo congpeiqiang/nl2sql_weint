@@ -1,9 +1,10 @@
 # NL2SQL 生产部署 — Docker Compose
 #
-# 架构：nginx:80 → frontend:3000 + langgraph-api:2026 → 宿主机 PostgreSQL:5432
+# 架构：nginx:80 → frontend:3000 + langgraph-api:2026 → postgres:5432（compose 内服务）
 #
 # 部署前提：
-#   1. 宿主机 PostgreSQL 已创建 nl2sql_checkpoint 库（见 docs/langfuse平台/Langfuse连接说明.md）
+#   1. checkpoint 库由 compose 内 postgres 服务首启自动创建（POSTGRES_DB 环境变量，
+#      无需手工 SQL；与 Langfuse 自带的 5433 PG 实例完全隔离）
 #   2. 前端仓库 harness-deep-agents-ui 已克隆到同级目录
 #   3. .env.prod 已配置实际密钥
 #
@@ -22,8 +23,9 @@ services:
       # .env.prod（prod）还是 .env（dev）。必须由这里预注入，不能从文件读回。
       DEPLOY_ENV: prod
       DATABASE_URI: ":memory:"
-      # 通过 Docker 网关 172.17.0.1 访问宿主机 PostgreSQL
-      CHECKPOINT_DB_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@172.17.0.1:5432/nl2sql_checkpoint
+      # compose 内 postgres 服务（服务名 DNS，同项目默认网络直达；
+      # environment 优先级高于 env_file，这里是 CHECKPOINT_DB_URI 的权威值）
+      CHECKPOINT_DB_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@postgres:5432/nl2sql_checkpoint
       WREN_BIN_PATH: wren
       LANGGRAPH_API_URL: http://langgraph-api:2026
       # 容器内 UTF-8 locale：否则 ls/cat 对中文文件名/内容显示 octal 转义（$'\345...'）
@@ -34,6 +36,9 @@ services:
       # 首次启动 WorkspaceManager 自动从镜像内 src/agent/{shared,workspace} 拷贝种子。
       # 存量升级：把旧 workspace 卷内容拷入 /app/data/workspace（见部署手册 §6）。
       - agent_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     # 内存限制（服务器 3.4GB，Langfuse 已占 ~2GB）
     deploy:
       resources:
@@ -45,6 +50,35 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    restart: unless-stopped
+
+  # ── Checkpoint 存储：PostgreSQL 14（独立实例，与 Langfuse 的 5433 PG 完全隔离）──
+  # 首启按 POSTGRES_* 自动建库建用户；表结构由后端 AsyncPostgresSaver.setup()
+  # 幂等创建（checkpoints / checkpoint_writes / checkpoint_blobs / checkpoint_migrations）。
+  # 不发布端口：仅 compose 内网可达；需宿主机 psql 管理时临时加 "127.0.0.1:5432:5432"。
+  postgres:
+    # 与服务器在跑容器一致（daocloud 镜像源 + 非 alpine）：发版 recreate 时不换镜像
+    image: docker.m.daocloud.io/postgres:14
+    environment:
+      POSTGRES_USER: nl2sql
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-nl2sql_secret}
+      POSTGRES_DB: nl2sql_checkpoint
+    ports:
+      # LAN 可达（2026-09-08 用户决定放开，与 5433/5434 同款 0.0.0.0 绑定）
+      - "5435:5432"
+    volumes:
+      # 卷键必须与服务器在跑容器一致（实际卷名 nl2sql-app_nl2sql_pg_data）：
+      # 改名会挂全新空卷，11 天会话历史被孤立（2026-09-08 inspect Mounts 确认）
+      - nl2sql_pg_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nl2sql -d nl2sql_checkpoint"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   # ── 前端：Next.js ──
@@ -82,3 +116,4 @@ services:
 
 volumes:
   agent_data:
+  nl2sql_pg_data:
