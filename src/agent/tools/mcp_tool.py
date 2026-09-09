@@ -173,8 +173,10 @@ def _get_sub_server_config() -> Dict[str, Any]:
     - ``dbmcp``：db_mcp_server 直连（按 db_name 路由到对应库的 runner），
       工具前缀 ``dbmcp_``。由 .env 的 ``NL2SQL_DBMCP_ENABLED`` 控制（默认开）。
 
-    注意：server 在进程启动时按 db_config 构建（工具单例缓存），前端新增/修改
-    wren_project 后需重启后端生效。
+    注意：server 列表在进程启动时按 db_config 构建（工具单例缓存），前端**新增/
+    删除语义库**、或改动某库的 wren_project 关联后需重启后端生效。语义库内容更新
+    （git 更新 + 重新构建）**无需重启**——每次工具调用都会新起 MCP 子进程读
+    ``target/mdl.json``（见 langchain_mcp_adapters get_tools 的 session 语义）。
     """
     from agent.utils.semantic_db import get_detector, wrenai_server_name
 

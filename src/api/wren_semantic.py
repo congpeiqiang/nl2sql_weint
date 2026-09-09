@@ -1247,7 +1247,7 @@ async def ai_generate_knowledge(request: Request):
 
 
 async def git_status(request: Request):
-    """检查语义库的 Git 状态（是否有远程更新）。"""
+    """检查语义库的 Git 状态（是否有远程更新 / 本地未提交改动）。"""
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1259,18 +1259,23 @@ async def git_status(request: Request):
     from agent.utils import git_repo
 
     cwd = str(project)
+    info = git_repo.repo_info(cwd) or {}
+    branch = info.get("branch", "") or ""
+    local_head = git_repo._rev_parse(cwd, "HEAD")
 
-    # fetch 远程信息
-    ok, out = git_repo._run(["fetch", "origin", "--dry-run"], cwd=cwd, timeout=30)
-    has_updates = False
-    if ok:
-        # 比较本地和远程 HEAD
-        ok_local, local_head = git_repo._run(["rev-parse", "HEAD"], cwd=cwd)
-        ok_remote, remote_head = git_repo._run(["rev-parse", "origin/HEAD"], cwd=cwd)
-        if ok_local and ok_remote:
-            has_updates = local_head.strip() != remote_head.strip()
+    # 远程比对不用 origin/HEAD：浅克隆 / 按 tag 建的仓库没有这个符号引用
+    # （2026-09-09 事故：has_updates 恒 False）。改为 ls-remote 实时取远程分支 sha。
+    remote = git_repo.list_remote_refs(cwd)
+    remote_branch = (
+        branch
+        if any(b["name"] == branch for b in remote["branches"])
+        else remote["default_branch"]
+    )
+    remote_sha = next(
+        (b["sha"] for b in remote["branches"] if b["name"] == remote_branch), ""
+    )
+    has_updates = bool(local_head and remote_sha and local_head != remote_sha)
 
-    # 检查本地未提交的修改
     ok_status, status_out = git_repo._run(["status", "--porcelain"], cwd=cwd)
     has_local_changes = bool(status_out.strip()) if ok_status else False
 
@@ -1279,12 +1284,47 @@ async def git_status(request: Request):
         "is_git": True,
         "has_updates": has_updates,
         "has_local_changes": has_local_changes,
-        "branch": git_repo.repo_info(str(project)).get("branch", "") if git_repo.repo_info(str(project)) else "",
+        "branch": branch,
+        "commit": info.get("commit", ""),
+        "remote_branch": remote_branch,
+        "remote_commit": remote_sha[:7] if remote_sha else "",
+        "default_branch": remote["default_branch"],
+    })
+
+
+async def git_refs(request: Request):
+    """列出语义库远程分支/tag（供前端「更新」对话框选择）。"""
+    name = request.path_params["name"]
+    project = _find_project(name)
+    if project is None:
+        return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
+
+    if not (project / ".git").exists():
+        return json_response({
+            "ok": True, "is_git": False,
+            "default_branch": "", "branches": [], "tags": [],
+        })
+
+    from agent.utils import git_repo
+
+    refs = git_repo.list_remote_refs(str(project))
+    info = git_repo.repo_info(str(project)) or {}
+    return json_response({
+        "ok": True,
+        "is_git": True,
+        "current_branch": info.get("branch", ""),
+        "current_commit": info.get("commit", ""),
+        **refs,
     })
 
 
 async def git_pull(request: Request):
-    """从远程仓库拉取更新。"""
+    """把语义库更新到远程指定 ref（分支/tag）；不传 ref → 远程默认分支最新。
+
+    ref 来源：query `?ref=<分支或tag>` 优先，其次 JSON body `{"ref": "..."}`。
+    传分支 → 重置本地同名分支到远程（并修复被 tag 锁死的 refspec）；传 tag →
+    detached 检出该 tag。核心逻辑在 git_repo.pull_ref（含本地改动/未推送提交护栏）。
+    """
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1293,15 +1333,23 @@ async def git_pull(request: Request):
     if not (project / ".git").exists():
         return json_response({"error": "该语义库不是 Git 仓库"}, status=400)
 
+    ref = (request.query_params.get("ref") or "").strip()
+    if not ref:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001  无 body / 非 JSON
+            body = None
+        if isinstance(body, dict):
+            ref = str(body.get("ref") or "").strip()
+
     from agent.utils import git_repo
 
-    cwd = str(project)
-
-    ok, out = git_repo._run(["pull", "origin"], cwd=cwd, timeout=120)
-    if not ok:
-        return json_response({"error": f"git pull 失败: {out}"}, status=500)
-
-    return json_response({"ok": True, "message": f"拉取成功: {out}"})
+    result = git_repo.pull_ref(str(project), ref)
+    if not result.get("ok"):
+        return json_response({"error": result.get("message", "更新失败")}, status=400)
+    if result.get("changed"):
+        _invalidate_detector()  # 拉取可能改到 wren_project.yml，刷新项目探测缓存
+    return json_response(result)
 
 
 async def get_git_ssh_key(request: Request):
@@ -1344,6 +1392,7 @@ routes: list[BaseRoute] = [
     Route("/api/wren-projects/{name}/knowledge/read", read_knowledge, methods=["GET"]),
     Route("/api/wren-projects/{name}/knowledge/ai-generate", ai_generate_knowledge, methods=["POST"]),
     Route("/api/wren-projects/{name}/git-status", git_status, methods=["GET"]),
+    Route("/api/wren-projects/{name}/git-refs", git_refs, methods=["GET"]),
     Route("/api/wren-projects/{name}/git-pull", git_pull, methods=["POST"]),
     Route("/api/git-ssh-key", get_git_ssh_key, methods=["GET"]),
 ]
