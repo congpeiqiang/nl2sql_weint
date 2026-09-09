@@ -12,9 +12,10 @@ Dataset:badcase。
   0. `DEPLOY_ENV=prod`（docker-compose environment 注入 / 手动 export）才启用
      `.env.prod` 叠加；未设默认 dev → 只读 `.env`，不碰 `.env.prod`。
   1. 已注入的真实 env（docker env_file / 手动 export）恒优先——不覆盖。
-  2. `.env.prod` 的 `LANGFUSE_*`：`DEPLOY_ENV=prod` 下用它覆盖 `.env` 的 dev 值，
-     让脚本连生产项目。**仅 LANGFUSE_***——`.env.prod` 的 `AGENT_DATA_ROOT=/app/data`
-     是容器路径，宿主机/Windows 无效，绝不能让它覆盖 `.env` 的本机路径。
+  2. `.env.prod` 的 `LANGFUSE_*` / `NL2SQL_EVAL_*`：`DEPLOY_ENV=prod` 下用它覆盖
+     `.env` 的 dev 值，让脚本连生产项目、并遵循生产的评估开关。**仅这两个前缀**——
+     `.env.prod` 的 `AGENT_DATA_ROOT=/app/data` 是容器路径，宿主机/Windows 无效，
+     绝不能让它覆盖 `.env` 的本机路径。
   3. `.env`：开发基线（本机 AGENT_DATA_ROOT=D:\\nl2sql_data、dev 凭据等）。
 
 用法：
@@ -62,7 +63,7 @@ def load_env() -> None:
         prod_cfg = dotenv_values(prod) or {}
         for key, val in prod_cfg.items():
             if (
-                key.startswith("LANGFUSE_")
+                key.startswith(("LANGFUSE_", "NL2SQL_EVAL_"))
                 and val not in (None, "")
                 and key not in pre
             ):

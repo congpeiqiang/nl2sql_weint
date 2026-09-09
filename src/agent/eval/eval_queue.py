@@ -17,6 +17,11 @@
 用法：
     # 在线：evaluators.schedule_judge 内 enqueue + ensure_worker(执行体)
     # 运维：uv run python -m agent.eval.eval_queue --status | --replay
+
+评估开关（2026-09-09，agent/eval/eval_flags.py）：LLM-judge 关闭
+（NL2SQL_EVAL_JUDGE_ENABLED=0 或总开关 NL2SQL_EVAL_ENABLED=0）时守护 worker
+**暂停领取**（pending 留在队列里，重开自动续跑），不烧 token 也不丢任务；
+显式 `--replay` / `drain_all()` 属运维强制动作，不受开关限制。
 """
 from __future__ import annotations
 
@@ -31,6 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from agent.eval.eval_flags import judge_enabled
+
 _logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
@@ -39,6 +46,7 @@ _MAX_ATTEMPTS = 3          # 单任务最多尝试次数（超过置 failed 留�
 _CLAIM_BATCH = 5           # 每轮领取任务数
 _IDLE_SLEEP = 0.5          # 空队列轮询间隔（秒）
 _RETRY_SLEEP = 1.0         # store 初始化异常退避（秒）
+_PAUSE_SLEEP = 30.0        # 评估开关关闭时的暂停轮询间隔（秒，不领取任务）
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS eval_queue (
@@ -267,6 +275,10 @@ def _drain_loop() -> None:
     """守护 worker 主循环：领取 → 执行 → 落结果；空队列休眠。"""
     store: EvalQueueStore | None = None
     while not _STOP.is_set():
+        # 评估开关关闭 → 不领取（pending 保留，重开后续跑），也不初始化 store
+        if not judge_enabled():
+            time.sleep(_PAUSE_SLEEP)
+            continue
         if store is None:
             try:
                 store = _get_store()

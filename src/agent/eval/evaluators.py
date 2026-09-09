@@ -18,6 +18,11 @@
   judge 需要用户问题 → 从执行线程的 state 读最后一条非系统 human 消息
   （HTTP 自调用，与 message_feedback 同模式）。
 - 所有 Langfuse 调用兜 try/except：评估是旁路，异常不影响主流程。
+
+开关（2026-09-09，见 agent/eval/eval_flags.py，均为读时求值）：
+- NL2SQL_EVAL_ENABLED=0 → 全部评估器停用（确定性分不写 + judge 不入队）；
+- NL2SQL_EVAL_JUDGE_ENABLED=0 → 只停 LLM 维度（省 token），确定性维度照常；
+- NL2SQL_EVAL_SUBJECT=0 → 停评估单元 sidecar。
 """
 from __future__ import annotations
 
@@ -27,6 +32,7 @@ import os
 import random
 import re
 
+from agent.eval.eval_flags import eval_enabled, judge_enabled
 from agent.middlewares.sql_approval import classify_sql
 from agent.trace.langfuse_client import create_score
 
@@ -108,7 +114,13 @@ def judge_sample_rate() -> float:
 
 
 def should_sample() -> bool:
-    """是否命中采样（rate=1.0 恒真，rate=0 恒假）。"""
+    """是否命中采样（rate=1.0 恒真，rate=0 恒假）。
+
+    LLM-judge 开关关闭（NL2SQL_EVAL_JUDGE_ENABLED=0 / 总开关=0）时恒假——
+    两个调用点（sql_biz_correct、report）因此一并停用，无需各自判断。
+    """
+    if not judge_enabled():
+        return False
     rate = judge_sample_rate()
     return rate >= 1.0 or (rate > 0 and random.random() < rate)
 
@@ -318,6 +330,13 @@ def schedule_judge(
     # 实验的 sql_biz_correct 由 run_experiment._score_record 同步直评（不依赖本队列），
     # 确定性分（sql_valid/exec/schema）仍同步写实验 trace → 关掉入队不丢任何分。
     try:
+        # 开关闸门（双保险：调用点已由 should_sample 挡住，此处防其它调用方绕过）
+        if not eval_enabled():
+            _logger.debug("[eval] 评估总开关关闭，judge 不入队")
+            return
+        if not judge_enabled():
+            _logger.debug("[eval] LLM-judge 开关关闭，judge 不入队")
+            return
         gate = (os.getenv("NL2SQL_EVAL_JUDGE_QUEUE", "1") or "1").strip().lower()
         if gate in ("0", "false", "no", "off"):
             _logger.debug("[eval] LLM-judge 入队已禁用（NL2SQL_EVAL_JUDGE_QUEUE=%s）", gate)

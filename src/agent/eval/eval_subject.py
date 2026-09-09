@@ -32,14 +32,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agent.eval.eval_flags import subject_enabled
+
 _logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
 
-# 组装/证据开关（NL2SQL_EVAL_SUBJECT，默认开；仿 NL2SQL_PROCESS_DATA_DUMP 解析）。
-_SUBJECT_ENABLED = (os.getenv("NL2SQL_EVAL_SUBJECT", "1") or "1").strip().lower() not in (
-    "0", "false", "no", "off",
-)
+# 组装/证据开关：NL2SQL_EVAL_SUBJECT（默认开）+ 总开关 NL2SQL_EVAL_ENABLED，
+# 均为**读时求值**（eval_flags.subject_enabled()）——不用模块级常量：.env 加载
+# 与运行时改 env（run_experiment）都可能晚于 import。
 
 # sidecar 单条 run_sql 证据保留上限（新者胜，防单次长查询写爆）
 _RUNSQL_EVIDENCE_CAP = 50
@@ -323,7 +324,7 @@ def evidence_path(root: str, session_thread_id: str, subject_id: str) -> Path:
 def append_evidence(root: str, session_thread_id: str, subject_id: str, *,
                     run_sql: dict | None = None, report: dict | None = None) -> None:
     """向 sidecar 追加一条证据（读-改-写；run_sqls cap 50 新者胜）。"""
-    if not _SUBJECT_ENABLED or not root or not session_thread_id or not subject_id:
+    if not subject_enabled() or not root or not session_thread_id or not subject_id:
         return
     try:
         with _LOCK:
@@ -366,7 +367,7 @@ def read_evidence(root: str, session_thread_id: str, subject_id: str) -> dict:
 def write_subject(root: str, session_thread_id: str, subject_id: str,
                   subject: dict) -> None:
     """写评估单元 JSON（同 subject_id 覆盖 = auto-continue 多 run 幂等）。"""
-    if not _SUBJECT_ENABLED or not root or not session_thread_id or not subject_id:
+    if not subject_enabled() or not root or not session_thread_id or not subject_id:
         return
     try:
         with _LOCK:
