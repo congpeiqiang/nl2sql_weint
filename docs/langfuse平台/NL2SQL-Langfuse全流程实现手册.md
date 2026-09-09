@@ -374,8 +374,14 @@ $py = 'D:\code_work_space\llm\nl2sql\.venv\Scripts\python.exe'
 | `NL2SQL_EVAL_JUDGE_ENABLED` | **LLM-judge 开关**：0 只停 judge 三维（省 token），确定性三维照常 | `1` |
 | `NL2SQL_EVAL_SUBJECT` | 评估单元 sidecar（P1 证据/组装）开关 | `1` |
 
-三个评估开关均**读时求值**（`src/agent/eval/eval_flags.py`）：改 env 后无需重启进程即生效；
+四个评估开关均**读时求值**（`src/agent/eval/eval_flags.py`）：改 env 后无需重启进程即生效；
 judge 关闭时 `eval_queue` 守护 worker **暂停领取**（pending 保留，重开续跑），显式 `--replay` 不受限。
+
+**前端「设置 → 评估」也能改这四个键**（2026-09-09）：覆盖层落盘
+`{AGENT_DATA_ROOT}/shared/eval_flags.json`，优先级 **覆盖层 > env > 代码默认**，且**只存被改过的键**
+（点「恢复默认」= 删除该键的覆盖 → 回到 .env）。API：`GET/PUT/DELETE /api/eval-flags`
+（`src/api/eval_flags.py`，PUT 增量、值传空串=单键恢复；每次变更记 WARNING 审计日志含来源 IP 与生效值差异）。
+写入即生效，无需重启后端。
 
 **env 加载语义**（`src/agent/settings/env_loader.py`）：先 `.env`（dev 基线），再叠加 `.env.prod`
 中**仅 `LANGFUSE_*` / `NL2SQL_EVAL_*`** 且「未预先存在」的键。容器靠 `env_file: .env.prod` 注入（恒优先）；

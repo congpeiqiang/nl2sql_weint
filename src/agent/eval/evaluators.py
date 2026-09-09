@@ -105,12 +105,14 @@ def looks_like_exec_error(text: str) -> bool:
 # ── LLM-as-a-Judge（采样，后台线程）────────────────────────────
 
 def judge_sample_rate() -> float:
-    """LLM-judge 采样率（0~1）。NL2SQL_EVAL_JUDGE_SAMPLE 覆盖，默认 0.3。"""
-    try:
-        rate = float(os.getenv("NL2SQL_EVAL_JUDGE_SAMPLE", "0.3"))
-    except ValueError:
-        return 0.3
-    return max(0.0, min(1.0, rate))
+    """LLM-judge 采样率（0~1）。NL2SQL_EVAL_JUDGE_SAMPLE 覆盖，默认 0.3。
+
+    取值解析统一走 ``eval_flags.sample_rate()``——前端「设置 → 评估」的覆盖层
+    因此同样生效（优先级：覆盖层 > env > 默认）。
+    """
+    from agent.eval.eval_flags import sample_rate
+
+    return sample_rate()
 
 
 def should_sample() -> bool:

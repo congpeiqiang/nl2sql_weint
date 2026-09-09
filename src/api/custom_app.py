@@ -23,6 +23,7 @@ _logger = logging.getLogger(__name__)
 
 import api.auto_title  # noqa: E402
 import api.db_config  # noqa: E402
+import api.eval_flags  # noqa: E402
 import api.langfuse_metadata  # noqa: E402
 import api.message_feedback  # noqa: E402
 import api.model_config  # noqa: E402
@@ -58,6 +59,7 @@ ROUTES: list[BaseRoute] = [
     *api.feedback_stats.routes,
     *api.feedback_annotation.routes,
     *api.experiment.routes,
+    *api.eval_flags.routes,
     # 后期新增：import api.<name> + 展开 *api.<name>.routes
 ]
 
