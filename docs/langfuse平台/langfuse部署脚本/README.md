@@ -277,6 +277,9 @@ docker exec langfuse_postgres_1 pg_dump -U langfuse langfuse | gzip > backup_pg_
 | `sdk_e2e_new.sh` / `sdk_test.py` | v4 SDK 端到端上报验证（chain + generation；查询语句查的是客户端默认库） |
 | `sdk_e2e_nl2sql.sh` | **v4 SDK 端到端 + 校验落到 `${CLICKHOUSE_DB}`**（按 `.env` 的 pk/sk 上报，再核对 `nl2sql` 与 `default` 的行数变化） |
 | `cleanup_default_db.sh` | 删除 `default` 库中切换目标库之前遗留的 Langfuse 旧表（先列对象，`--yes` 跳过交互确认） |
+| `create_bj_views.sh` | 生成/刷新 `langfuse_bj` 北京时间视图层（时间列按 Asia/Shanghai 渲染，不改原表） |
+| `ch_time_probe.sh` / `ch_time_probe3.sh` | 时区语义排查：服务器/列时区、写入解析实验、`session_timezone` 读写对照 |
+| `.env.example` | `.env` 的脱敏模板（占位值 + 每项用途说明） |
 | `venv/` | 验证脚本用的 Python 虚拟环境 |
 
 ## 七、端到端验证记录
@@ -384,6 +387,7 @@ langfuse.flush()
 | `CLICKHOUSE_URL` | CH **HTTP** 端点（运行时查询/写入用） | `http://clickhouse:8123`（**URL 里不带库名**；库由 `CLICKHOUSE_DB` 指定） |
 | `CLICKHOUSE_MIGRATION_URL` | CH **native** 端点（迁移用） | `clickhouse://clickhouse:9000`；两个 URL 端口不同（8123 HTTP / 9000 native），不可混用 |
 | `CLICKHOUSE_DB` | **CH 目标库**：迁移建表库 + 运行时读写库 | `nl2sql`；**必须被 compose 注入 `langfuse-web` 与 `langfuse-worker`**（compose 默认值 `${CLICKHOUSE_DB:-nl2sql}`）。改库名 = 换一个库：新库会自动迁移建表，但**旧库数据不会自动搬迁**，UI 中历史追踪会「消失」 |
+| `CLICKHOUSE_BJ_DB` | 北京时间视图层库名 | `langfuse_bj`；由 `create_bj_views.sh` 创建，供 BI / NL2SQL 应用读取北京时间（详见 §十） |
 | `LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT` | 事件归档上传（服务端内部） | `http://minio:9000`（容器名走内网，快） |
 | `LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT` | 媒体文件对外访问地址 | `http://192.168.25.64:9090`（**必须浏览器可达**；若填容器名会导致页面图片全部裂开） |
 | `LANGFUSE_MIGRATION_V4_WRITE_MODE` | v4 写入模式 | `dual`：同时写 v3 表与 v4 事件表（`events_core`/`events_full`），读接口仍走 v3 → 平滑过渡 |
@@ -417,3 +421,72 @@ docker-compose stop langfuse-web langfuse-worker
 docker-compose rm -f langfuse-web langfuse-worker
 docker-compose up -d langfuse-web langfuse-worker
 ```
+
+## 十、时间与时区（北京时间）★
+
+### 10.1 事实：ClickHouse 存的是「瞬时」，读出来的字符串由会话时区决定
+
+- Langfuse 写入的是 **UTC 朴素字符串**（`convertDateToClickhouseDateTime` 走 `Date.toISOString()`，
+  形如 `2026-09-14 03:30:14.503`，**不带时区后缀**）。
+- ClickHouse 的 `DateTime64(3)` 内部存的是 epoch（瞬时）；`nl2sql` 里所有时间列的 `type` 都**不带显式时区**
+  → 用**会话时区**解析与渲染。本部署服务器时区是 `UTC`（`SELECT timezone()` → `UTC`），
+  所以直接查出来是 UTC 字符串（即 `03:30`，而真实北京时间是 `11:30`）。
+- **改服务器时区 / 列时区都改不了读出来的字符串**：解析与渲染用同一个时区，一进一出相互抵消；
+  而让写入端按北京时区解析，会把 epoch 整体挪走 8 小时（数据失真）。实测证据：
+
+  | 实验 | 结果 |
+  |---|---|
+  | 同一朴素串 `2026-09-14 03:30:14.503`，`session_timezone=UTC` 写入 | epoch `1789356614503` ✅ |
+  | 同上，`session_timezone=Asia/Shanghai` 写入 | epoch `1789327814503`（**差 8h，错误**） |
+  | 同一行已有数据，`session_timezone=UTC` 读 | `2026-09-14 03:30:14.503` |
+  | 同上，`session_timezone=Asia/Shanghai` 读 | `2026-09-14 11:30:14.503`，**epoch 完全不变** ✅ |
+
+- 所以正确做法是**读侧指定时区**；**不要物理改写存储值**（改写会让 Langfuse 的 UI 时间显示、
+  时间范围过滤与数据保留策略整体错 8 小时）。
+
+### 10.2 三种读侧做法
+
+| 场景 | 做法 |
+|---|---|
+| 临时查询（clickhouse-client） | 先 `SET session_timezone='Asia/Shanghai';` 再 SELECT（同一会话生效） |
+| BI / 应用连接 | 连接参数带 `session_timezone=Asia/Shanghai`（clickhouse_connect：`settings={'session_timezone':'Asia/Shanghai'}`；JDBC：`session_timezone=Asia/Shanghai`） |
+| 不想改客户端（推荐） | 直接查 `langfuse_bj` 库的视图，见 10.3 |
+
+> ⚠️ 不要把 `session_timezone` 设为服务器级/用户级默认：Langfuse 的写入端也会跟着变，落库 epoch 会整体 -8h。
+
+### 10.3 北京时间视图层 `langfuse_bj`（已建好）
+
+`create_bj_views.sh` 为 `nl2sql` 中每个含时间列的对象建同名视图，时间列用
+`toTimeZone(col,'Asia/Shanghai')` 固定为北京时间；**原表与原数据零改动**。
+
+```bash
+cd /home/weint/apps/nl2sql/langfuse && bash create_bj_views.sh
+# 撤销：DROP DATABASE langfuse_bj
+```
+
+实测对照（同一行、同一 epoch）：
+
+| 查询 | 结果 |
+|---|---|
+| `SELECT timestamp FROM nl2sql.traces ORDER BY timestamp DESC LIMIT 1` | `2026-09-14 03:32:25.527`（UTC） |
+| `SELECT timestamp FROM langfuse_bj.traces ORDER BY timestamp DESC LIMIT 1` | `2026-09-14 11:32:25.527`（北京） |
+| 两者 `toUnixTimestamp64Milli(timestamp)` | 均为 `1789356745527`（同一瞬时 ✅） |
+
+视图清单（12 个）：`traces`、`observations`、`scores`、`events_core`、`events_full`、
+`blob_storage_file_log`、`dataset_run_items_rmt`、`observations_batch_staging`、`schema_migrations`
+与 3 个 `analytics_*`。表结构变动（新增时间列）后**重跑一次脚本**即可刷新（`CREATE OR REPLACE VIEW`）。
+
+给 NL2SQL / BI 接数据源：host `192.168.25.64`、port `18123`（HTTP 协议）、database `langfuse_bj`、
+user `clickhouse`、password 见 `.env`（仅查询用途）。
+
+> 为什么不建「北京时间只读账号」：本部署的 `clickhouse` 用户**没有 `CREATE USER` 权限**
+> （实测 `ACCESS_DENIED`，且 `default` 账号已禁用）；要么在 compose 给 clickhouse 服务加
+> `CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1` 并重建容器，要么用视图层。视图层不需要任何权限变更，故采用它。
+
+### 10.4 排查脚本
+
+| 脚本 | 作用 |
+|---|---|
+| `ch_time_probe.sh` | 服务器/列时区现状、traces 时间样本、写入解析实验 |
+| `ch_time_probe3.sh` | `session_timezone` 读/写语义对照（读平移、写错位） |
+| `create_bj_views.sh` | 生成/刷新 `langfuse_bj` 北京时间视图层 |
