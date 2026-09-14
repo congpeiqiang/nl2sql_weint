@@ -1,0 +1,9 @@
+# 真实密钥文件不入库（含 pk/sk、PG / ClickHouse / Redis / MinIO 密码、NextAuth 密钥）
+# 服务器上该文件位于 /home/weint/apps/nl2sql/langfuse/.env，权限 600。
+.env
+
+# 验证脚本用的 Python 虚拟环境（仅存在于服务器，体积大）
+venv/
+
+# compose v1 操作前的手工备份
+*.bak-*
