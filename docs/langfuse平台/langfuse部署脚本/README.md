@@ -254,7 +254,7 @@ docker exec langfuse_postgres_1 pg_dump -U langfuse langfuse | gzip > backup_pg_
 |---|---|
 | 管理员 | `admin@langfuse.local` / `Langfuse@GxzKAlruuC`（见 .env `LANGFUSE_INIT_USER_PASSWORD`） |
 | 组织 | AgentLab（`org_mzZBzMZr`） |
-| 项目 | default（`proj_6nMyvFmN`） |
+| 项目 | `nlsql`（`proj_6nMyvFmN`）——名称来自 `.env` 的 `LANGFUSE_INIT_PROJECT_NAME`；**与 ClickHouse 库名 `nl2sql` 无关**，如需改名在 UI 的 Project Settings 里改（不影响任何已存数据与 API Key） |
 | 公钥 pk | `pk-c64d8d357fa8e8b90e8aefb8183a2cea` |
 | 密钥 sk | `sk-3791dd2504c88ca7502c987768ac35e907366db9260eec07` |
 
@@ -326,6 +326,8 @@ langfuse.flush()
   处理：`docker rm -f <僵尸容器>` → `docker-compose stop <服务>` → `docker-compose rm -f <服务>` → `docker-compose up -d`。
 - **迁移自愈**：pg 与 clickhouse 的表结构由 langfuse-web/worker 启动时的 migration 自动创建，删卷后 `up -d` 即自动重建，无需手工建表。
 - **v4 双写**：`LANGFUSE_MIGRATION_V4_WRITE_MODE=dual` 同时保留 v3 读接口与 v4 事件写入；如需只保留 v4，改 `.env` 后重启（本文档不涉及）。
+- **Langfuse「项目」≠ ClickHouse「库」**：Project 是 PostgreSQL 里的逻辑租户，所有项目**共用同一套 CH 表**，靠行内 `project_id` 列区分；
+  UI 里新建/改名项目**不会**创建或切换 CH 库。CH 库名只由 `.env` 的 `CLICKHOUSE_DB` 决定。
 - **ClickHouse 落库位置由 `.env` 的 `CLICKHOUSE_DB` 决定（本部署 = `nl2sql`）★**：
   Langfuse v4 的两条路径**都读取该变量**（已在镜像中核对，`langfuse/langfuse:4` = 4.21.0、`langfuse/langfuse-worker:4` = 4.22.0）：
   1. **建表迁移**：`langfuse-web` 的 entrypoint 执行 `packages/shared/clickhouse/scripts/up.sh`，
