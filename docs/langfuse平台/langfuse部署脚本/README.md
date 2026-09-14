@@ -490,3 +490,8 @@ user `clickhouse`、password 见 `.env`（仅查询用途）。
 | `ch_time_probe.sh` | 服务器/列时区现状、traces 时间样本、写入解析实验 |
 | `ch_time_probe3.sh` | `session_timezone` 读/写语义对照（读平移、写错位） |
 | `create_bj_views.sh` | 生成/刷新 `langfuse_bj` 北京时间视图层 |
+| `bj_time_check.sh` | 对照检查：同一批数据在 `nl2sql`（UTC）与 `langfuse_bj`（北京）的读法，并打印宿主机/容器当前时间 |
+
+> 实测（2026-09-14 11:44，宿主机 `date` 显示 `11:45:09 CST`、CH 容器 `timezone()=UTC`）：
+> 同一条 trace 在 `nl2sql.traces.timestamp` 是 `03:44:28.670`、在 `langfuse_bj.traces.timestamp`
+> 是 `11:44:28.670`，两者 epoch 都是 `1789357468670`。
