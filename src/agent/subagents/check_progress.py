@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from agent.utils.query_tools import is_data_tool
 from agent.utils.wren_plan import (
+    DEFAULT_ROW_LIMIT,
     PLAN_INLINE_MAX,
     plan_cube_sql,
     plan_run_sql,
@@ -286,6 +287,70 @@ def _msg_content_str(m) -> str:
                 parts.append(str(it))
         return "\n".join(parts)
     return str(c)
+
+
+def _tool_result_error(m) -> bool:
+    """工具结果消息是否**明确是失败**（判不出 → ``False``，调用方按老行为保留该调用）。
+
+    失败形态（生产实测）：
+    - langchain_mcp_adapters 把 MCP 错误包装成 ``Error executing tool <名>: …``
+      （如 ``near 'LIMIT 201'`` / ``Unknown filter dimension 'story_count'``）；
+    - ``sql_approval._deny`` 的只读拦截返回 ``status="error"`` 的 ToolMessage；
+    - 少数路径回 ``{"error": …}`` 形态 JSON。
+
+    **只把这三类当失败**：宁可少跳一次（把失败调用当成功），也不把成功调用误判为
+    失败而丢掉产出数据的定义。
+    """
+    if isinstance(m, dict):
+        if m.get("status") in ("error", "failed"):
+            return True
+    elif getattr(m, "status", None) in ("error", "failed"):
+        return True
+    text = (_msg_content_str(m) or "").strip()
+    if not text:
+        return False
+    if text[:64].lower().startswith(("error executing tool", "error:")):
+        return True
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if isinstance(obj, dict):
+        if obj.get("isError") is True:
+            return True
+        if "error" in obj and not any(
+            k in obj for k in ("rows", "columns", "row_count")
+        ):
+            return True
+    return False
+
+
+def _call_result_message(messages, idx: int, call_id, name: str):
+    """第 ``idx`` 条消息里那次工具调用对应的结果消息；找不到返回 ``None``。
+
+    先按 ``tool_call_id`` 精确对齐（同一条 AI 消息里并发多次调用时唯一可靠，
+    如 trace 01a0a850 第 9 步一次发过两个 query_cube），再退回「其后第一条同名
+    工具结果」——历史消息缺 id 时的兜底；此时同名的兄弟调用可能错配，最坏后果
+    只是把失败调用当成成功（不丢数据、不伪造 SQL）。
+    """
+    fallback = None
+    for j in range(idx + 1, len(messages)):
+        m = messages[j]
+        if isinstance(m, dict):
+            role = m.get("role") or m.get("type")
+            mname = m.get("name") or ""
+            tcid = m.get("tool_call_id")
+        else:
+            role = getattr(m, "type", "")
+            mname = getattr(m, "name", "") or ""
+            tcid = getattr(m, "tool_call_id", None)
+        if role not in ("tool", "tool_result"):
+            continue
+        if call_id and tcid and str(tcid) == str(call_id):
+            return m
+        if fallback is None and mname == name:
+            fallback = m
+    return fallback
 
 
 def _run_sql_meta(messages, i):
@@ -599,11 +664,18 @@ def _extract_last_sql(messages) -> str:
                 "rows": rows,
                 "cols": cols,
                 "values": _run_sql_cell_values(messages, i),
+                "ok": not _tool_result_error(m),
             }
         )
 
     if not sqls:
         return ""
+
+    # 失败的 run_sql（langchain 错误包装 / 只读拒绝）不可能是「产出结果的 SQL」：
+    # 候选里剔掉它们（生产 thread 01a0a850 的 Cube 通道同类问题见
+    # _extract_last_cube_call）。**全部失败时退回全集**——不因过滤把 SQL 节整节抹掉，
+    # 保持旧行为（此时报告里的 SQL 本就是失败的语句，但至少可查）。
+    sqls = [c for c in sqls if c["ok"]] or sqls
 
     # ── tier 0：值匹配（最高优先）────────────────────────────────
     final_rows = _final_answer_data_rows(messages)
@@ -771,6 +843,13 @@ _CUBE_DEF_NOTE = (
     "以上是本次实际下发 SQL 的 Cube 语义层来源（可读性更好，但不能在 MySQL "
     "直接执行——`v_*` 是 MDL 视图，物理库里不存在）。"
 )
+_CUBE_SKIPPED_NOTE = (
+    "以上取的是**最近一次成功**的 Cube 调用：其后的 {n} 次 Cube 调用未成功"
+    "（引擎没编译出语句、也没产出数据）。"
+)
+_CUBE_ALL_FAILED_NOTE = (
+    "本次所有 Cube 调用都未成功（引擎未编译出语句），没有产出数据。"
+)
 
 
 def _cube_arg_lines(name: str, args: dict) -> list:
@@ -786,19 +865,30 @@ def _cube_arg_lines(name: str, args: dict) -> list:
 
 
 def _extract_last_cube_call(messages) -> dict:
-    """最后一次 Cube 调用的结构化形态 ``{"tool", "args", "lines"}``；无则 ``{}``。
+    """最后一次**成功**的 Cube 调用 ``{"tool", "args", "lines", "ok", "skipped_failed"}``。
 
     与 ``_extract_last_cube_query`` 同一次扫描：报告侧既要展示查询定义文本，也要
     按 args **复算**物理 SQL（见 agent/utils/wren_plan），所以两者必须来自同一次
     调用——拆两个扫描循环迟早会漂移。
+
+    为什么取「最后一次**成功**」（2026-09-16 修）：子 agent 常在拿到数据后继续试
+    过滤/重算，失败的调用会成为最后一次。报告若锚在它上面，展示的是**没跑出任何
+    数据**的定义，复算也必然同样失败（生产 thread 01a0a850：数据表来自第 12 步
+    成功调用 110 行，第 16 步 `filters=['story_count:gte:20']` 判划失败、
+    `Unknown filter dimension`）。判失败的依据见 ``_tool_result_error``。
+
+    全部调用都失败时**退回最后一次**（保持旧行为，不假装有成功调用），并在
+    ``ok=False`` 里如实标出；``skipped_failed`` 记录被跳过的失败调用数（序在选中
+    调用之后的，序 = 消息下标 + 消息内调用位置，故同一轮并发多次调用也算得清），
+    供注记说明「展示的不是最后一次调用」。
     """
-    for i in range(len(messages) - 1, -1, -1):
-        m = messages[i]
+    cands = []
+    for i, m in enumerate(messages):
         if not isinstance(m, dict):
             continue
         calls = (m.get("tool_calls")
                  or (m.get("additional_kwargs") or {}).get("tool_calls") or [])
-        for call in calls:
+        for pos, call in enumerate(calls):
             if not isinstance(call, dict):
                 continue
             name = str(call.get("name") or "")
@@ -813,9 +903,29 @@ def _extract_last_cube_call(messages) -> dict:
             if not isinstance(args, dict):
                 continue
             lines = _cube_arg_lines(name, args)
-            if len(lines) > 1:
-                return {"tool": name, "args": args, "lines": lines}
-    return {}
+            if len(lines) <= 1:
+                continue
+            res = _call_result_message(messages, i, call.get("id"), name)
+            cands.append({
+                "tool": name, "args": args, "lines": lines,
+                # 序 = (消息下标, 消息内第几次调用)：同一轮并发多次调用时后者才算「其后」
+                "_seq": (i, pos),
+                "ok": not (res is not None and _tool_result_error(res)),
+            })
+    if not cands:
+        return {}
+
+    ok_cands = [c for c in cands if c["ok"]]
+    if ok_cands:
+        pick = ok_cands[-1]
+        pick["skipped_failed"] = sum(
+            1 for c in cands if not c["ok"] and c["_seq"] > pick["_seq"]
+        )
+    else:
+        pick = cands[-1]
+        pick["skipped_failed"] = 0
+    pick.pop("_seq", None)
+    return pick
 
 
 def _extract_last_cube_query(messages) -> str:
@@ -838,6 +948,12 @@ _PHYSICAL_DUP_LIMIT_NOTE = (
     "注：该查询自带 limit，wren 连接器仍会再追加一行 `LIMIT`（上游既有行为），"
     "在客户端执行时只保留一条即可。"
 )
+_PHYSICAL_WINDOW_NOTE = (
+    "注：本次调用带了 {window}——wren 会把 Cube 的 limit/offset 编译进语句、连接器"
+    "又追加一条 LIMIT（offset 还会生成 MySQL 不允许的「无 LIMIT 的 OFFSET」），"
+    "线上必报语法错；平台已改为在**结果集**上截取，故实际下发语句不含 LIMIT，"
+    "窗口大于 {cap} 行时最多只取 {cap} 行。"
+)
 _SEE_PHYSICAL_NOTE = (
     "可执行版本见「执行 SQL（物理，实际下发）」节（已展开 MDL 视图并转为目标库方言）。"
 )
@@ -845,7 +961,7 @@ _WRENAI_PREFIX = "wrenai_"
 
 
 def _physical_sql_note(plan: dict) -> str:
-    """物理 SQL 节的注记（含 LIMIT 说明；双 LIMIT 场景如实提示）。"""
+    """物理 SQL 节的注记（含 LIMIT 说明；双 LIMIT / 平台截窗场景如实提示）。"""
     dialect = str(plan.get("dialect") or "").upper() or "目标库"
     note = _PHYSICAL_SQL_HEAD.format(dialect=dialect)
     n = plan.get("limit_appended")
@@ -853,41 +969,71 @@ def _physical_sql_note(plan: dict) -> str:
         note += _PHYSICAL_LIMIT_NOTE.format(n=n)
     if plan.get("dup_limit"):
         note += _PHYSICAL_DUP_LIMIT_NOTE
+    if plan.get("window_limit") is not None or plan.get("window_offset") is not None:
+        note += _PHYSICAL_WINDOW_NOTE.format(
+            window=_window_text(plan.get("window_limit"), plan.get("window_offset")),
+            cap=DEFAULT_ROW_LIMIT,
+        )
     return note
+
+
+def _window_text(limit, offset) -> str:
+    """``limit=200、offset=5`` / ``limit=200`` / ``offset=5`` 形态的窗口描述。"""
+    parts = []
+    if limit is not None:
+        parts.append(f"limit={limit}")
+    if offset is not None:
+        parts.append(f"offset={offset}")
+    return "、".join(parts)
 
 
 def _resolve_wren_ctx(tool_name: str) -> tuple:
     """wrenai 工具名 → ``(项目路径, 连接字典)``；非 wren 工具或取不到时 ``("", {})``。
 
-    工具名里的前缀是 server 名（``wrenai_WIT_run_sql``），而 server 名是库名的
+    工具名前缀是 server 名（``wrenai_WIT_query_cube``），而 server 名是库名的
     **不可逆 ASCII 骨架**（``WIT运营管理平台数据库`` → ``WIT``，见
-    semantic_db.wrenai_server_name）→ 按 mcp_tool 建 server 的同一套映射
-    （``discover()`` + ``wrenai_server_name``）反查库名，再取项目路径与连接配置。
+    semantic_db.wrenai_server_name）→ 只能按 mcp_tool 建 server 的同一套映射
+    （``discover()`` + ``wrenai_server_name``）**正向**匹配。
+
+    陷阱（2026-09-16 修复）：不能从工具名**反推**库名。工具名是
+    ``f"{server_name}_{tool_name}"`` 纯拼接，而 wren 的工具名自身含下划线
+    （``query_cube`` / ``run_sql`` / ``get_instructions``…），早先按
+    ``rsplit("_", 1)[0]`` 只掉了最后一段（``WIT_query_cube`` → ``WIT_query``），
+    前缀算成 ``wrenai_WIT_query`` 永不匹配 → Cube 与 SQL 两条通道**恒定**拿不到
+    物理 SQL、报告静默退回「查询定义」节。改为按 server 名做**最长前缀匹配**。
     """
     try:
         name = str(tool_name or "")
         if not name.startswith(_WRENAI_PREFIX):
             return "", {}
-        rest = name[len(_WRENAI_PREFIX):]
-        if "_" not in rest:
-            return "", {}
-        prefix = f"{_WRENAI_PREFIX}{rest.rsplit('_', 1)[0]}"
         from agent.utils.semantic_db import get_detector, wrenai_server_name
 
         detector = get_detector()
-        for db in sorted(detector.discover()):
-            if wrenai_server_name(db) != prefix:
-                continue
-            project = detector.project_path_for(db) or ""
-            if not project:
-                return "", {}
-            from agent.tools.mcp_tool import wren_conn_dict
+        prefix, db = "", ""
+        for _d in sorted(detector.discover()):
+            _p = wrenai_server_name(_d)
+            # 边界取 `server名_`：避免 `wrenai_WIT` 误吞 `wrenai_WIT2_…`
+            if name.startswith(f"{_p}_") and len(_p) > len(prefix):
+                prefix, db = _p, _d
+        if not db:
+            _logger.warning(
+                "[check_progress] wren 工具名 %r 未匹配任何已建模库（server 名: %s）"
+                "→ 本次报告不出物理 SQL 节",
+                name, sorted(wrenai_server_name(d) for d in detector.discover()),
+            )
+            return "", {}
+        project = detector.project_path_for(db) or ""
+        if not project:
+            _logger.warning(
+                "[check_progress] 库 %r 无 wren 项目路径 → 本次报告不出物理 SQL 节", db
+            )
+            return "", {}
+        from agent.tools.mcp_tool import wren_conn_dict
 
-            conn = wren_conn_dict(db)
-            return project, (conn if isinstance(conn, dict) else {})
-        return "", {}
+        conn = wren_conn_dict(db)
+        return project, (conn if isinstance(conn, dict) else {})
     except Exception as e:  # noqa: BLE001  fail-open
-        _logger.debug("[check_progress] wren 上下文解析失败 %s: %s", tool_name, e)
+        _logger.warning("[check_progress] wren 上下文解析失败 %s: %s", tool_name, e)
         return "", {}
 
 
@@ -1248,7 +1394,14 @@ def apply_patch():
                         "cube", str(_cube["args"].get("cube") or _cube["tool"]),
                     )
                     # 取到物理 SQL → 定义节改注「来源」；取不到 → 如实说没有
-                    result["sql_note"] = _CUBE_DEF_NOTE if _has_plan else _CUBE_NOTE
+                    _note = _CUBE_DEF_NOTE if _has_plan else _CUBE_NOTE
+                    if not _cube.get("ok"):
+                        # 全是失败调用：定义节展示的就是没跑成功的那次，如实标注
+                        _note += _CUBE_ALL_FAILED_NOTE
+                    elif _cube.get("skipped_failed"):
+                        # 锚点跳过失败调用 → 说明展示的不是最后一次，防读者误判
+                        _note += _CUBE_SKIPPED_NOTE.format(n=_cube["skipped_failed"])
+                    result["sql_note"] = _note
             # 大结果全量文件指针（QueryResultOffload 落盘）附到 result，
             # build_report 读盘后把完整结果表嵌入报告正文（0 模型开销）
             full_files = _collect_full_result_files(messages)

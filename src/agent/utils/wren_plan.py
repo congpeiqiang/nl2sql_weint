@@ -27,6 +27,12 @@ Windows 上中文 cube 元数据直接 ``UnicodeDecodeError: 'gbk' codec``——
 **旁路性质**：``dry_plan`` 不需要连接器（``_get_connector`` 只在 ``query``/``dry_run``
 里懒建），所以复算全程**不开数据库连接**、不产生任何写操作。
 
+**「实际下发」的定义包含调用边界归一**：cube 调用的 ``limit``/``offset`` 在 wren
+0.13 下**不可用**（编译进 Cube SQL 的 LIMIT 会被连接器再追加一条 → MySQL 语法错），
+平台在工具边界剥离、结果返回后截窗（见 ``strip_cube_window`` 与
+``middlewares/sql_approval``）——复算也必须按同一套规则剥离，否则报告里的物理 SQL
+会是与线上不一致的那条（拿 limit 去镜像双 LIMIT，线上其实按无 LIMIT 执行）。
+
 **一切失败都 fail-open**：任何异常都返回 ``{}`` / ``""``，调用方当作「没这回事」
 （报告退回「查询定义」节），绝不把半截或猜测的 SQL 写进报告。
 """
@@ -148,11 +154,44 @@ def effective_probe_limit(limit: Any) -> int:
 def mirror_connector_limit(sql: str, n: int) -> str:
     """复现 ``wren/connector/mysql.py::_apply_limit``（**先去掉尾部空分号**再追 LIMIT）。
 
-    连接器是**无条件**追加的：cube 查询自带 ``limit`` 时，plan 产物本身就以
-    ``LIMIT n`` 结尾，追加后会变成两条 LIMIT（MySQL 语法错）——复算如实镜像，
-    由调用方在注记里说明，而不是自作主张「修正」成与线上不一致的语句。
+    连接器是**无条件**追加的：SQL 若自带尾部 ``LIMIT n``，plan 产物就以 ``LIMIT n``
+    结尾，追加后会变成两条 LIMIT（MySQL 语法错）——复算如实镜像，由调用方在注记里
+    说明，而不是自作主张「修正」成与线上不一致的语句。
+
+    cube 通道不会走到这条分支：``strip_cube_window`` 已在调用边界剥掉 limit/offset；
+    run_sql 通道由 ``sql_approval._normalize_wrenai_limit`` 剥尾部 LIMIT（两者都是
+    应用层防御，本函数镜像的是防御之后的语句）。
     """
     return f"{sql.rstrip().rstrip(';').rstrip()}\nLIMIT {n}"
+
+
+# ── Cube 调用窗口（limit/offset）：wren 侧不可用，平台侧截窗 ─────────────
+# 唯一真源：工具边界（middlewares/sql_approval）与复算（plan_cube_sql）都走这里，
+# 保证「报告里的物理 SQL」==「真正下发的语句」。
+def strip_cube_window(args: Any) -> tuple:
+    """剥离 cube 调用的 ``limit``/``offset`` → ``(新 args, limit|None, offset|None)``。
+
+    **为什么必须剥**（wren 0.13.0 实测 + 生产 thread 01a0a850 报错坐实）：``query_cube``
+    把 limit/offset 直接编译进 Cube SQL（``_build_cube_query``），而
+    ``_query_with_limit_probe`` 又把同一个 limit 交给连接器、由 ``_apply_limit``
+    **无条件**再追加一条 ``LIMIT {limit+1}``：
+
+    - ``limit=200`` → ``… GROUP BY 1 LIMIT 200`` + ``\\nLIMIT 201`` → MySQL 1064
+      （``You have an error in your SQL syntax … near 'LIMIT 201' at line 2``）；
+    - ``offset=5``（不带 limit）→ ``… GROUP BY 1 OFFSET 5`` + ``\\nLIMIT 1001``，
+      而 MySQL 要求 LIMIT 必须出现在 OFFSET **之前** → 同样必错。
+
+    即这两个参数在 wren 侧不可用。平台改为：调用边界剥离（不传给 wren）、结果返回后
+    按 ``(offset, limit)`` 在客户端截窗（``sql_approval._apply_cube_window``）——
+    语义等值于 MySQL 的 ``LIMIT n OFFSET m``，上限天然受 wren 的
+    ``DEFAULT_ROW_LIMIT=1000`` 探测上限约束（``limit>1000`` 时最多拿到 1000 行）。
+
+    返回**新字典**（不改入参）；非法值按缺失处理（``_as_int``）。
+    """
+    if not isinstance(args, dict):
+        return {}, None, None
+    norm = {k: v for k, v in args.items() if k not in ("limit", "offset")}
+    return norm, _as_int(args.get("limit")), _as_int(args.get("offset"))
 
 
 # ── MDL 与引擎 ────────────────────────────────────────────────────────
@@ -234,12 +273,17 @@ def plan_cube_sql(project_path: Any, conn: Any, args: Any) -> Dict[str, Any]:
     ``cube_sql`` 是引擎编译出的**语义层中间 SQL**（引用 MDL 模型名，仍不能直连
     MySQL），随结果一起回传仅作审计与「编译前长什么样」的对照；报告展示的
     ``dialect_sql`` 才是可执行的那条。
+
+    ``args`` 里的 ``limit``/``offset`` 先经 ``strip_cube_window`` 剥离（线上工具边界
+    同样剥离、改在结果集截窗）→ 复算产物与实际下发逐字一致；被剥掉的值以
+    ``window_limit``/``window_offset`` 回传，供报告注记说明「窗口是平台侧截的」。
     """
     try:
         if not probe_wren_api() or not isinstance(args, dict):
             return {}
-        cube = args.get("cube")
-        measures = _as_str_list(args.get("measures"))
+        norm, window_limit, window_offset = strip_cube_window(args)
+        cube = norm.get("cube")
+        measures = _as_str_list(norm.get("measures"))
         if not cube or not measures:
             return {}
         mdl_path = _mdl_path(project_path)
@@ -249,15 +293,16 @@ def plan_cube_sql(project_path: Any, conn: Any, args: Any) -> Dict[str, Any]:
         from wren.cube_cli import _build_cube_query  # noqa: PLC0415
         from wren_core import cube_query_to_sql  # noqa: PLC0415
 
-        # 逐字镜像 wren/mcp_server.py::query_cube 的参数映射
+        # 逐字镜像 wren/mcp_server.py::query_cube 的参数映射（limit/offset 传 None：
+        # 线上由 sql_approval 剥掉，传过去就是那条必错的 LIMIT/OFFSET）
         cube_query = _build_cube_query(
             str(cube),
             ",".join(measures),
-            ",".join(_as_str_list(args.get("dimensions"))),
-            args.get("time_dimension") or None,
-            _as_str_list(args.get("filters")),
-            _as_int(args.get("limit")),
-            _as_int(args.get("offset")),
+            ",".join(_as_str_list(norm.get("dimensions"))),
+            norm.get("time_dimension") or None,
+            _as_str_list(norm.get("filters")),
+            None,
+            None,
         )
         cube_sql = cube_query_to_sql(
             json.dumps(cube_query, ensure_ascii=False),
@@ -265,9 +310,11 @@ def plan_cube_sql(project_path: Any, conn: Any, args: Any) -> Dict[str, Any]:
         )
         if not isinstance(cube_sql, str) or not cube_sql.strip():
             return {}
-        return _finish(
-            mdl_path, conn, cube_sql, cube_sql=cube_sql, limit=args.get("limit")
-        )
+        plan = _finish(mdl_path, conn, cube_sql, cube_sql=cube_sql, limit=None)
+        if plan:
+            plan["window_limit"] = window_limit
+            plan["window_offset"] = window_offset
+        return plan
     except Exception as e:  # noqa: BLE001  fail-open
         _logger.debug("[wren_plan] cube 物理 SQL 复算失败: %s", e)
         return {}
