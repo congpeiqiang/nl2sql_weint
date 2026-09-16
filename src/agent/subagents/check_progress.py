@@ -24,6 +24,14 @@ from langchain.tools import ToolRuntime
 from langchain_core.tools import InjectedToolArg
 from pydantic import BaseModel, Field
 
+from agent.utils.query_tools import is_data_tool
+from agent.utils.wren_plan import (
+    PLAN_INLINE_MAX,
+    plan_cube_sql,
+    plan_run_sql,
+    write_plan_file,
+)
+
 _logger = logging.getLogger(__name__)
 
 _PATCHED = False
@@ -44,6 +52,16 @@ class CheckAsyncTaskSinceSchema(BaseModel):
             "Optional message cursor for incremental reads: pass the `cursor` value "
             "returned by a previous check to get only messages added since then. "
             "Omit for a normal full status check."
+        ),
+    )
+    full: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Set true to read the finished task's result WITHOUT the usual "
+            "summarization caps (all table rows, up to a much larger limit). Use "
+            "this when a previous check's result looks truncated: it returns the "
+            "same unchanged result, so there is nothing to gain from re-dispatching "
+            "the subagent via update_async_task."
         ),
     )
 
@@ -67,6 +85,13 @@ def _brief_message(msg) -> dict:
 # ── 结果摘要化（P0：减少主 agent LLM 输入 token）─────────────────────
 _MAX_RESULT_CHARS = 2000      # 结果内容最大字符数
 _MAX_RESULT_ROWS = 20         # SQL 表格结果最多保留行数
+# check_async_task(full=true)：显式索取"不摘要"的完整原文（P4）。
+# 摘要上限之外原本没有正当逃逸通道 → 主 agent 只能用 update_async_task 重派发
+# 子任务去"制造新消息"换取原文（trace 72e222c0：4 次重派发、空转 6.5 分钟）。
+# 该路径只在主 agent 明确要求时走，不是每次轮询的常态，故上限放大两个数量级，
+# 但仍保留上限（超大结果仍走摘要逻辑，只是预算更大）。
+_MAX_RESULT_CHARS_FULL = 60000
+_MAX_RESULT_ROWS_FULL = 500
 # 子 agent 用"（续）"把大表拆多段时的延续标记（不计为数据行/正文）
 _CONTINUE_MARK = re.compile(r"^\s*[（(]?续[）)]?\s*$")
 
@@ -79,10 +104,14 @@ def _trim_block(text: str, budget: int) -> str:
     return text[:half].rstrip() + f"\n…({len(text)} 字符，中间省略)…\n" + text[-half:].lstrip()
 
 
-def _summarize_result(content: str) -> str:
+def _summarize_result(content: str, full: bool = False) -> str:
     """智能摘要子 agent 返回的结果内容，保留结构信息、截断数据行。
 
     确保 LLM 能判断是否需要图表，同时避免 34k+ tokens 的 prompt 膨胀。
+
+    full=True（check_async_task 的 full 参数）时改用 _MAX_RESULT_CHARS_FULL /
+    _MAX_RESULT_ROWS_FULL 预算，即尽量原样返回——见下面 2026-09-14 修复。仍保留
+    上限：超过 full 预算的超大结果继续走同一套摘要逻辑，只是预算更大。
 
     修复（2026-09-01，trace 8ccef016「78 个部门」幻觉）：
       - 不再丢弃表格上方的关键结论（如"共 152 个名称 / 431 条记录"）——
@@ -90,13 +119,32 @@ def _summarize_result(content: str) -> str:
       - 行数按真实数据行统计：子 agent 用"（续）"把大表拆成多段时，第二段的
         表头/分隔行曾被误计为数据行（76 行数成 78）；
       - 摘要 marker 明确"行数≠业务统计口径"。
+
+    修复（2026-09-14，trace a6f86bbd「查询阶段跑完后进度条重跑」）：
+      - 行数不再跨表求和：子 agent 正文写"39 行"，摘要却写"数据表共 53 行"
+        （39 行明细表 + 14 行「各人员合计」表被 `sum` 到一起，且只渲染第一张
+        表的前 20 行）→ 主 agent 判定数据缺失、update_async_task 重派发子任务；
+      - 改为按"逻辑表"分段计数并逐张点名行数（"（续）"拆分的多段仍算同一张表，
+        保住 76 行的既有语义）；每张表都渲染各自的表头 + 配额行数，不再只输出
+        第一张表（第二张表整段消失本身就是幻觉温床）；
+      - marker 增加"未展开的行不是数据缺失…无需重新派发子任务"。
+
+    修复（2026-09-14，trace 72e222c0「结果摘要 20 行上限驱动重派发风暴」）：
+      - 三条 marker 里的"完整数据可通过 check_async_task 增量读取获取"在结果
+        定格时是假话：`since=N` 与全量读取逐字相同，什么都给不出。主 agent 于是
+        用 update_async_task 重派发子任务去"制造新消息"（4 次、约 6.5 分钟空转）。
+      - 补齐真正的逃逸通道 `full=True`（本次改动），并把 marker 文案从"增量读取"
+        改成实话：要完整原文就 `check_async_task(task_id, full=true)`，不要重派发。
     """
-    if len(content) <= _MAX_RESULT_CHARS:
+    _max_chars = _MAX_RESULT_CHARS_FULL if full else _MAX_RESULT_CHARS
+    _max_rows = _MAX_RESULT_ROWS_FULL if full else _MAX_RESULT_ROWS
+    if len(content) <= _max_chars:
         return content
 
     # ── 1. 解析 Markdown 表格（支持"（续）"拆分的多段表） ──
     lines = content.split("\n")
     pre_lines, post_lines, table_runs = [], [], []
+    pending_continue = False  # 刚见过"（续）"→ 下一段与前一段属同一张逻辑表
     cur = None
     for l in lines:
         if l.strip().startswith("|"):
@@ -110,8 +158,13 @@ def _summarize_result(content: str) -> str:
             if cur is not None:
                 table_runs.append(cur)
                 cur = None
-            if not l.strip() or _CONTINUE_MARK.match(l.strip()):
-                continue  # 空行 / "（续）"标记不计入正文
+            s = l.strip()
+            if not s:
+                continue  # 空行不计入正文（也不打断"（续）"延续标记）
+            if _CONTINUE_MARK.match(s):
+                pending_continue = True  # "（续）"标记不计入正文
+                continue
+            pending_continue = False
             if not table_runs:
                 pre_lines.append(l)
             else:
@@ -120,50 +173,100 @@ def _summarize_result(content: str) -> str:
         table_runs.append(cur)
 
     if table_runs:
-        total_data = sum(len(r["data"]) for r in table_runs)
-        kept = []
+        # ── 1a. 分段归组为「逻辑表」──
+        # 子 agent 用"（续）"把一张大表拆多段（8ccef016：两段 38 行 = 76 行，不能数成 78）；
+        # 表头不同则是真正不同的表（a6f86bbd：39 行明细 + 14 行合计 ≠ 53 行）。
+        groups: list[dict] = []  # {"header": 首段表头, "segs": [run, ...]}
         for r in table_runs:
-            for d in r["data"]:
-                if len(kept) >= _MAX_RESULT_ROWS:
+            same_as_prev = bool(groups) and (
+                pending_continue or r["header"] == groups[-1]["header"]
+            )
+            if same_as_prev:
+                groups[-1]["segs"].append(r)
+            else:
+                groups.append({"header": r["header"], "segs": [r]})
+            pending_continue = False
+
+        n_tables = len(groups)
+        rows_per_table = [sum(len(s["data"]) for s in g["segs"]) for g in groups]
+
+        # ── 1b. 行数配额：每张表至少 1 行，余量按顺序补给还有未展开行的表 ──
+        quota = [max(1, _max_rows // n_tables)] * n_tables
+        take = [0] * n_tables
+        budget = _max_rows
+        for i in range(n_tables):
+            take[i] = min(rows_per_table[i], quota[i])
+            budget -= take[i]
+        i = 0
+        while budget > 0 and any(
+            take[k] < rows_per_table[k] for k in range(n_tables)
+        ):
+            k = i % n_tables
+            if take[k] < rows_per_table[k]:
+                take[k] += 1
+                budget -= 1
+            i += 1
+
+        # ── 1c. 每张逻辑表都渲染（保留各自表头），不再只输出第一张表 ──
+        rendered, shown = [], 0
+        for g, t in zip(groups, take):
+            remain = t
+            for s in g["segs"]:
+                rows = s["data"][:remain]
+                if not rows:
+                    continue
+                rendered.append(
+                    s["header"] + "\n" + s["sep"] + "\n" + "\n".join(rows)
+                )
+                remain -= len(rows)
+                shown += len(rows)
+                if remain <= 0:
                     break
-                kept.append(d)
-            if len(kept) >= _MAX_RESULT_ROWS:
-                break
-        first = table_runs[0]
+
+        if n_tables == 1:
+            count_desc = f"数据表共 {rows_per_table[0]} 行"
+        else:
+            detail = "、".join(
+                f"第{i + 1}张 {c} 行" for i, c in enumerate(rows_per_table)
+            )
+            count_desc = f"数据表 {n_tables} 张（{detail}，逐张统计非合计）"
         suffix = (
-            f"\n\n*(数据表共 {total_data} 行，以上展示前 {len(kept)} 行；"
+            f"\n\n*({count_desc}，以上展示前 {shown} 行；"
             "行数仅为展示表格行数，业务统计口径以结果文字为准；"
-            "完整数据可通过 check_async_task 增量读取获取)*"
+            "未展开的行不是数据缺失（结果已定格，since 增量读取同样给不出），"
+            "要完整原文就用 check_async_task(task_id, full=true) 读一次，"
+            "不要用 update_async_task 重新派发子任务去补数据)*"
         )
-        table_part = first["header"] + "\n" + first["sep"] + "\n" + "\n".join(kept) + suffix
+        table_part = "\n\n".join(rendered) + suffix
         parts = []
         pre_text = "\n".join(pre_lines).strip()
         if pre_text:
-            parts.append(_trim_block(pre_text, _MAX_RESULT_CHARS // 2))
+            parts.append(_trim_block(pre_text, _max_chars // 2))
         parts.append(table_part)
         post_text = "\n".join(post_lines).strip()
         if post_text:
-            parts.append(_trim_block(post_text, _MAX_RESULT_CHARS // 2))
+            parts.append(_trim_block(post_text, _max_chars // 2))
         return "\n\n".join(parts)
 
     # ── 2. 检测 JSON 数组结果 ──
     try:
         data = json.loads(content)
         if isinstance(data, list) and len(data) > 0:
-            kept = data[:_MAX_RESULT_ROWS]
+            kept = data[:_max_rows]
             summary = json.dumps(kept, ensure_ascii=False, indent=2)
             summary += (
                 f"\n\n*(共 {len(data)} 条记录，以上展示前 {len(kept)} 条；"
-                f"完整结果可通过 check_async_task 增量读取获取)*"
+                f"要完整数据用 check_async_task(task_id, full=true) 读一次，"
+                f"不要重新派发子任务)*"
             )
             return summary
     except (json.JSONDecodeError, ValueError):
         pass
 
     # ── 3. 普通文本：保留头尾 ──
-    head = content[:_MAX_RESULT_CHARS // 2]
-    tail = content[-(_MAX_RESULT_CHARS // 2):]
-    return f"{head}\n\n...({len(content)} 字符，中间已省略；完整结果可通过 check_async_task 增量读取获取)...\n\n{tail}"
+    head = content[:_max_chars // 2]
+    tail = content[-(_max_chars // 2):]
+    return f"{head}\n\n...({len(content)} 字符，中间已省略；要完整原文用 check_async_task(task_id, full=true) 读一次)...\n\n{tail}"
 
 
 def _msg_content_str(m) -> str:
@@ -244,9 +347,10 @@ def _run_sql_meta(messages, i):
 
 
 def _collect_full_result_files(messages) -> list:
-    """收集子线程里 run_sql 大结果落盘文件的 VFS 指针（保序去重）。
+    """收集子线程里数据表型大结果落盘文件的 VFS 指针（保序去重）。
 
-    QueryResultOffloadMiddleware 把 >50 行 / 大文本的 run_sql 结果瘦身为
+    QueryResultOffloadMiddleware 把 >50 行 / 大文本的**数据表型**结果（run_sql 与
+    Cube 快速通道 query_cube，清单见 agent.utils.query_tools）瘦身为
     {row_count, rows:[前 N 样例], rows_truncated, full_result_file}。这里从子线程
     消息确定性汇总全量文件清单给主 agent / build_report，供其代码读盘嵌入报告
     （0 模型开销，不依赖模型在最终回复里拼的字符串）。
@@ -262,7 +366,9 @@ def _collect_full_result_files(messages) -> list:
             name = getattr(m, "name", "") or ""
         if role not in ("tool", "tool_result"):
             continue
-        if not (isinstance(name, str) and name.endswith("run_sql")):
+        # 与落盘闸门共用同一份清单（agent.utils.query_tools）：只认 run_sql 会让
+        # Cube 通道的 full_result_files 恒空 → 报告缺「完整数据表」节（2026-09-14 修）
+        if not is_data_tool(name):
             continue
         try:
             obj = json.loads(_msg_content_str(m))
@@ -582,6 +688,248 @@ _DETAIL_TAIL_NOTE = (
     "请结合『数据结果』口径说明理解本条明细的统计范围。"
 )
 
+# ── 结果锚点：收尾语顶掉终稿（2026-09-14 修复）─────────────────────────
+# 协议要求子 agent 收尾前调 write_todos → 最后一轮必然是工具调用 → 模型随后
+# 必然再补一条「工具已执行」性质的短消息。于是 messages[-1] 是收尾语（实测
+# 55 / 78 字），而子 agent 自己撰写的终稿（带数据表，实测 2779 / 2336 字）被顶掉。
+# 主 agent 拿到的 result 成了空话，只能自己去工作区翻历史文件凑数（trace
+# 01a09f1c：报告「数据结果」节变成收尾语，另花 6 次工具调用找数）。
+# ⚠ 判据绝不能是「无 tool_calls」——真终稿恰恰带着 write_todos 调用。
+_SUBSTANTIVE_MIN_CHARS = 200   # 前一条要被视为「终稿」的长度门槛
+_CLOSER_MAX_CHARS = 120        # 末条短于此 → 可能是收尾语（实测 55 / 78 字）
+_CLOSER_HARD_SHORT = 80        # 短于此不必看措辞，直接判为收尾语
+_CLOSER_RATIO = 3              # 且前一条至少是末条的 3 倍 → 才回退
+# 双信号：只看长度会把「中等长度的真答复 + 前文一段长推理」误判（回退太远），
+# 所以除长度外还要求末条带收尾措辞。两种实测措辞都命中：
+#   「以上为查询结果的全部内容…」(55) / 「查询完毕！以上为…请随时告知」(78)
+_CLOSER_MARKERS = (
+    "以上为", "以上是", "以上就是", "查询完毕", "如需", "请告知", "请随时",
+    "希望对你", "如有需要", "有其他需要",
+)
+
+
+def _looks_like_closer(text: str) -> bool:
+    """末条是否像「工具已执行完」的礼貌收尾语（长度 + 措辞双信号）。"""
+    t = (text or "").strip()
+    if len(t) < _CLOSER_HARD_SHORT:
+        return True
+    return any(k in t for k in _CLOSER_MARKERS)
+
+
+def _msg_role(m) -> str:
+    """消息角色（兼容 dict 的 type/role 与对象属性）。"""
+    if isinstance(m, dict):
+        return str(m.get("type") or m.get("role") or "")
+    return str(getattr(m, "type", "") or getattr(m, "role", ""))
+
+
+def _pick_result_message(messages) -> tuple[int, str, str]:
+    """选取承载结果的消息：返回 (下标, 文本, 选取原因)。
+
+    取「最后一条有实质内容的 AI 消息」：末条 AI 文本呈收尾语形态时回退一条，
+    否则用末条。收尾语形态 = 长度 < _CLOSER_MAX_CHARS 且（< _CLOSER_HARD_SHORT
+    或带 _CLOSER_MARKERS 措辞）且前一条长度 ≥ max(_SUBSTANTIVE_MIN_CHARS,
+    _CLOSER_RATIO × 末条)。只回退一条——观测到的结构就是「终稿(带 write_todos)
+    → tool → 收尾语」，回退更多步会把中间态推理当结果；双信号（长度+措辞）是
+    为了不把「中等长度的真答复 + 前文长推理」误判成收尾语。
+    无 AI 消息时退回最后一条消息（任何角色），保证与旧行为同构。
+    """
+    ai_idx = [i for i, m in enumerate(messages)
+              if _msg_role(m) in ("ai", "assistant") and _msg_content_str(m).strip()]
+    if not ai_idx:
+        last = messages[-1]
+        return len(messages) - 1, _msg_content_str(last), "last_message_fallback"
+    last_i = ai_idx[-1]
+    last_txt = _msg_content_str(messages[last_i])
+    if len(ai_idx) >= 2:
+        prev_i = ai_idx[-2]
+        prev_txt = _msg_content_str(messages[prev_i])
+        if (len(last_txt) < _CLOSER_MAX_CHARS
+                and _looks_like_closer(last_txt)
+                and len(prev_txt) >= max(_SUBSTANTIVE_MIN_CHARS,
+                                         _CLOSER_RATIO * max(len(last_txt), 1))):
+            return prev_i, prev_txt, "preceding_ai"
+    return last_i, last_txt, "last_ai"
+
+
+# ── Cube 快速通道的「查询定义」──────────────────────────────────────
+# wrenai_<库名>_query_cube 不产生 run_sql（Cube 语义层由 wren 引擎在服务端编译为
+# 目标库 SQL 执行），_extract_last_sql 的 `"run_sql" in name` 过滤结构性取空 →
+# 报告的「执行 SQL」节整节消失（实测同日同题：run_sql 通道 16087 字含 SQL 节，
+# Cube 通道 8450 字零 SQL 字样）。MCP 只回 {columns, rows, row_count, truncated}，
+# 拿不到编译后的语句，所以如实给查询定义，不伪造一条不存在的 SQL。
+_CUBE_TOOL_HINT = "query_cube"
+_CUBE_ARG_KEYS = (
+    "cube", "dimensions", "measures", "filters", "time_dimension", "granularity",
+    "segments", "order_by", "limit", "offset",
+)
+_CUBE_NOTE = (
+    "本条为 Cube 语义层查询定义（非 SQL）：wren 引擎把它编译为目标库 SQL 后执行。"
+    "本次未能取到编译后的物理 SQL（不影响查询结果与数据表）。"
+)
+_CUBE_DEF_NOTE = (
+    "以上是本次实际下发 SQL 的 Cube 语义层来源（可读性更好，但不能在 MySQL "
+    "直接执行——`v_*` 是 MDL 视图，物理库里不存在）。"
+)
+
+
+def _cube_arg_lines(name: str, args: dict) -> list:
+    """Cube 调用 → 查询定义文本行（首行是工具名）。"""
+    lines = [f"工具：{name}（wren 语义层 Cube 通道）"]
+    for k in _CUBE_ARG_KEYS:
+        v = args.get(k)
+        if v is None or v == "" or v == [] or v == {}:
+            continue
+        lines.append(f"{k}: " + (v if isinstance(v, str)
+                                 else json.dumps(v, ensure_ascii=False)))
+    return lines
+
+
+def _extract_last_cube_call(messages) -> dict:
+    """最后一次 Cube 调用的结构化形态 ``{"tool", "args", "lines"}``；无则 ``{}``。
+
+    与 ``_extract_last_cube_query`` 同一次扫描：报告侧既要展示查询定义文本，也要
+    按 args **复算**物理 SQL（见 agent/utils/wren_plan），所以两者必须来自同一次
+    调用——拆两个扫描循环迟早会漂移。
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if not isinstance(m, dict):
+            continue
+        calls = (m.get("tool_calls")
+                 or (m.get("additional_kwargs") or {}).get("tool_calls") or [])
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("name") or "")
+            if _CUBE_TOOL_HINT not in name:
+                continue
+            args = call.get("args")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    args = None
+            if not isinstance(args, dict):
+                continue
+            lines = _cube_arg_lines(name, args)
+            if len(lines) > 1:
+                return {"tool": name, "args": args, "lines": lines}
+    return {}
+
+
+def _extract_last_cube_query(messages) -> str:
+    """最后一次 Cube 查询的查询定义文本；非 Cube 通道返回空串。"""
+    return "\n".join(_extract_last_cube_call(messages).get("lines") or [])
+
+
+# ── 物理 SQL：进程内复算并附到 check 结果 ─────────────────────────────
+# 动机见 agent/utils/wren_plan 模块头：两条通道的工具返回体里都没有真正下发的
+# 语句（Cube 通道连语义层 SQL 都没有），报告里的「执行 SQL」因此要么缺失、要么
+# 是粘进 MySQL 必报错的 MDL 视图 SQL。
+_PHYSICAL_SQL_HEAD = (
+    "以上语句由 wren 引擎编译后**实际下发**到 {dialect}，可直接在 {dialect} "
+    "客户端执行（与「数据结果」同源）。"
+)
+_PHYSICAL_LIMIT_NOTE = (
+    "末尾 `LIMIT {n}` 由 wren 连接器追加（为判断结果是否被截断而多取 1 行），不需要可删。"
+)
+_PHYSICAL_DUP_LIMIT_NOTE = (
+    "注：该查询自带 limit，wren 连接器仍会再追加一行 `LIMIT`（上游既有行为），"
+    "在客户端执行时只保留一条即可。"
+)
+_SEE_PHYSICAL_NOTE = (
+    "可执行版本见「执行 SQL（物理，实际下发）」节（已展开 MDL 视图并转为目标库方言）。"
+)
+_WRENAI_PREFIX = "wrenai_"
+
+
+def _physical_sql_note(plan: dict) -> str:
+    """物理 SQL 节的注记（含 LIMIT 说明；双 LIMIT 场景如实提示）。"""
+    dialect = str(plan.get("dialect") or "").upper() or "目标库"
+    note = _PHYSICAL_SQL_HEAD.format(dialect=dialect)
+    n = plan.get("limit_appended")
+    if n:
+        note += _PHYSICAL_LIMIT_NOTE.format(n=n)
+    if plan.get("dup_limit"):
+        note += _PHYSICAL_DUP_LIMIT_NOTE
+    return note
+
+
+def _resolve_wren_ctx(tool_name: str) -> tuple:
+    """wrenai 工具名 → ``(项目路径, 连接字典)``；非 wren 工具或取不到时 ``("", {})``。
+
+    工具名里的前缀是 server 名（``wrenai_WIT_run_sql``），而 server 名是库名的
+    **不可逆 ASCII 骨架**（``WIT运营管理平台数据库`` → ``WIT``，见
+    semantic_db.wrenai_server_name）→ 按 mcp_tool 建 server 的同一套映射
+    （``discover()`` + ``wrenai_server_name``）反查库名，再取项目路径与连接配置。
+    """
+    try:
+        name = str(tool_name or "")
+        if not name.startswith(_WRENAI_PREFIX):
+            return "", {}
+        rest = name[len(_WRENAI_PREFIX):]
+        if "_" not in rest:
+            return "", {}
+        prefix = f"{_WRENAI_PREFIX}{rest.rsplit('_', 1)[0]}"
+        from agent.utils.semantic_db import get_detector, wrenai_server_name
+
+        detector = get_detector()
+        for db in sorted(detector.discover()):
+            if wrenai_server_name(db) != prefix:
+                continue
+            project = detector.project_path_for(db) or ""
+            if not project:
+                return "", {}
+            from agent.tools.mcp_tool import wren_conn_dict
+
+            conn = wren_conn_dict(db)
+            return project, (conn if isinstance(conn, dict) else {})
+        return "", {}
+    except Exception as e:  # noqa: BLE001  fail-open
+        _logger.debug("[check_progress] wren 上下文解析失败 %s: %s", tool_name, e)
+        return "", {}
+
+
+def _attach_physical_plan(result: dict, plan: dict, kind: str, label: str) -> bool:
+    """复算出的物理 SQL 落到 check 结果：**全量进文件**、结果里只放指针与小字段。
+
+    为什么不内联：实测物理 SQL 3.5~10.9 KB，内联会把整条 check 结果顶破
+    MessageSlimmerMiddleware 的 8000 字符阈值 → 结果连同 full_result_files 指针
+    被落盘替换成 1000 字符预览。落盘后结果只增约百字节，report_builder 读盘内嵌
+    （报告正文本身是文件，不进 state）。
+
+    拿不到 plan（未建模 / 复算失败）时**一个字段都不加**，行为与改动前完全一致。
+    返回是否附上。
+    """
+    if not isinstance(plan, dict) or not plan.get("dialect_sql"):
+        return False
+    try:
+        sql = plan["dialect_sql"]
+        ptr = ""
+        try:
+            from agent.middlewares.langfuse_span import _active_workspace_path
+
+            root = _active_workspace_path()
+            ptr = write_plan_file(root, _session_thread_id(), kind, label, sql)
+        except Exception as e:  # noqa: BLE001  落盘失败仍有内联兜底
+            _logger.debug("[check_progress] 物理 SQL 落盘异常: %s", e)
+
+        result["dialect"] = plan.get("dialect") or ""
+        result["dialect_sql_chars"] = len(sql)
+        result["physical_sql_note"] = _physical_sql_note(plan)
+        if plan.get("cube_sql"):
+            result["cube_sql"] = plan["cube_sql"]
+        if ptr:
+            result["dialect_sql_file"] = ptr
+        if not ptr or len(sql) <= PLAN_INLINE_MAX:
+            # 落盘不可用、或语句本身不长 → 内联一份兜底（report 优先读文件）
+            result["dialect_sql"] = sql
+        return True
+    except Exception as e:  # noqa: BLE001  fail-open
+        _logger.debug("[check_progress] 物理 SQL 附加失败: %s", e)
+        return False
+
 
 def _selected_sql_exec_meta(messages, sql) -> tuple[str, int]:
     """执行过选中 SQL 的 run_sql 工具名与返回行数（如 ("wrenai_WIT_run_sql", 42)）。
@@ -603,6 +951,31 @@ def _selected_sql_exec_meta(messages, sql) -> tuple[str, int]:
         if s == sql:
             return name, rows
     return "", 0
+
+
+def _selected_sql_call_limit(messages, sql):
+    """选中的 SQL 那次工具调用的 ``limit`` 入参（None = 未传，wren 默认按 1000 处理）。
+
+    复算实际下发语句时要靠它还原连接器追加的 ``LIMIT n``
+    （``n = min(limit or 1000, 10000) + 1``）。多次命中取最后一次（产出最终结果的那次）。
+    """
+    if not sql:
+        return None
+    limit = None
+    for m in messages:
+        tcs = (m.get("tool_calls") if isinstance(m, dict)
+               else getattr(m, "tool_calls", None)) or []
+        for tc in tcs:
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+            args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
+            if not (isinstance(name, str) and name.endswith("run_sql")):
+                continue
+            if not isinstance(args, dict):
+                continue
+            s = args.get("sql", "")
+            if isinstance(s, str) and s.strip() == sql:
+                limit = args.get("limit")
+    return limit
 
 
 def _selected_sql_is_detail(messages, sql) -> bool:
@@ -796,7 +1169,7 @@ def apply_patch():
         return
 
     # ── 1. 替换 _build_check_result：支持 running 中间态 ──────────────
-    def _enhanced_build_check_result(run, thread_id, thread_values):
+    def _enhanced_build_check_result(run, thread_id, thread_values, full=False):
         result = {"status": run["status"], "thread_id": thread_id}
         messages = (
             thread_values.get("messages", [])
@@ -805,27 +1178,48 @@ def apply_patch():
         )
         if run["status"] == "success":
             if messages:
-                last = messages[-1]
-                raw_content = (
-                    last.get("content", "") if isinstance(last, dict) else str(last)
-                )
-                summarized = _summarize_result(raw_content)
+                # 结果锚点 = 最后一条有实质内容的 AI 消息（不再机械取 messages[-1]）：
+                # 子 agent 以工具调用收尾是结构性必然，末条必是短收尾语（见
+                # _pick_result_message 注释）。下标一并回传便于排查取错了哪条。
+                _src_idx, raw_content, _picked = _pick_result_message(messages)
+                summarized = _summarize_result(raw_content, full=bool(full))
                 result["result"] = summarized
                 result["result_size"] = {
                     "chars": len(raw_content),
-                    "summarized": len(raw_content) > _MAX_RESULT_CHARS,
+                    "summarized": len(raw_content)
+                    > (_MAX_RESULT_CHARS_FULL if full else _MAX_RESULT_CHARS),
                 }
+                result["result_source"] = {
+                    "index": _src_idx,
+                    "total": len(messages),
+                    "picked": _picked,
+                }
+                if full:
+                    result["full"] = True
             else:
                 result["result"] = "(completed with no output messages)"
             # 报告装配需要真实执行 SQL：从子线程消息提取最后一次 run_sql 附到 result.sql
             sql = _extract_last_sql(messages)
             if sql:
                 result["sql"] = sql
+                # 真正下发目标库的物理 SQL：进程内复算后附指针 + 小字段。
+                # result["sql"] 是模型写的**语义层** SQL（引用 MDL 视图，粘进 MySQL
+                # 跑不了），物理 SQL 另起一节，两者都留、互不覆盖。
+                _tool_name, _ = _selected_sql_exec_meta(messages, sql)
+                _project, _conn = _resolve_wren_ctx(_tool_name)
+                _has_plan = _attach_physical_plan(
+                    result,
+                    plan_run_sql(_project, _conn, sql,
+                                 _selected_sql_call_limit(messages, sql)),
+                    "run_sql", _tool_name or "run_sql",
+                )
                 # 通道感知 SQL 注记（_build_sql_note）：wren 语义层通道的 SQL 是
                 # wren/PG 方言（引擎编译为目标库执行），「可直接运行」不成立 →
                 # 附方言转换提示；直连通道多行明细仍附旧版口径注（别拿明细去对
                 # 186/174 之类汇总数）。
                 _note = _build_sql_note(messages, sql)
+                if _note and _has_plan:
+                    _note += _SEE_PHYSICAL_NOTE
                 if _note:
                     result["sql_note"] = _note
                 # sql-generation process_data 回填为产出 run_sql（若 dry_run 与
@@ -840,6 +1234,21 @@ def apply_patch():
                         result["caliber_warning"] = _warn
                 except Exception:  # noqa: BLE001
                     pass
+            else:
+                # 无 run_sql 但走了 Cube 快速通道 → 附「查询定义」（报告里作为
+                # 物理 SQL 的语义层来源保留）。run_sql 通道仍以真实 SQL 为准，两者互斥。
+                _cube = _extract_last_cube_call(messages)
+                if _cube:
+                    result["cube_query"] = "\n".join(_cube["lines"])
+                    result["sql_kind"] = "cube"
+                    _project, _conn = _resolve_wren_ctx(_cube["tool"])
+                    _has_plan = _attach_physical_plan(
+                        result,
+                        plan_cube_sql(_project, _conn, _cube["args"]),
+                        "cube", str(_cube["args"].get("cube") or _cube["tool"]),
+                    )
+                    # 取到物理 SQL → 定义节改注「来源」；取不到 → 如实说没有
+                    result["sql_note"] = _CUBE_DEF_NOTE if _has_plan else _CUBE_NOTE
             # 大结果全量文件指针（QueryResultOffload 落盘）附到 result，
             # build_report 读盘后把完整结果表嵌入报告正文（0 模型开销）
             full_files = _collect_full_result_files(messages)
@@ -914,6 +1323,7 @@ def apply_patch():
             task_id: str,
             runtime: Annotated[ToolRuntime, InjectedToolArg()],
             since: Optional[int] = None,
+            full: Optional[bool] = None,
         ):
             task = _mod._resolve_tracked_task(task_id, runtime)
             if isinstance(task, str):
@@ -938,7 +1348,7 @@ def apply_patch():
                     pass
 
             result = _mod._build_check_result(
-                run, task["thread_id"], thread_values
+                run, task["thread_id"], thread_values, full=bool(full)
             )
             _add_incremental(result, thread_values, since)
             return _mod._build_check_command(result, task, runtime.tool_call_id)
@@ -948,6 +1358,7 @@ def apply_patch():
             task_id: str,
             runtime: Annotated[ToolRuntime, InjectedToolArg()],
             since: Optional[int] = None,
+            full: Optional[bool] = None,
         ):
             task = _mod._resolve_tracked_task(task_id, runtime)
             if isinstance(task, str):
@@ -984,7 +1395,7 @@ def apply_patch():
                     )
 
             result = _mod._build_check_result(
-                run, task["thread_id"], thread_values
+                run, task["thread_id"], thread_values, full=bool(full)
             )
             _add_incremental(result, thread_values, since)
             return _mod._build_check_command(result, task, runtime.tool_call_id)
@@ -992,12 +1403,17 @@ def apply_patch():
         tool.func = _check_sync
         tool.coroutine = _check_async
         # P1-7：暴露 since 游标参数 + 说明增量读取用法
+        # P4：暴露 full 参数——结果被摘要截断时读原文的正规通道
         tool.args_schema = CheckAsyncTaskSinceSchema
         tool.description = (
             "Check the status of an async subagent task. Returns the current status "
             "and, if complete, the result. Every check also returns a `cursor` "
             "(current message count); pass it back as `since` on a later check to "
-            "read only messages added since then (incremental reads)."
+            "read only messages added since then (incremental reads). "
+            "If the returned result looks truncated (summarized tables / omitted "
+            "middle), pass `full=true` to read the complete result text — this is "
+            "the correct way to get more data, NOT re-dispatching the subagent: a "
+            "finished task's result is fixed, so re-running it produces no new data."
         )
         return tool
 
@@ -1032,6 +1448,64 @@ def apply_patch():
             upd["async_tasks"] = merged
         return out
 
+    def _relaunch_sync_after_redispatch(task_id, runtime, out):
+        """update_async_task 重派发后重建进度同步器（P0）。
+
+        deepagents 的 update_async_task 走 runs.create(multitask_strategy="interrupt")
+        换 run，但**不拉任何 sync watcher**；而 watcher 只由 start_async_task 拉起，
+        且终态写入后只多活 ~10s 就退出。于是重派发后 async_tasks[task] 变回 "running"、
+        active_queries=true、subagent_steps_map 冻结在中间态 —— 前端卡片永久「执行中」
+        （trace a6f86bbd）。这里照抄 api 侧 _ensure_sync_watcher（sql_approval.py /
+        task_cancel.py）的存活检查写法：只在 watcher 已退出时拉起（launch_sync 非幂等）。
+
+        pin_run_id=True：只跟踪刚创建的 run，避免窗口期读到旧 run 的终态。
+        """
+        try:
+            from agent.subagents.sync_subagent_todos import (
+                is_sync_alive,
+                launch_sync,
+            )
+
+            if is_sync_alive(task_id):
+                return  # watcher 还活着，它自己会看到新 run
+            entry = ((getattr(out, "update", None) or {}).get("async_tasks") or {}).get(
+                task_id
+            )
+            if not isinstance(entry, dict):
+                entry = (
+                    (getattr(runtime, "state", None) or {}).get("async_tasks") or {}
+                ).get(task_id)
+            if not isinstance(entry, dict):
+                return
+            if str(entry.get("status") or "") != "running":
+                return  # 只有「刚被改回 running」的重派发才需要重建 watcher
+            # runtime.state 是图状态通道（不含 thread_id），主线程 id 只能从 config 取
+            cfg = (getattr(runtime, "config", None) or {}).get("configurable") or {}
+            main_thread_id = cfg.get("thread_id") or getattr(
+                getattr(runtime, "execution_info", None), "thread_id", None
+            )
+            if not main_thread_id:
+                _logger.warning(
+                    "[check_progress] 重派发但取不到主线程 id，跳过 watcher 拉起: %s",
+                    str(task_id)[:8],
+                )
+                return
+            launch_sync(
+                main_thread_id,
+                task_id,
+                str(entry.get("agent_name") or "nl2sql"),
+                entry,
+                pin_run_id=True,
+            )
+            _logger.info(
+                "[check_progress] 重派发后重建 sync watcher: sub=%s run=%s",
+                str(task_id)[:8],
+                str(entry.get("run_id"))[:8],
+            )
+        except Exception as e:  # noqa: BLE001
+            # watcher 拉起失败绝不能让工具调用失败
+            _logger.warning("[check_progress] 重建 sync watcher 失败: %s", e)
+
     _orig_update = getattr(_mod, "_build_update_tool", None)
     _orig_list = getattr(_mod, "_build_list_tasks_tool", None)
 
@@ -1042,14 +1516,18 @@ def apply_patch():
             orig_func, orig_coro = tool.func, tool.coroutine
 
             def _w(task_id: str, message: str, runtime: Annotated[ToolRuntime, InjectedToolArg()]):
-                return _reapply_task_descriptions(
+                out = _reapply_task_descriptions(
                     orig_func(task_id, message, runtime), runtime.state
                 )
+                _relaunch_sync_after_redispatch(task_id, runtime, out)
+                return out
 
             async def _aw(task_id: str, message: str, runtime: Annotated[ToolRuntime, InjectedToolArg()]):
-                return _reapply_task_descriptions(
+                out = _reapply_task_descriptions(
                     await orig_coro(task_id, message, runtime), runtime.state
                 )
+                _relaunch_sync_after_redispatch(task_id, runtime, out)
+                return out
 
             tool.func, tool.coroutine = _w, _aw
             return tool

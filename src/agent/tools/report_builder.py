@@ -104,6 +104,32 @@ def _full_table_section(result_obj) -> str:
     return "\n\n".join(parts)
 
 
+def _wren_plan_sql_section(result_obj) -> str:
+    """读回「真正下发物理库执行的 SQL」（check_progress 复算后落盘，附 VFS 指针）。
+
+    与 `_full_table_section` 同一套解析范式（VFS `/workspace/` → 活跃工作区磁盘
+    目录）。文件读不到 → 退回 check 结果里的内联 `dialect_sql`；都没有 → 返回
+    空串，该节整节不出现（**不伪造**，也绝不拿语义层 SQL 冒充可执行语句）。
+    """
+    if not isinstance(result_obj, dict):
+        return ""
+    inline = result_obj.get("dialect_sql")
+    inline = inline.strip() if isinstance(inline, str) else ""
+    fp = result_obj.get("dialect_sql_file")
+    if isinstance(fp, str) and fp.startswith("/workspace/"):
+        try:
+            from agent.workspace_manager import get_workspace_manager
+
+            root = Path(get_workspace_manager().active_workspace)
+            disk = root / fp[len("/workspace/"):]
+            if disk.is_file():
+                return disk.read_text(encoding="utf-8").rstrip()
+            _logger.warning("[build_report] 物理 SQL 文件缺失: %s", fp)
+        except Exception as e:  # noqa: BLE001  降级用内联
+            _logger.warning("[build_report] 读物理 SQL 文件失败 %s: %s", fp, e)
+    return inline
+
+
 # ── 消息归一化（兼容 dict 与 LangChain BaseMessage）───────────────────
 def _msg_name(msg) -> str:
     if isinstance(msg, dict):
@@ -261,9 +287,16 @@ async def _build_report_coro(
             "请先用 check_async_task 确认子任务已成功完成（status=success）。"
         )
     _obj, result_text = hit
-    # 真实执行 SQL：check_async_task 已把子线程最后一次 run_sql 附在 result.sql
+    # 语义层 SQL：check_async_task 已把子线程最后一次 run_sql 附在 result.sql。
+    # **注意它是模型写的形态**（引用 MDL 视图如 v_workhour），物理库里跑不了 →
+    # 真正可执行的语句另见下面的 plan_sql。
     sql = _obj.get("sql", "") if isinstance(_obj, dict) else ""
     sql = sql.strip() if isinstance(sql, str) else ""
+    # Cube 快速通道（wrenai_*_query_cube）不产生 run_sql → check 结果里没有 sql，
+    # 只有 cube_query（查询定义）。没有它时本节会整节消失（同日同题实测：run_sql
+    # 通道报告 16087 字含 SQL 节，Cube 通道 8450 字零 SQL 字样）。
+    cube_query = _obj.get("cube_query", "") if isinstance(_obj, dict) else ""
+    cube_query = cube_query.strip() if isinstance(cube_query, str) else ""
 
     # 只收「当前问题」轮次的图表（_turn_chart_iframes：轮次锚定 + 仅 tool 结果），
     # 历史问题生成的 iframe 不进本报告（用户明确要求：报告只保存当前 trace 的图）
@@ -291,6 +324,10 @@ async def _build_report_coro(
     # 注记（sql_note：wren 通道方言提示 / 明细口径注）在跳节时也照样渲染——
     # 否则内嵌 SQL 的 wren/PG 方言没有任何警示，用户直连 MySQL 跑必炸
     # （2026-09-08 INTERVAL '1 year' 实例）。
+    # 真正下发目标库执行的语句（check_progress 复算 + 落盘，见 agent/utils/wren_plan）。
+    # 上面那条 sql / cube_query 是**语义层**形态（引用 MDL 视图），在物理库里跑不了。
+    plan_sql = _wren_plan_sql_section(_obj)
+    plan_note = _obj.get("physical_sql_note") if isinstance(_obj, dict) else ""
     if sql:
         _sql_note = _obj.get("sql_note") if isinstance(_obj, dict) else ""
         if _result_already_contains_sql(str(result_text), sql):
@@ -302,6 +339,36 @@ async def _build_report_coro(
             if _sql_note:
                 md_parts += ["", f"> {_sql_note}"]
             next_section += 1
+        # wren 语义层通道（wrenai_*）：语义层 SQL 之上再给物理 SQL（直连通道
+        # dbmcp_* 的 SQL 本身就是目标库方言，没有这一节）
+        if plan_sql:
+            md_parts += [
+                f"\n## {next_section}. 执行 SQL（物理，实际下发）\n",
+                f"```sql\n{plan_sql}\n```",
+            ]
+            if plan_note:
+                md_parts += ["", f"> {plan_note}"]
+            next_section += 1
+    elif cube_query:
+        # Cube 通道：物理 SQL 在前（用户要的是可粘贴执行的那条），语义层查询定义
+        # 在后作为「来源」注解。取不到物理 SQL 时只出定义节，标题**不叫「执行 SQL」**
+        # ——用「执行 SQL」会暗示一条并不存在的 SQL。
+        if plan_sql:
+            md_parts += [
+                f"\n## {next_section}. 执行 SQL（由 Cube 语义层编译，实际下发）\n",
+                f"```sql\n{plan_sql}\n```",
+            ]
+            if plan_note:
+                md_parts += ["", f"> {plan_note}"]
+            next_section += 1
+        _cube_note = _obj.get("sql_note") if isinstance(_obj, dict) else ""
+        md_parts += [
+            f"\n## {next_section}. 查询定义（Cube 语义层）\n",
+            f"```yaml\n{cube_query}\n```",
+        ]
+        if _cube_note:
+            md_parts += ["", f"> {_cube_note}"]
+        next_section += 1
     md_parts += [f"\n## {next_section}. 分析解读\n", str(analysis).strip()]
     next_section += 1
     if iframes:
@@ -350,7 +417,8 @@ build_report_tool = StructuredTool.from_function(
     name="build_report",
     description=(
         "把已完成的查询结果程序化装配为 Markdown 报告并写入工作区 report/ 目录。"
-        "自动提取最近一次 check_async_task 成功的数据结果（数据表+SQL+洞察）与"
+        "自动提取最近一次 check_async_task 成功的数据结果（数据表+SQL 或 Cube 查询定义+洞察，"
+        "wren 语义层通道另附「真正下发物理库执行」的 SQL，可直接粘贴执行）与"
         " generate_echarts 生成的交互式图表（内嵌 iframe，可交互渲染）。"
         "调用前请确保已用 check_async_task 确认子任务完成、并用 generate_echarts 渲染图表。"
         "报告文件名自动包含精确到时分秒的时间戳，无需再用 shell 取时间。"

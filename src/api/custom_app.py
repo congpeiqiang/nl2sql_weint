@@ -33,6 +33,7 @@ import api.task_cancel  # noqa: E402
 import api.thread_compact  # noqa: E402
 import api.thread_export  # noqa: E402
 import api.thread_fork  # noqa: E402
+import api.thread_run_status  # noqa: E402
 import api.thread_search  # noqa: E402
 import api.workspace  # noqa: E402
 import api.wren_semantic  # noqa: E402
@@ -52,6 +53,7 @@ ROUTES: list[BaseRoute] = [
     *api.thread_compact.routes,
     *api.thread_export.routes,
     *api.thread_fork.routes,
+    *api.thread_run_status.routes,
     *api.thread_search.routes,
     *api.workspace.routes,
     *api.wren_semantic.routes,

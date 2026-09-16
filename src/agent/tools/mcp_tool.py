@@ -162,6 +162,32 @@ def _get_main_server_config() -> Dict[str, Any]:
     }
 
 
+def wren_conn_dict(db_name: str) -> Optional[Dict[str, Any]]:
+    """db_config → wren 连接字典（``{"datasource", "host", ...}`` 扁平形态）。
+
+    **唯一真源**：这里给 Wren profile 用的字典，与 ``agent/utils/wren_plan`` 复算
+    物理 SQL 时建的引擎用的是同一份 —— 否则报告里复算出的方言/连接可能与线上
+    实际执行的不是一回事（不带连接时 wren 会退化成 ``DATE_DIFF()`` 这类目标库
+    没有的函数，见 docs/SQL通道-SQL生成实现思路方案.md §五坑 1）。
+
+    拿不到配置时抛异常（连接信息是本地配置读取，不是网络调用），由调用方决定
+    是「回退全局 active profile」还是「不出物理 SQL 节」。
+    """
+    from mcp_server.db_mcp_server.db.core.db_config_store import get_store
+
+    cfg = get_store().get(db_name)
+    conn: Dict[str, Any] = {
+        "datasource": cfg.db_type,
+        "host": cfg.host,
+        "port": cfg.port,
+        "database": cfg.database,
+        "user": cfg.user,
+    }
+    if cfg.password:
+        conn["password"] = cfg.password
+    return conn
+
+
 # ── 3. 获取子智能体配置 ──────────────────────────────────
 def _get_sub_server_config() -> Dict[str, Any]:
     """获取子智能体的 MCP 服务器配置。
@@ -207,19 +233,9 @@ def _get_sub_server_config() -> Dict[str, Any]:
         profile_name = None
         args = ["serve", "mcp", "--project", project]
         try:
-            from mcp_server.db_mcp_server.db.core.db_config_store import get_store
             from wren.profile import add_profile
 
-            cfg = get_store().get(db_name)
-            profile_dict: Dict[str, Any] = {
-                "datasource": cfg.db_type,
-                "host": cfg.host,
-                "port": cfg.port,
-                "database": cfg.database,
-                "user": cfg.user,
-            }
-            if cfg.password:
-                profile_dict["password"] = cfg.password
+            profile_dict = wren_conn_dict(db_name)
             profile_name = f"wren_mcp_{wrenai_server_name(db_name)}"
             add_profile(profile_name, profile_dict)
             args.extend(["--profile", profile_name])
