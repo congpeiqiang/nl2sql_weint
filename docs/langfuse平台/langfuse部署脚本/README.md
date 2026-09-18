@@ -392,7 +392,7 @@ langfuse.flush()
 | `LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT` | 媒体文件对外访问地址 | `http://192.168.25.64:9090`（**必须浏览器可达**；若填容器名会导致页面图片全部裂开） |
 | `LANGFUSE_MIGRATION_V4_WRITE_MODE` | v4 写入模式 | `dual`：同时写 v3 表与 v4 事件表（`events_core`/`events_full`），读接口仍走 v3 → 平滑过渡 |
 | `LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS` | LLM Connections 出网白名单（防 SSRF） | `192.168.25.13`；**须在 `langfuse-web` 与 `langfuse-worker` 两处都被 compose 引用才生效** |
-| `LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN` | 是否允许 v4 预览功能 | `false` |
+| `LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN` | v4 预览开关 | **`true`（必须，官方默认值）** —— 它同时门控 API `/api/public/v2/observations`，应用侧读路径依赖；设 `false` → 该接口 404 且应用**静默失败**（2026-09-18 事故根因，见 §9.3） |
 | `LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL` | 是否后台回填 v3 历史数据到 v4 事件表 | `false` |
 
 ### 9.3 ⚠️ 配置生效的前提：必须在 compose 中显式引用
@@ -403,6 +403,44 @@ langfuse.flush()
 - `LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN`、`LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL` 原先只在 `.env` 中，compose 未引用 → **从未生效**；现已补入 `langfuse-web` 与 `langfuse-worker` 两处。
 - **`CLICKHOUSE_DB` 原先只写在 `clickhouse` 服务上**，`langfuse-web` / `langfuse-worker` 未引用 → Langfuse 回落到 `default`，追踪表全建在 `default` 库。现已补入两个应用服务（并保留 `clickhouse` 服务上的那一处用于建库），目标库统一为 `nl2sql`。详见 §八。
 - 同类问题（社区已报）：[issue #16012「Official Docker Compose does not pass LLM connection whitelist environment variables」](https://github.com/langfuse/langfuse/issues/16012)、修复 [PR #16014](https://github.com/langfuse/langfuse/pull/16014)。
+
+### 9.4 ⚠️ 2026-09-18 事故：「让配置生效」的修复本身引发故障
+
+**根因**：`LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN` 的**作用域比名字大**。它不只管 UI 预览开关，**同时门控 API `/api/public/v2/observations`**（Langfuse 官方 v3→v4 升级指南：v4 新读体验与 v2 API 均由该变量 gate，**默认 `true`**）。而应用侧读路径 **全部** 走这个接口 —— `src/agent/trace/langfuse_v4_reads.py` 供反馈写分、`feedback_gate` 门禁、`collect_badcase` 采集使用。
+
+**时间线**（配置与版本都没变，变的是「一个原本失效的设置开始生效」）：
+
+| 时间 | 事件 | 容器内该变量 | `v2/observations` |
+|---|---|---|---|
+| 08-27 | 部署 v4.21.0，write mode `dual` | **不存在**（compose 未引用）→ Langfuse 取默认 `true` | 200 ✅ |
+| 09-12 | 修 §9.3 的「compose 未引用」问题，按 `.env` 里的 `false` 补进 compose | — | — |
+| 09-14 | 容器重建（03:49），修复生效 | `false` | **404** ❌ |
+| 09-18 | 用户点赞写分失败暴露 | `false` | 404 ❌ |
+
+**症状**：`agent.trace.langfuse_v4_reads` WARNING `status_code: 404` / `The observations v2 API is only available in a Langfuse v4 write mode`；而 `PUT /api/threads/<tid>/messages/<mid>/feedback` 仍返回 **200**（`message_feedback._find_trace_with_retry` 退避 3 次后「跳过写分」只留 WARNING）→ 故障静默潜伏 4 天。
+
+**处置**：`.env` 改 `LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN=true`（compose 已引用该变量，改 `.env` 后重建 web/worker 即生效）：
+
+```bash
+cd /home/weint/apps/nl2sql/langfuse && cp .env .env.bak.$(date +%Y%m%d)
+sed -i 's/^LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN=.*/LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN=true/' .env
+for s in langfuse-web langfuse-worker; do
+  docker-compose stop "$s" && docker-compose rm -f "$s" && docker-compose up -d "$s"
+done
+```
+
+验证：用应用自己的 key 直探该接口应返回 200（而非 404）：
+
+```bash
+sudo docker exec nl2sql-app_langgraph-api_1 sh -c '
+  U="${LANGFUSE_HOST:-$LANGFUSE_BASE_URL}"
+  A=$(printf "%s:%s" "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY" | base64 -w0)
+  curl -s -m 10 -H "Authorization: Basic $A" "$U/api/public/v2/observations?limit=1" | head -c 200'
+```
+
+**教训**：① 名字含 `PREVIEW`/`OPT_IN` 的开关不等于只影响 UI —— 门控 API 的变量要用**请求**验证，不能按名字推断；② 一个「修配置不生效」的改动会让**此前无害的错值突然生效**，改这类变量前先确认它的值本身正确，而不是只确认它「传导到位了」；③ 变量「不生效」可能是**保护**。
+
+**同类残留风险**：应用侧对 Langfuse 失败**零感知**（API 恒 200、只有 WARNING）。下次平台侧任何漂移仍会静默失效，除非给读路径加健康探测或把同步状态显式回传（未做）。
 
 **自查方法**（确认某变量是否真正进入容器）：
 
