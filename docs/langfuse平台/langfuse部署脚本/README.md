@@ -392,7 +392,7 @@ langfuse.flush()
 | `LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT` | 媒体文件对外访问地址 | `http://192.168.25.64:9090`（**必须浏览器可达**；若填容器名会导致页面图片全部裂开） |
 | `LANGFUSE_MIGRATION_V4_WRITE_MODE` | v4 写入模式 | `dual`：同时写 v3 表与 v4 事件表（`events_core`/`events_full`），读接口仍走 v3 → 平滑过渡 |
 | `LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS` | LLM Connections 出网白名单（防 SSRF） | `192.168.25.13`；**须在 `langfuse-web` 与 `langfuse-worker` 两处都被 compose 引用才生效** |
-| `LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN` | v4 预览开关 | **`true`（必须，官方默认值）** —— 它同时门控 API `/api/public/v2/observations`，应用侧读路径依赖；设 `false` → 该接口 404 且应用**静默失败**（2026-09-18 事故根因，见 §9.3） |
+| `LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN` | v4 预览开关 | **在 compose 中硬编码为字符串 `"true"`，刻意不从 `.env` 透传**。它同时门控 API `/api/public/v2/observations`，是应用读路径的正确性前提 → 不允许被 `.env` 覆盖（2026-09-18 事故根因，见 §9.4）。**引号必须保留**：裸 `true` 会被 YAML 当布尔、docker-compose v1 注入成 `"True"` |
 | `LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL` | 是否后台回填 v3 历史数据到 v4 事件表 | `false` |
 
 ### 9.3 ⚠️ 配置生效的前提：必须在 compose 中显式引用
@@ -419,15 +419,23 @@ langfuse.flush()
 
 **症状**：`agent.trace.langfuse_v4_reads` WARNING `status_code: 404` / `The observations v2 API is only available in a Langfuse v4 write mode`；而 `PUT /api/threads/<tid>/messages/<mid>/feedback` 仍返回 **200**（`message_feedback._find_trace_with_retry` 退避 3 次后「跳过写分」只留 WARNING）→ 故障静默潜伏 4 天。
 
-**处置**：`.env` 改 `LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN=true`（compose 已引用该变量，改 `.env` 后重建 web/worker 即生效）：
+**处置**（2026-09-18 定稿：**不再保留 `.env` 旋钮**）：把仓库里的 `docker-compose.yml` 拷到服务器 —— 该变量已**硬编码为字符串 `"true"`、不再从 `.env` 透传** —— 然后重建 web/worker：
 
 ```bash
-cd /home/weint/apps/nl2sql/langfuse && cp .env .env.bak.$(date +%Y%m%d)
-sed -i 's/^LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN=.*/LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN=true/' .env
+cd /home/weint/apps/nl2sql/langfuse
+cp .env .env.bak.$(date +%Y%m%d)                 # 仅作回滚点；本次不需要改 .env
+cp <仓库>/docs/langfuse平台/langfuse部署脚本/docker-compose.yml ./docker-compose.yml
+
 for s in langfuse-web langfuse-worker; do
   docker-compose stop "$s" && docker-compose rm -f "$s" && docker-compose up -d "$s"
 done
+
+# 确认容器里拿到的是小写 true（不是 "True"）——只读
+docker exec langfuse_langfuse-web_1 printenv LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN
 ```
+
+**为什么硬编码而不是透传**：`.env` 里的显式值优先级**高于** `${VAR:-默认}` —— 本次故障正是「`.env` 的 `false` 覆盖了默认 `true`」。硬编码后，即使有人从旧备份恢复 `.env`、或那行错值一直留着，容器拿到的仍然是 `true`。
+**为什么引号不能去**：裸写 `true` 会被 YAML 解析为**布尔**，而服务器用的是 docker-compose v1（Python 写的），注入环境变量时序列化成字符串 `"True"`；Langfuse 按小写字面量校验 → 等于又把开关关掉，原样复现本次故障。
 
 验证：用应用自己的 key 直探该接口应返回 200（而非 404）：
 

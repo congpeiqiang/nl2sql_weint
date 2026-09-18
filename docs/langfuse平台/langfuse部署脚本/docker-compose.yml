@@ -50,13 +50,14 @@ services:
       NODE_OPTIONS: --max-old-space-size=512
       LANGFUSE_MIGRATION_V4_WRITE_MODE: ${LANGFUSE_MIGRATION_V4_WRITE_MODE}
       LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS: ${LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS:-}
-      # v4 迁移开关（此前仅写在 .env、未被 compose 引用，补上以使其真正生效）
-      # ⚠️ 必须为 true：该变量作用域比名字大——不只管 UI 预览，还门控 API
-      #    `/api/public/v2/observations`，而应用侧读路径（langfuse_v4_reads.py：反馈写分 /
-      #    feedback_gate / badcase 采集）全部依赖它。设 false → 该接口 404
-      #    「only available in a Langfuse v4 write mode」，且应用侧静默失败（只留 WARNING）。
-      #    2026-09-18 事故：09-12 以 false 补进 compose，09-14 重建容器后生效 → 反馈写分全挂。
-      LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN: ${LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN:-true}
+      # v4 迁移开关。⚠️ 故意硬编码为字符串 "true"，**不从 .env 透传**：
+      #    该变量作用域比名字大——不只管 UI 预览，还门控 API `/api/public/v2/observations`，
+      #    而应用侧读路径（langfuse_v4_reads.py：反馈写分 / feedback_gate / badcase 采集）
+      #    全部依赖它。它是应用的**正确性前提**，不是运维旋钮，故不允许被 .env 里的值覆盖
+      #    （2026-09-18 事故即 .env 的 false 覆盖 ${VAR:-默认} 所致）。
+      #    引号必须保留——裸写 true 会被 YAML 解析为布尔，docker-compose v1(Python) 注入时
+      #    变成字符串 "True"，Langfuse 按小写字面量校验 → 等于又把开关关掉。
+      LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN: "true"
       LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL: ${LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL:-false}
 
   langfuse-web:
@@ -105,13 +106,14 @@ services:
       NODE_OPTIONS: --max-old-space-size=2048
       LANGFUSE_MIGRATION_V4_WRITE_MODE: ${LANGFUSE_MIGRATION_V4_WRITE_MODE}
       LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS: ${LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS:-}
-      # v4 迁移开关（此前仅写在 .env、未被 compose 引用，补上以使其真正生效）
-      # ⚠️ 必须为 true：该变量作用域比名字大——不只管 UI 预览，还门控 API
-      #    `/api/public/v2/observations`，而应用侧读路径（langfuse_v4_reads.py：反馈写分 /
-      #    feedback_gate / badcase 采集）全部依赖它。设 false → 该接口 404
-      #    「only available in a Langfuse v4 write mode」，且应用侧静默失败（只留 WARNING）。
-      #    2026-09-18 事故：09-12 以 false 补进 compose，09-14 重建容器后生效 → 反馈写分全挂。
-      LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN: ${LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN:-true}
+      # v4 迁移开关。⚠️ 故意硬编码为字符串 "true"，**不从 .env 透传**：
+      #    该变量作用域比名字大——不只管 UI 预览，还门控 API `/api/public/v2/observations`，
+      #    而应用侧读路径（langfuse_v4_reads.py：反馈写分 / feedback_gate / badcase 采集）
+      #    全部依赖它。它是应用的**正确性前提**，不是运维旋钮，故不允许被 .env 里的值覆盖
+      #    （2026-09-18 事故即 .env 的 false 覆盖 ${VAR:-默认} 所致）。
+      #    引号必须保留——裸写 true 会被 YAML 解析为布尔，docker-compose v1(Python) 注入时
+      #    变成字符串 "True"，Langfuse 按小写字面量校验 → 等于又把开关关掉。
+      LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN: "true"
       LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL: ${LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL:-false}
       # headless initialization: auto-create admin user, org and project
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
