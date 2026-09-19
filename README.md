@@ -8,7 +8,7 @@
 - **多智能体架构** — 主智能体（意图路由 + 异步委派）+ NL2SQL 子智能体（专业 SQL 流水线）
 - **WrenAI 语义层** — 以 MCP 工具形式嵌入，提供 MDL 建模、语义检索、Cube 指标查询
 - **分类法引导纠错** — 9 大类 31 小类错误分类体系，最多 3 次自动纠错循环
-- **图表可视化** — 通过 Semiotic MCP 渲染 SVG 图表（柱状图、折线图等）
+- **图表可视化** — 通过 Echarts MCP 渲染图表（柱状图、折线图等）
 - **实时进度追踪** — 异步子智能体执行过程中可查看每步进度和耗时
 - **技能系统** — 7个 NL2SQL 技能按需加载，覆盖完整 Text-to-SQL 流程
 
@@ -20,7 +20,7 @@
   ▼
 LangGraph API Server (port 2026)
   ├── chat_agent    → 主智能体（意图识别 → 子智能体委派 → 结果汇总）
-  |    |── Semiotic MCP    → 图表渲染 SVG（15 个工具）
+  |    |── Echarts  MCP    → 图表渲染 SVG（15 个工具）
   
   └── nl2sql_agent  → NL2SQL 子智能体（SQL-of-Thought 流水线）
        ├── WrenAI  MCP     → 语义层、MDL、SQL 执行、知识检索（18 个工具）

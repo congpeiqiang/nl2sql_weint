@@ -1,0 +1,14 @@
+
+# dataagent项目
+https://github.com/spring-ai-alibaba/dataagent
+https://github.com/spring-ai-alibaba/DataAgent/blob/main/docs/KNOWLEDGE_USAGE.md
+
+SQL-of-Thought_Multi-agentic Text-to-SQL with.pdf
+
+
+# llm-wiki-compiler提供了MCP Server,用于管理llm-wiki知识库
+https://github.com/atomicstrata/llm-wiki-compiler
+https://github.com/nashsu/llm_wiki/blob/main/README_CN.md
+
+# 公开数据库chinook
+https://github.com/lerocha/chinook-database/blob/master/ChinookDatabase/DataSources/Chinook_MySql_AutoIncrementPKs.sql

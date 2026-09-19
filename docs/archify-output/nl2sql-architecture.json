@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "NL2SQL 智能体系统架构",
+    "output": "nl2sql-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1560, 700]
+  },
+  "components": [
+    { "id": "frontend", "type": "frontend", "label": "Web 前端", "sublabel": "deep-agents-ui · Next.js", "pos": [40, 380], "size": [150, 66] },
+    { "id": "api", "type": "backend", "label": "LangGraph API", "sublabel": "uvicorn :2026 · 自定义路由", "pos": [290, 380], "size": [150, 66] },
+    { "id": "chat-agent", "type": "backend", "label": "主智能体", "sublabel": "chat_agent · deepagents", "pos": [540, 370], "size": [160, 82] },
+    { "id": "nl2sql-agent", "type": "backend", "label": "NL2SQL 子智能体", "sublabel": "nl2sql_agent · deepagents", "pos": [800, 370], "size": [160, 82] },
+    { "id": "wrenai", "type": "backend", "label": "WrenAI 语义层", "sublabel": "wren serve mcp · 按库 server", "pos": [1050, 262], "size": [160, 66] },
+    { "id": "dbmcp", "type": "backend", "label": "dbmcp 直连通道", "sublabel": "多引擎 runner · 按 db_name 路由", "pos": [1050, 480], "size": [160, 66] },
+    { "id": "dbs", "type": "database", "label": "业务数据库", "sublabel": "MySQL · ClickHouse · PostgreSQL · DuckDB…", "pos": [1300, 380], "size": [170, 66] },
+    { "id": "skills", "type": "backend", "label": "技能流水线", "sublabel": "nl2sql A+B 双策略 · 9 个子技能", "pos": [780, 596], "size": [200, 62] },
+    { "id": "chart-mcp", "type": "backend", "label": "图表 MCP", "sublabel": "Semiotic / ECharts", "pos": [540, 106], "size": [160, 60] },
+    { "id": "llm", "type": "external", "label": "DeepSeek LLM", "sublabel": "deepseek-v4-flash API", "pos": [800, 22], "size": [160, 60] },
+    { "id": "checkpoint", "type": "database", "label": "会话持久化", "sublabel": "AsyncSqliteSaver · workspace", "pos": [290, 106], "size": [150, 60] },
+    { "id": "langsmith", "type": "external", "label": "LangSmith", "sublabel": "可选追踪", "pos": [1300, 22], "size": [160, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Agent 服务进程（uvicorn :2026）", "wraps": ["api", "checkpoint", "chat-agent", "nl2sql-agent", "chart-mcp", "skills"], "pad": 16 },
+    { "kind": "security-group", "label": "只读 SQL 查询边界", "wraps": ["wrenai", "dbmcp", "dbs"], "pad": 14 }
+  ],
+  "connections": [
+    { "from": "frontend", "to": "api", "label": "HTTPS · langgraph-sdk", "variant": "emphasis", "labelDy": 57 },
+    { "from": "api", "to": "chat-agent", "label": "chat_agent", "variant": "emphasis" },
+    { "from": "chat-agent", "to": "nl2sql-agent", "label": "AsyncSubAgent 委派", "variant": "emphasis", "labelDy": 58 },
+    { "from": "nl2sql-agent", "to": "skills", "label": "SkillsMiddleware 加载", "fromSide": "bottom", "toSide": "top", "route": "orthogonal-v" },
+    { "from": "nl2sql-agent", "to": "wrenai", "label": "语义层 wrenai_<库>_run_sql" },
+    { "from": "nl2sql-agent", "to": "dbmcp", "label": "直连 dbmcp_run_sql", "variant": "emphasis", "labelDy": 10 },
+    { "from": "wrenai", "to": "dbs", "label": "SQL 执行" },
+    { "from": "dbmcp", "to": "dbs", "label": "SQL 执行" },
+    { "from": "chat-agent", "to": "chart-mcp", "label": "图表生成", "variant": "dashed" },
+    { "from": "chat-agent", "to": "llm", "label": "DeepSeek API", "variant": "dashed" },
+    { "from": "nl2sql-agent", "to": "llm", "label": "DeepSeek API", "variant": "dashed" },
+    { "from": "api", "to": "checkpoint", "label": "AsyncSqliteSaver", "variant": "dashed" },
+    { "from": "llm", "to": "langsmith", "label": "可选追踪", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "主查询路径", "items": ["用户提问 → LangGraph API（:2026）→ 主智能体 chat_agent", "AsyncSubAgent 委派 → NL2SQL 子智能体 → 双通道执行 SQL", "结果经图表 / 报告返回前端"] },
+    { "dot": "violet", "title": "双通道路由", "items": ["已建模库 → WrenAI 语义层通道（wrenai_<库>_get_mdl / describe_schema / run_sql）", "未建模库 → dbmcp 直连（dbmcp_get_db_info / dbmcp_run_sql）", "SemanticDbDetector 动态判定并注入路由指引，误用自动纠错"] },
+    { "dot": "emerald", "title": "NL2SQL 技能流水线（A+B 双策略）", "items": ["sql-of-thought 策略决策 → 澄清 → 知识加载", "子问题分解 → 查询计划 → schema 链接 → SQL 生成", "性能优化 · 纠错 · 双策略（A 流水线 / B 快速路径）"] },
+    { "dot": "amber", "title": "安全与持久化", "items": ["FILE_PERMISSIONS：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写", "SQL 只读边界：禁写语句 · 超时 · 返回行数限制", "AsyncSqliteSaver checkpoint + workspace 文件持久化"] }
+  ]
+}

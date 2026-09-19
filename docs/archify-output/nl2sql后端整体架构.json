@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "NL2SQL 后端整体架构（含 Agent 编排）",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "query-path",
+        "label": "一次取数主链路",
+        "focus": ["frontend", "nginx", "host", "main_agent", "sub_agent", "mcp_wrenai", "bizdb"],
+        "note": "提问经 nginx 进入单进程宿主，主智能体异步委派给 NL2SQL 子智能体，子智能体走语义层通道编译并执行物理 SQL。"
+      },
+      {
+        "id": "async-loop",
+        "label": "异步子任务闭环",
+        "focus": ["host", "main_agent", "sub_agent", "sync"],
+        "note": "子智能体在独立线程与独立 run 中运行；守护线程每 0.5s 轮询其 state，并加锁回写主流程的进度与终态。"
+      },
+      {
+        "id": "dual-channel",
+        "label": "双通道取数与护栏",
+        "focus": ["sub_agent", "mcp_wrenai", "mcp_dbmcp", "bizdb"],
+        "note": "语义层通道与直连通道并存：前者由语义模型编译物理 SQL，后者直连执行，两者都受工具过滤与查询闸约束。"
+      },
+      {
+        "id": "support-plane",
+        "label": "报告与支撑面",
+        "focus": ["main_agent", "chart", "support", "store", "ext"],
+        "note": "报告、图表、大结果与物理 SQL 落到工作区产物；配置、追踪、评估走支撑层与独立部署的外部系统。"
+      }
+    ]
+  },
+  "components": [
+    { "id": "frontend", "type": "frontend", "label": "Next.js 前端", "sublabel": ":3000 · 聊天 / 实验 / 标注", "pos": [40, 340], "size": [180, 76] },
+    { "id": "nginx", "type": "cloud", "label": "nginx :80", "sublabel": "路由分流 · SSE 反代", "pos": [380, 340], "size": [170, 76], "tag": "接入层" },
+    { "id": "host", "type": "backend", "label": "langgraph-api :2026", "sublabel": "单进程宿主 · 原生路由 + 19 自定义路由", "pos": [760, 340], "size": [190, 76], "tag": "服务宿主" },
+    { "id": "main_agent", "type": "backend", "label": "chat_agent 主智能体", "sublabel": "意图识别 · 异步委派 · 报告装配", "pos": [1150, 340], "size": [200, 76] },
+    { "id": "sub_agent", "type": "backend", "label": "nl2sql_agent 子智能体", "sublabel": "独立线程 / 独立 run · 双通道取数", "pos": [1520, 340], "size": [200, 76] },
+    { "id": "sync", "type": "backend", "label": "同步守护线程", "sublabel": "0.5s 轮询 state · 加锁回写", "pos": [755, 540], "size": [200, 80] },
+    { "id": "mcp_wrenai", "type": "backend", "label": "MCP wrenai", "sublabel": "语义层 Cube 查询 · 编译物理 SQL", "pos": [1520, 660], "size": [200, 80], "tag": "Stdio 子进程" },
+    { "id": "mcp_dbmcp", "type": "backend", "label": "MCP dbmcp", "sublabel": "直连 SQL 执行（第二通道）", "pos": [1810, 660], "size": [200, 80], "tag": "Stdio 子进程" },
+    { "id": "chart", "type": "backend", "label": "图表与报告", "sublabel": "ECharts MCP · build_report", "pos": [1500, 790], "size": [220, 90], "tag": "进程内工具" },
+    { "id": "support", "type": "backend", "label": "支撑层", "sublabel": "工作区 · 配置 · 模型工厂 · 追踪 · 评估 · 反馈", "pos": [700, 690], "size": [220, 84] },
+    { "id": "store", "type": "database", "label": "持久化", "sublabel": "PostgreSQL · SQLite×6 · JSON 配置 · 文件产物", "pos": [700, 820], "size": [220, 84] },
+    { "id": "ext", "type": "external", "label": "外部系统", "sublabel": "Langfuse · LLM 供应商 · Git 远端", "pos": [960, 830], "size": [240, 100], "tag": "独立部署" },
+    { "id": "bizdb", "type": "database", "label": "业务数据库", "sublabel": "MySQL · ClickHouse · PostgreSQL", "pos": [1810, 860], "size": [200, 80] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "langgraph-api 单进程 :2026", "wraps": ["host", "main_agent", "sub_agent", "sync"] },
+    { "kind": "region", "label": "支撑层与持久化", "wraps": ["support", "store"] },
+    { "kind": "security-group", "label": "外部依赖（独立部署）", "wraps": ["ext"], "pad": 16 },
+    { "kind": "security-group", "label": "只读数据源", "wraps": ["bizdb"], "pad": 16 }
+  ],
+  "connections": [
+    { "from": "frontend", "to": "nginx", "label": "同源请求 · SSE", "variant": "emphasis" },
+    { "from": "nginx", "to": "host", "label": "反向代理 · SSE", "variant": "emphasis" },
+    { "from": "host", "to": "main_agent", "label": "run 驱动", "variant": "emphasis" },
+    { "from": "main_agent", "to": "sub_agent", "label": "异步委派", "variant": "emphasis" },
+    { "from": "sync", "to": "main_agent", "label": "0.5s 轮询回写", "variant": "emphasis" },
+    { "from": "sub_agent", "to": "mcp_wrenai", "label": "语义层通道", "variant": "emphasis", "labelAt": [1620, 430] },
+    { "from": "sub_agent", "to": "mcp_dbmcp", "label": "直连通道" },
+    {
+      "from": "host",
+      "to": "support",
+      "label": "19 路由进程内直插",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [[855, 470], [700, 470], [700, 665], [810, 665]],
+      "labelAt": [630, 620]
+    },
+    { "from": "support", "to": "store", "label": "状态与产物", "variant": "dashed", "labelAt": [810, 797] },
+    { "from": "support", "to": "ext", "label": "trace / LLM 上下行", "variant": "dashed" },
+    {
+      "from": "main_agent",
+      "to": "chart",
+      "label": "报告与图表",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [[1250, 835]]
+    },
+    {
+      "from": "mcp_wrenai",
+      "to": "bizdb",
+      "label": "执行物理 SQL",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [[1620, 765], [1750, 765], [1750, 900]]
+    },
+    { "from": "mcp_dbmcp", "to": "bizdb", "label": "直连执行", "labelAt": [1910, 794] }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "三条关键机制",
+      "items": [
+        "异步子任务：主智能体派发开工 → 子智能体独立线程 / 独立 run → 守护线程轮询回收并加锁回写",
+        "双通道取数：语义层通道（wrenai 编译物理 SQL）与直连通道（dbmcp）并存，受工具过滤与查询闸约束",
+        "单进程宿主：LangGraph 原生路由 + 19 个自定义路由模块 + 唯一全局中间件，无需额外服务"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "存储与产物",
+      "items": [
+        "PostgreSQL 承载 LangGraph checkpoint（生产），本地开发退化为 SQLite",
+        "SQLite×6 分库：事件 / 全文检索 / 反馈 / 队列 / 绑定 / 开发 checkpoint",
+        "报告、图表、大结果与真实物理 SQL 统一落到工作区产物，便于复核"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "进程与边界",
+      "items": [
+        "MCP server 不单独起容器：由宿主以 stdio 子进程装载（图表 MCP 依赖 Node.js 20）",
+        "离线 A/B 实验以 worker 子进程运行，不占用在线链路",
+        "Langfuse 与其自有 PG / ClickHouse 独立部署，不在本服务编排内"
+      ]
+    }
+  ]
+}
