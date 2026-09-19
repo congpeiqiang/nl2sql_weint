@@ -4,6 +4,7 @@
 """
 
 from agent.workspace_manager.manager import (  # noqa: F401
+    OFFLINE_EXPERIMENT_DIR_NAME,
     WorkspaceManager,
     get_workspace_manager,
 )

@@ -26,7 +26,7 @@ _logger = logging.getLogger(__name__)
 
 # ── SQL 分类 ────────────────────────────────────────────────────────────
 
-# 首个关键词属于该集合 → 写/DDL 操作
+# 首个关键词属于该集合 → 写/DDL 操作 黑名单
 _WRITE_LEADING = {
     "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
     "REPLACE", "MERGE", "GRANT", "REVOKE", "RENAME", "ATTACH", "DETACH",
@@ -189,7 +189,7 @@ def classify_sql(sql: str) -> tuple[str, str]:
         return "read", ""
 
     stripped = _strip_sql(sql)
-    # 多语句：按顶层分号拆分，取最严结论（write > full_dump > read）
+    # 多语句：    按顶层分号拆分，取最严结论（write > full_dump > read）
     statements = [s for s in (seg.strip() for seg in stripped.split(";")) if s]
     if not statements:
         return "read", ""

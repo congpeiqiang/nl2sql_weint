@@ -14,7 +14,7 @@ wheels/
 .env.prod
 
 # Runtime checkpoint data (auto-recreated by backend on startup)
-src/agent/workspace/checkpoint/
+src/agent/workspace-temp/checkpoint/
 
 # 忽略 SQLite 数据库大文件
 *.sqlite
@@ -32,13 +32,15 @@ src/agent/workspace/checkpoint/
 db_config.json
 
 # 消息反馈运行时数据（SQLite + WAL 伴生 + 旧 JSON 留档，收进 feedback/ 子目录）
-src/agent/workspace/feedback/
+src/agent/workspace-temp/feedback/
 model_config.json
 
 # 运行时日志（start_server.py 文件日志，自动轮转，不入库）
 logs/
 
-# skill 版本化物化目录（AGENT_DATA_ROOT 未配置时兜底落仓库内；配置时在项目外）
+# 离线实验物化目录（skill_refs / prompt_refs；AGENT_DATA_ROOT 未配置时兜底落仓库内，
+# 配置时在项目外）。旧的 src/agent/skill_refs/ 已迁入 offline_experiment/ 下。
+src/agent/offline_experiment/
 src/agent/skill_refs/
 
 # 调试期服务日志（Start-Process 重定向输出，不入库）
@@ -51,8 +53,11 @@ server_*.log
 .tmp/
 
 # ── 工作区运行时产物 ──
-src/agent/workspace/tmp/
-src/agent/workspace/large_tool_results/
-src/agent/workspace/nl2sql_process_data/
+# 旧的仓内默认工作区（已被 AGENT_DATA_ROOT 外置取代，代码不再引用）：整目录不入库。
+# 内含 LanceDB 二进制、嵌套 .git 语义库、tmp 调试脚本与历史报告产物，历史上零个文件被跟踪。
+src/agent/workspace-temp/
+src/agent/workspace-temp/tmp/
+src/agent/workspace-temp/large_tool_results/
+src/agent/workspace-temp/nl2sql_process_data/
 # 各工作区 Wren 查询历史（LanceDB，运行时生成）
-src/agent/workspace/*/.wren/
+src/agent/workspace-temp/*/.wren/

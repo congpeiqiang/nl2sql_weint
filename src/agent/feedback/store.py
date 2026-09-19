@@ -38,6 +38,17 @@ _LEGACY_JSON_PATH = os.getenv("MESSAGE_FEEDBACK_JSON_PATH", "") or None
 
 VALID_RATINGS = ("positive", "negative")
 MAX_NOTE_BYTES = 2048
+# SQL 快照（feedback.sql / annotation.bad_sql）的截断线。快照既可能是模型写的
+# 语义层 SQL（几百字符），也可能是 Cube 通道复算出的**物理 SQL**（展开 MDL 视图
+# 后 3~11KB，见 agent/utils/wren_call_extract）——后者是本上限的由来：超过它就只能
+# 存一条跑不了的半截 SQL，不如退回语义层 SQL。调用方截断时统一引用本常量。
+#
+# 2026-09-19：由 8000 提到 64000。8000 这个数压不住实测上限（复杂口径的物理 SQL
+# 见过 10.9KB），一超线就退回语义层 SQL —— 而语义层 SQL 在物理库跑不了：标注页
+# 「执行校验」会失败，入集的 physical_sql_original 也不再是物理 SQL（键名撒谎）。
+# 64000 相对实测最大值留约 6 倍余量，正常口径碰不到这条线；真碰到的行为与从前
+# 一致（退语义层 SQL），只是那条路现在几乎不可达。
+MAX_SNAPSHOT_SQL = 64000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS feedback (
@@ -52,6 +63,7 @@ CREATE TABLE IF NOT EXISTS feedback (
     question    TEXT NOT NULL DEFAULT '',
     sql         TEXT NOT NULL DEFAULT '',
     feedback_type TEXT NOT NULL DEFAULT '',
+    cube_spec   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (thread_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_thread ON feedback(thread_id);
@@ -61,6 +73,7 @@ CREATE TABLE IF NOT EXISTS feedback_annotation (
     feedback_type TEXT NOT NULL DEFAULT '',
     question    TEXT NOT NULL DEFAULT '',
     bad_sql     TEXT NOT NULL DEFAULT '',
+    cube_spec   TEXT NOT NULL DEFAULT '',
     exec_error  TEXT NOT NULL DEFAULT '',
     note        TEXT NOT NULL DEFAULT '',
     rating      TEXT NOT NULL DEFAULT '',
@@ -74,6 +87,7 @@ CREATE TABLE IF NOT EXISTS feedback_annotation (
     created_at  TEXT NOT NULL DEFAULT '',
     annotated_at TEXT NOT NULL DEFAULT '',
     badcase_at  TEXT NOT NULL DEFAULT '',
+    auto_good   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (thread_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_fa_status ON feedback_annotation(status);
@@ -90,6 +104,14 @@ ANNOTATION_NON_TERMINAL = ("queued", "annotating", "validated")
 # 终态：不可再 judge/confirm/execute（只能人工改库恢复）
 _TERMINAL = ("badcase", "good", "rejected")
 
+# 可以被「硬删除」的四个状态（标注页左栏的四个本地 Tab）。
+# rejected 虽是终态但没有外部产物，可删；good / badcase 各有对应物（Langfuse
+# Dataset 条目、badcase_status.json 条目），删本地行会把它们变成孤儿——它们各有
+# 自己的撤回路径（revoke-good、Langfuse UI），故排除在外。
+# 必须是**正白名单**：list_annotations(status=None) 意味着「全部状态」，用黑名单
+# 配 `status or None` 会让一次「清空本 Tab」连 good/badcase 一起删掉。
+ANNOTATION_DELETABLE = ("queued", "annotating", "validated", "rejected")
+
 
 class VersionConflictError(Exception):
     """CAS 冲突：请求携带的 if_version 与存储 version 不一致。"""
@@ -97,6 +119,23 @@ class VersionConflictError(Exception):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _loads_spec(v) -> dict:
+    """cube_spec 列（TEXT/JSON）→ dict；任何脏值退回空 dict（绝不抛）。
+
+    与 ``context``/``context_json`` 同一套做法：dataclass 里是 dict（API 直接可序列化），
+    库里是 JSON 串。老库该列不存在时 row 取值会是 None → 空 dict。
+    """
+    if isinstance(v, dict):
+        return v
+    if not v:
+        return {}
+    try:
+        got = json.loads(v)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return got if isinstance(got, dict) else {}
 
 
 @dataclass
@@ -114,6 +153,9 @@ class FeedbackRecord:
     question: str = ""
     sql: str = ""
     feedback_type: str = ""
+    # Cube 通道的规范化查询定义（measures/dimensions/filters…）；非 Cube 通道为空 dict。
+    # 与 sql 快照同一次复算产出，供入 BadCase/Good Set 时带上聚合口径做监控与评测比对。
+    cube_spec: dict = field(default_factory=dict)
 
     @staticmethod
     def _key(thread_id: str, message_id: str) -> str:
@@ -136,6 +178,7 @@ class FeedbackRecord:
             question=str(data.get("question", "")),
             sql=str(data.get("sql", "")),
             feedback_type=str(data.get("feedback_type", "") or ""),
+            cube_spec=_loads_spec(data.get("cube_spec")),
         )
 
 
@@ -148,6 +191,8 @@ class AnnotationRecord:
     feedback_type: str = ""
     question: str = ""
     bad_sql: str = ""
+    # Cube 通道的规范化查询定义（与 bad_sql 同一次复算产出）；非 Cube 通道为空 dict
+    cube_spec: dict = field(default_factory=dict)
     exec_error: str = ""
     note: str = ""
     rating: str = ""
@@ -161,6 +206,10 @@ class AnnotationRecord:
     created_at: str = ""
     annotated_at: str = ""
     badcase_at: str = ""
+    # 1 = 本条 Good Set 由「点赞自动入集」写入（无人点击），0 = 人工确认或未入集。
+    # 用途：① 撤回端点区分「机器写的」与「人写的」；② 用户撤销点赞时只自动收回
+    # 自动写入的那条（人的判断依据不止那个 👍）；③ 前端标注「自动入集」。
+    auto_good: int = 0
 
     def to_mapping(self) -> dict:
         return asdict(self)
@@ -188,34 +237,37 @@ class FeedbackStore:
         self._migrate_from_json()
 
     def _migrate_schema(self) -> None:
-        """存量库增量迁移（幂等）：feedback 表补 feedback_type；标注表补 db_name。"""
+        """存量库增量迁移（幂等）：feedback 补 feedback_type/cube_spec；标注表补 db_name/cube_spec。
+
+        每列一个独立 try：某列迁移失败不该挡住其余列（旧库结构千奇百怪，按已有结构继续）。
+        """
+        pending = (
+            ("feedback", "feedback_type", "TEXT NOT NULL DEFAULT ''"),
+            # cube_spec：Cube 通道的规范化查询定义（measures/dimensions… JSON 串）。
+            # 与 sql 快照**同一时刻**由同一次复算产出（见 message_feedback 的
+            # _extract_sql_with_cube / feedback_annotation 的 _backfill_annotation）——
+            # 落库是为了入 BadCase/Good Set 时能带上「聚合口径」，供监控与评测比对
+            # （只存物理 SQL 的话，口径差异从 SQL 里读起来很费劲）。
+            ("feedback", "cube_spec", "TEXT NOT NULL DEFAULT ''"),
+            ("feedback_annotation", "db_name", "TEXT NOT NULL DEFAULT ''"),
+            ("feedback_annotation", "cube_spec", "TEXT NOT NULL DEFAULT ''"),
+            # auto_good：本条 Good Set 是不是「点赞自动入集」写的（见 AnnotationRecord）。
+            ("feedback_annotation", "auto_good", "INTEGER NOT NULL DEFAULT 0"),
+        )
         with _LOCK:
-            try:
-                cols = {
-                    r["name"]
-                    for r in self._conn.execute("PRAGMA table_info(feedback)").fetchall()
-                }
-                if "feedback_type" not in cols:
-                    self._conn.execute(
-                        "ALTER TABLE feedback ADD COLUMN feedback_type TEXT NOT NULL DEFAULT ''"
-                    )
-                    self._conn.commit()
-                    _logger.info("[feedback] 迁移：feedback 表新增 feedback_type 列")
-            except Exception as e:  # noqa: BLE001
-                _logger.warning("[feedback] feedback_type 列迁移失败（按已有结构继续）: %s", e)
-            try:
-                cols = {
-                    r["name"]
-                    for r in self._conn.execute("PRAGMA table_info(feedback_annotation)").fetchall()
-                }
-                if cols and "db_name" not in cols:
-                    self._conn.execute(
-                        "ALTER TABLE feedback_annotation ADD COLUMN db_name TEXT NOT NULL DEFAULT ''"
-                    )
-                    self._conn.commit()
-                    _logger.info("[feedback] 迁移：feedback_annotation 表新增 db_name 列")
-            except Exception as e:  # noqa: BLE001
-                _logger.warning("[feedback] 标注表 db_name 列迁移失败: %s", e)
+            for table, col, decl in pending:
+                try:
+                    cols = {
+                        r["name"]
+                        for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+                    }
+                    if cols and col not in cols:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                        self._conn.commit()
+                        _logger.info("[feedback] 迁移：%s 表新增 %s 列", table, col)
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning("[feedback] %s.%s 列迁移失败（按已有结构继续）: %s",
+                                    table, col, e)
 
     # ── 迁移 ──────────────────────────────────────────────
     def _migrate_from_json(self) -> None:
@@ -264,6 +316,7 @@ class FeedbackStore:
             question=row["question"],
             sql=row["sql"],
             feedback_type=row["feedback_type"] if "feedback_type" in row.keys() else "",
+            cube_spec=_loads_spec(row["cube_spec"] if "cube_spec" in row.keys() else None),
         )
 
     def _insert(self, rec: FeedbackRecord) -> None:
@@ -271,14 +324,15 @@ class FeedbackStore:
             """
             INSERT INTO feedback
                 (thread_id, message_id, rating, note, version, created_at, updated_at,
-                 context_json, question, sql, feedback_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 context_json, question, sql, feedback_type, cube_spec)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.thread_id, rec.message_id, rec.rating, rec.note, rec.version,
                 rec.created_at, rec.updated_at,
                 json.dumps(rec.context, ensure_ascii=False), rec.question, rec.sql,
                 rec.feedback_type or "",
+                json.dumps(rec.cube_spec or {}, ensure_ascii=False),
             ),
         )
 
@@ -286,12 +340,13 @@ class FeedbackStore:
         self._conn.execute(
             """
             UPDATE feedback SET rating=?, note=?, version=?, updated_at=?,
-                context_json=?, question=?, sql=?
+                context_json=?, question=?, sql=?, cube_spec=?
             WHERE thread_id=? AND message_id=?
             """,
             (
                 rec.rating, rec.note, rec.version, rec.updated_at,
                 json.dumps(rec.context, ensure_ascii=False), rec.question, rec.sql,
+                json.dumps(rec.cube_spec or {}, ensure_ascii=False),
                 rec.thread_id, rec.message_id,
             ),
         )
@@ -345,11 +400,20 @@ class FeedbackStore:
             self._conn.commit()
             return rec
 
-    def update_snapshot(self, thread_id: str, message_id: str, question: str, sql: str) -> bool:
-        """后台补齐 question/sql 快照。
+    def update_snapshot(
+        self,
+        thread_id: str,
+        message_id: str,
+        question: str,
+        sql: str,
+        cube_spec: Optional[dict] = None,
+    ) -> bool:
+        """后台补齐 question/sql/cube_spec 快照。
 
         - 不 bump version：避免与前端已缓存的 version 产生 CAS 冲突。
         - 记录已被删除（撤销反馈）时 no-op，返回 False。
+        - ``cube_spec=None`` 表示「本次没算」→ 不覆盖已有值；传 ``{}`` 表示「算过，
+          确认非 Cube 通道」→ 写空。两者语义不同，别混。
         """
         with _LOCK:
             row = self._conn.execute(
@@ -358,10 +422,18 @@ class FeedbackStore:
             ).fetchone()
             if row is None:
                 return False
-            self._conn.execute(
-                "UPDATE feedback SET question=?, sql=? WHERE thread_id=? AND message_id=?",
-                (question, sql, thread_id, message_id),
-            )
+            if cube_spec is None:
+                self._conn.execute(
+                    "UPDATE feedback SET question=?, sql=? WHERE thread_id=? AND message_id=?",
+                    (question, sql, thread_id, message_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE feedback SET question=?, sql=?, cube_spec=?"
+                    " WHERE thread_id=? AND message_id=?",
+                    (question, sql, json.dumps(cube_spec or {}, ensure_ascii=False),
+                     thread_id, message_id),
+                )
             self._conn.commit()
             return True
 
@@ -466,11 +538,12 @@ class FeedbackStore:
                         "UPDATE feedback_annotation SET status='queued', is_valid=NULL,"
                         " question=?, bad_sql=?, rating=?, note=?, feedback_type=?,"
                         " db_name=?, annotator='', annotated_at='', badcase_at='',"
-                        " bad_type='', gold_sql='', gold_result='', exec_error=''"
+                        " bad_type='', gold_sql='', gold_result='', exec_error='',"
+                        " auto_good=0"
                         " WHERE thread_id=? AND message_id=?",
                         (
                             (question or "")[:2000] or cur.question,
-                            (sql or "")[:8000] or cur.bad_sql,
+                            (sql or "")[:MAX_SNAPSHOT_SQL] or cur.bad_sql,
                             rating,
                             (note or "")[:2000],
                             feedback_type,
@@ -494,7 +567,7 @@ class FeedbackStore:
                 message_id=message_id,
                 feedback_type=feedback_type or "",
                 question=(question or "")[:2000],
-                bad_sql=(sql or "")[:8000],
+                bad_sql=(sql or "")[:MAX_SNAPSHOT_SQL],
                 note=(note or "")[:2000],
                 rating=rating,
                 db_name=(db_name or "")[:128],
@@ -523,6 +596,7 @@ class FeedbackStore:
             feedback_type=row["feedback_type"] or "",
             question=row["question"] or "",
             bad_sql=row["bad_sql"] or "",
+            cube_spec=_loads_spec(row["cube_spec"] if "cube_spec" in row.keys() else None),
             exec_error=row["exec_error"] or "",
             note=row["note"] or "",
             rating=row["rating"] or "",
@@ -536,6 +610,7 @@ class FeedbackStore:
             created_at=row["created_at"] or "",
             annotated_at=row["annotated_at"] or "",
             badcase_at=row["badcase_at"] or "",
+            auto_good=int(row["auto_good"] or 0) if "auto_good" in row.keys() else 0,
         )
 
     def get_annotation(self, thread_id: str, message_id: str) -> AnnotationRecord | None:
@@ -566,9 +641,9 @@ class FeedbackStore:
     ) -> AnnotationRecord | None:
         """按需更新标注记录（白名单字段；校验状态机，非法状态转换返回 None）。"""
         allowed = {
-            "feedback_type", "question", "bad_sql", "exec_error", "note", "rating",
-            "db_name", "status", "is_valid", "gold_sql", "gold_result", "bad_type",
-            "annotator", "annotated_at", "badcase_at",
+            "feedback_type", "question", "bad_sql", "cube_spec", "exec_error", "note",
+            "rating", "db_name", "status", "is_valid", "gold_sql", "gold_result",
+            "bad_type", "annotator", "annotated_at", "badcase_at", "auto_good",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
@@ -590,7 +665,12 @@ class FeedbackStore:
             for k, v in updates.items():
                 setattr(cur, k, v)
             cols = ", ".join(f"{k}=?" for k in updates)
-            vals = list(updates.values()) + [thread_id, message_id]
+            # cube_spec 在记录里是 dict、在库里是 JSON 串（与 context/context_json 同构）；
+            # 本函数是**动态拼列**的，不像 _insert 有固定语句，故序列化只能落在绑定处。
+            vals = [
+                json.dumps(v, ensure_ascii=False) if k == "cube_spec" else v
+                for k, v in updates.items()
+            ] + [thread_id, message_id]
             self._conn.execute(
                 f"UPDATE feedback_annotation SET {cols} WHERE thread_id=? AND message_id=?",
                 tuple(vals),
@@ -616,7 +696,89 @@ class FeedbackStore:
                 self._conn.commit()
             return cur.rowcount or 0
 
+    def reopen_annotation(self, thread_id: str, message_id: str) -> AnnotationRecord | None:
+        """把终态 good 撤回为 queued（「撤回入集」专用入口）。不存在返回 None。
+
+        为什么必须另开方法：update_annotation 的「终态不可回退」是 badcase/good/
+        rejected 三条终态共用的护栏（防止误操作把已定稿的标注改回去）。撤回是
+        唯一合法的回退场景，且要连带清空金标字段——写成一个语义明确的动作，
+        不去松动那条护栏。
+
+        清空 gold_sql/gold_result/bad_type/annotator/auto_good，是因为这些字段
+        描述的是「已入集的那个决定」，撤回后条目回到「待判断」，留着会让详情页
+        显示一份不存在的金标。bad_sql（模型当时的 SQL）保留——它是事实，不是决定。
+        """
+        with _LOCK:
+            row = self._conn.execute(
+                "SELECT * FROM feedback_annotation WHERE thread_id=? AND message_id=?",
+                (thread_id, message_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if self._row_to_annotation(row).status != "good":
+                return None  # 只撤 good；其余状态不该走这条路
+            self._conn.execute(
+                "UPDATE feedback_annotation SET status='queued', is_valid=NULL,"
+                " gold_sql='', gold_result='', bad_type='', annotator='',"
+                " annotated_at='', badcase_at='', auto_good=0"
+                " WHERE thread_id=? AND message_id=?",
+                (thread_id, message_id),
+            )
+            self._conn.commit()
+            return self._row_to_annotation(
+                self._conn.execute(
+                    "SELECT * FROM feedback_annotation WHERE thread_id=? AND message_id=?",
+                    (thread_id, message_id),
+                ).fetchone()
+            )
+
+    def delete_annotation(
+        self,
+        thread_id: str,
+        message_id: str,
+        expected_status: Optional[str] = None,
+    ) -> bool:
+        """硬删一条标注队列条目。返回是否真的删到了行。
+
+        expected_status 给定时按状态条件删除（CAS）——这不是可选的谨慎，是必需的：
+        「确认入 BadCase」在「读 ann → 执行金标 SQL → 写终态」之间隔着一次真实库
+        往返（秒级），先查后删会删掉一条刚刚变成 badcase 的行，把它在 Langfuse
+        Dataset:badcase 与 badcase_status.json 里的产物留成孤儿。
+
+        返回 False 有两种含义，调用方按自己的语义区分：行本来就不存在，或行还在但
+        状态已经不等于 expected_status（CAS 未命中，说明它中途变了）。
+
+        只删这一张行。级联（用户反馈、Langfuse 哨兵分）由调用方按序处理，见
+        api.message_feedback.purge_feedback。
+        """
+        sql = "DELETE FROM feedback_annotation WHERE thread_id=? AND message_id=?"
+        params: tuple = (thread_id, message_id)
+        if expected_status is not None:
+            sql += " AND status=?"
+            params += (expected_status,)
+        with _LOCK:
+            cur = self._conn.execute(sql, params)
+            if cur.rowcount:
+                self._conn.commit()
+                return True
+        return False
+
     # ── 看板聚合（优化②）──────────────────────────────────
+
+    def count_annotations(self) -> dict[str, int]:
+        """按状态统计标注条数（标注页头部的统计条用）。零网络、瞬时。
+
+        六个状态一律给值（缺席补 0）：调用方直接读 `d["queued"]` 即可，不必到处
+        写 `d.get("queued") or 0`——空库与「查不到」在这里是同一件事，不该让每个
+        读方各写一遍兜底。
+        """
+        with _LOCK:
+            rows = self._conn.execute(
+                "SELECT status, COUNT(*) AS n FROM feedback_annotation GROUP BY status"
+            ).fetchall()
+            seen = {r["status"] or "": int(r["n"]) for r in rows}
+        return {s: seen.get(s, 0) for s in ANNOTATION_STATUSES}
+
     def records_in_window(self, since_iso: str) -> list[FeedbackRecord]:
         """近 N 天反馈（updated_at ≥ since，ISO UTC 字符串比较）。"""
         with _LOCK:

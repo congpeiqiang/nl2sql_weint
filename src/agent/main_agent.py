@@ -7,7 +7,6 @@ import agent.subagents.check_progress  # noqa: F401
 # 自动同步子智能体 todos 到主智能体 state（零前端改动方案）
 import agent.subagents.sync_launcher  # noqa: F401
 # 透传父 run 的 configurable 到异步子 agent run（前端选库 db_name 才能到达子 agent）
-import agent.middlewares.deepagents_async_config_patch
 # 修复 Windows/Py3.13 下 _resolve_path 的 `\\?\` 前缀误报越界（必须早于实例化导入）
 import agent.utils.filesystem_backend_patch  # noqa: F401
 
@@ -131,8 +130,11 @@ def dynamic_prompt(request: ModelRequest) -> str:
 vfs_root_backend = FilesystemBackend(root_dir=_wm.data_root, virtual_mode=True)
 shared_memory_backend = FilesystemBackend(root_dir=_shared_memory_dir, virtual_mode=True)
 shared_skills_backend = FilesystemBackend(root_dir=_shared_skills_dir, virtual_mode=True)
-# skill 版本化：SKILLS_REF 物化目录（<data_root>/skill_refs/），skill 脚本经 VFS 也读物化版
-skills_ref_backend = FilesystemBackend(root_dir=_wm.data_root / "skill_refs", virtual_mode=True)
+# skill 版本化：SKILLS_REF 物化目录（<data_root>/offline_experiment/skill_refs/），
+# skill 脚本经 VFS 也读物化版
+skills_ref_backend = FilesystemBackend(
+    root_dir=_wm.offline_experiment_dir / "skill_refs", virtual_mode=True
+)
 # 动态工作区：每次操作前从 WorkspaceManager 重新解析 root_dir，切换工作区即时生效
 workspace_data_backend = DynamicFilesystemBackend(get_root_dir=lambda: _wm.active_workspace)
 shell_backend = DynamicLocalShellBackend(get_root_dir=lambda: _wm.active_workspace, inherit_env=True)
@@ -146,7 +148,7 @@ composite_backend = CompositeBackend(
     routes={
         "/shared/memory/": shared_memory_backend,
         "/shared/skills/": shared_skills_backend,
-        "/skill_refs/": skills_ref_backend,
+        "/offline_experiment/skill_refs/": skills_ref_backend,
         "/workspace/": workspace_data_backend,
         "/": vfs_root_backend,
     },

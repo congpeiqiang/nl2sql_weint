@@ -82,6 +82,10 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[b
         # 用命令级 `-c safe.directory=<cwd>` 按仓库路径豁免——不依赖全局 gitconfig
         # （容器重建后全局配置会丢），作用域仅限本次操作的 cwd。
         cmd += ["-c", f"safe.directory={cwd}"]
+    # 非 ASCII 路径默认被 C-quote 成八进制（"knowledge/glossary/\346\234\257..."），
+    # 前端直接把 message 展示给用户 → 中文文件名必须原样可读（2026-09-15 生产：
+    # 「更新语义库」的拒绝提示里文件名是转义串，用户看不懂是哪个文件）。
+    cmd += ["-c", "core.quotepath=false"]
     cmd += list(args)
     # ssh:// origin 时锁定持久卷私钥：仅当密钥真实存在（容器内）才注入 GIT_SSH_COMMAND。
     # Windows 开发机 ensure_ssh_key 不落盘 → 不注入，走用户自身 ssh（agent/凭据），
@@ -228,18 +232,66 @@ def list_remote_refs(cwd: str, timeout: int = 30) -> dict:
     return res
 
 
-def _pull_fail(msg: str) -> dict:
+def local_changes(cwd: str, timeout: int = 30) -> dict:
+    """本地未提交改动清单（`pull_ref` 护栏的判据，也被 git-status 端点复用）。
+
+    返回 {"blocking": [...], "generated": [...], "dirty": bool}：
+    - `blocking`：除构建产物外的已跟踪文件改动 —— 非空则更新会被拒绝
+      （除非调用方显式传 `discard_local`）；
+    - `generated`：`target/` 下的构建产物，可再生，不拦更新（更新时允许 -f 覆盖）；
+    - 未跟踪文件不列入（checkout 不会覆盖它们）。
+
+    用 `diff --name-only`（已暂存 + 未暂存）而非 `status --porcelain`：后者每行带
+    状态前缀，而 _run 会 strip 掉整段输出的前导空格 → 首个条目路径少一个字符。
+    """
+    dirty: list[str] = []
+    for _args in (["diff", "--name-only"], ["diff", "--name-only", "--cached"]):
+        ok_d, out_d = _run(_args, cwd=cwd, timeout=timeout)
+        if ok_d and out_d:
+            dirty.extend(p.strip() for p in out_d.splitlines() if p.strip())
+    blocking: list[str] = []
+    generated: list[str] = []
+    for path in dict.fromkeys(dirty):
+        (generated if path.startswith("target/") else blocking).append(path)
+    return {"blocking": blocking, "generated": generated, "dirty": bool(blocking or generated)}
+
+
+def _stash_local_changes(cwd: str, files: list[str], timeout: int = 60) -> tuple[str, str]:
+    """把本地未提交改动 stash 备份（供显式「放弃本地改动并更新」用）。
+
+    返回 (stash_ref, 错误信息)：成功时 stash_ref 形如 `stash@{0}`（附 7 位 sha），
+    用户可 `git stash list` / `git stash pop` 找回；未跟踪文件**不入 stash**，原地保留
+    （它们是用户新加的知识文件，checkout 不会覆盖，不该被卷走）。
+    """
+    from datetime import datetime, timezone
+
+    msg = "nl2sql 更新语义库前自动备份 %s" % datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    ok, out = _run(["stash", "push", "-m", msg], cwd=cwd, timeout=timeout)
+    if not ok:
+        return "", out
+    if "No local changes to save" in out:
+        return "", ""  # 竞态：检测到有改动、真正 stash 时已消失 → 不算失败
+    sha = _rev_parse(cwd, "refs/stash")
+    return (f"stash@{{0}}（{sha[:7]}）" if sha else "stash@{0}"), ""
+
+
+def _pull_fail(msg: str, dirty_files: list[str] | None = None, blocked: str = "") -> dict:
+    """失败结果。`blocked` 标注护栏类型（dirty/unpushed/…），`dirty_files` 给出
+    具体文件清单 —— 前端据此在对话框里列出「哪几个文件挡着」，而不是只显示一句话。"""
     return {
         "ok": False, "message": msg, "kind": "", "ref": "",
         "commit": "", "changed": False, "rebuild_required": False,
+        "blocked": blocked, "dirty_files": list(dirty_files or []),
     }
 
 
-def pull_ref(cwd: str, ref: str = "", timeout: int = 120) -> dict:
+def pull_ref(cwd: str, ref: str = "", timeout: int = 120, discard_local: bool = False) -> dict:
     """把仓库更新到远程指定 ref（分支或 tag）；ref 为空 → 远程默认分支最新。
 
     返回 {"ok", "message", "kind", "ref", "commit", "changed", "rebuild_required"}；
-    ok=False 时 message 为失败原因（前端直接展示）。
+    ok=False 时 message 为失败原因（前端直接展示），并带 `blocked` / `dirty_files`。
 
     为什么不裸 `git pull origin`（2026-09-09 生产事故）：
     语义库常由 `clone --depth 1 --branch <tag>` 建立，git 会把
@@ -251,6 +303,10 @@ def pull_ref(cwd: str, ref: str = "", timeout: int = 120) -> dict:
     安全护栏（宁可拒绝也不覆盖用户数据）：
     - 本地有未提交改动（`target/` 构建产物除外，它可再生）→ 拒绝；
     - 本地分支 ≠ 其远程跟踪 ref（有未推送提交 / 无跟踪记录）→ 拒绝。
+
+    `discard_local=True`：用户已在前端显式确认放弃本地改动时，改为**先 stash 备份**
+    再更新（备份名回传前端，可 `git stash pop` 找回），而不是静默覆盖。见
+    `local_changes` 的注释：平台「保存知识」只写盘不提交，工作树天然会脏。
     """
     if not (Path(cwd) / ".git").exists():
         return _pull_fail("该目录不是 Git 仓库")
@@ -278,21 +334,25 @@ def pull_ref(cwd: str, ref: str = "", timeout: int = 120) -> dict:
             return _pull_fail(f"无法确定远程默认分支；可用：{avail}")
 
     # 本地改动护栏：未提交改动（排除 target/ 构建产物）会让 checkout 覆盖用户工作。
-    # 用 `diff --name-only`（已暂存 + 未暂存）而非 status --porcelain：后者每行带
-    # 状态前缀，而 _run 会 strip 掉整段输出的前导空格 → 首个条目路径少一个字符。
-    # 未跟踪文件不列入（checkout 不会覆盖它们）。
-    dirty_blocking: list[str] = []
-    dirty_target: list[str] = []
-    dirty: list[str] = []
-    for _args in (["diff", "--name-only"], ["diff", "--name-only", "--cached"]):
-        ok_d, out_d = _run(_args, cwd=cwd, timeout=30)
-        if ok_d and out_d:
-            dirty.extend(p.strip() for p in out_d.splitlines() if p.strip())
-    for path in dict.fromkeys(dirty):
-        (dirty_target if path.startswith("target/") else dirty_blocking).append(path)
+    # 判据集中在 local_changes（git-status 端点复用同一份，避免两处口径漂移）。
+    changes = local_changes(cwd)
+    dirty_blocking = changes["blocking"]
+    dirty_target = changes["generated"]
+    stash_ref = ""
     if dirty_blocking:
-        shown = "、".join(dirty_blocking[:5]) + ("…" if len(dirty_blocking) > 5 else "")
-        return _pull_fail(f"本地有未提交改动，已中止以免覆盖：{shown}（请先提交或撤销后重试）")
+        if not discard_local:
+            shown = "、".join(dirty_blocking[:5]) + ("…" if len(dirty_blocking) > 5 else "")
+            return _pull_fail(
+                f"本地有未提交改动，已中止以免覆盖：{shown}（请先提交或撤销后重试）",
+                dirty_files=dirty_blocking, blocked="dirty",
+            )
+        # 用户已显式确认放弃：先 stash 备份再更新，任何一步失败都中止
+        stash_ref, err = _stash_local_changes(cwd, dirty_blocking)
+        if err:
+            return _pull_fail(
+                f"本地改动备份失败，已中止以免覆盖：{err}",
+                dirty_files=dirty_blocking, blocked="dirty",
+            )
 
     # 未推送提交护栏（放在 fetch 前，用两个本地 ref 比对，不依赖历史）：
     # 本地分支 sha ≠ 远程跟踪 ref sha → 本地多出了提交（push 失败/手动 commit），
@@ -305,12 +365,14 @@ def pull_ref(cwd: str, ref: str = "", timeout: int = 120) -> dict:
             if not anchor:
                 return _pull_fail(
                     f"本地分支 {target} 无远程跟踪记录，无法确认是否有未推送提交；"
-                    f"请先手动 git fetch origin 对齐后再更新"
+                    f"请先手动 git fetch origin 对齐后再更新",
+                    blocked="unpushed",
                 )
             if local_sha != anchor:
                 return _pull_fail(
                     f"本地分支 {target} 与上次拉取的远程状态不一致（可能有未推送提交），"
-                    f"已中止以免覆盖；请先「推送 Git」或手动对齐后重试"
+                    f"已中止以免覆盖；请先「推送 Git」或手动对齐后重试",
+                    blocked="unpushed",
                 )
 
     old_sha = _rev_parse(cwd, "HEAD")
@@ -379,10 +441,13 @@ def pull_ref(cwd: str, ref: str = "", timeout: int = 120) -> dict:
         msg = f"已是最新（{label}）"
     if rebuild_required:
         msg += "；源文件已变，需点「构建」后生效（构建产物即刻被 MCP 读取，无需重启后端）"
+    if stash_ref:
+        msg = f"已放弃 {len(dirty_blocking)} 个文件的本地改动（备份于 {stash_ref}，可 git stash 找回）；{msg}"
 
     return {
         "ok": True, "message": msg, "kind": kind, "ref": target,
         "commit": head, "changed": changed, "rebuild_required": rebuild_required,
+        "stash_ref": stash_ref, "discarded_files": dirty_blocking,
     }
 
 

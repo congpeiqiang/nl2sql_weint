@@ -6,6 +6,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 from agent.utils.semantic_db import get_detector
+from agent.utils.query_tools import is_data_tool
 
 # 模块顶部导入 langgraph.config（而非每次工具调用动态 import）：
 # 动态导入会触发整个 langgraph 包加载（实测首次 ~2.4s），拖慢每次工具调用。
@@ -216,19 +217,32 @@ def _echarts_option_to_data_url(option_json: str) -> str | None:
     """将 ECharts option JSON 包装为内嵌 iframe（data:text/html;base64）。
 
     返回 iframe HTML 字符串；包装失败返回 None（调用方回退到原 result）。
+
+    2026-09-14 修复：**把落盘文件名一并回传**。此前只丢弃返回值（落盘是"隐形"
+    副作用），模型手里只有 base64 iframe，于是按它知道的命名规则
+    `{图表标题}_{YYYYMMDD_HHMMSS}.html` 自己拼路径 —— 但它只有 build_report 的
+    `{ts}`，拼出来的名字差 17 秒（实测 `…_20260914_165606.html` 被写成
+    `…_20260914_165623.html`）→ 前端"图表文件"链接全 404（只有报告 md 能打开）。
+    走 VFS 路径，VfsPathResolverMiddleware 会改写为真实磁盘路径（与报告一致）。
     """
     import base64
     html = _build_echarts_html(option_json)
     if not html:
         return None
     # 自动落盘 .html 到工作区 report 目录（可交互、可分享、可被报告引用）
-    _save_echarts_html_to_workspace(html, option_json)
+    saved = _save_echarts_html_to_workspace(html, option_json)
     height = _estimate_echarts_height(option_json)
     b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
-    return (
+    iframe = (
         f'<iframe src="data:text/html;base64,{b64}" '
         f'width="100%" height="{height}" style="border:none;border-radius:8px;background:#fff"></iframe>'
     )
+    if saved:
+        iframe += (
+            f"\n\n📎 图表 HTML 已保存：`/workspace/report/{saved}`"
+            "（可预览/下载；引用图表文件时请**照抄此路径**，不要自行推测文件名）"
+        )
+    return iframe
 
 
 
@@ -609,14 +623,16 @@ def _pack_chart_props(kwargs: dict) -> dict:
 # 超时的价值是识别 MCP 进程挂死这类异常，而不是打断正常的慢查询。
 # 超时返回一条错误消息让 LLM 自主决策（重试/简化/放弃），而非崩溃 run。
 #
-# 值可调：run_sql 走 WrenAI 数据库，容忍真实长查询（300s）；
-# 文件类工具 1 分钟足够；其余默认 120s。None / 0 表示不超时。
+# 值可调：语义层查询工具（run_sql / query_cube，见 agent.utils.query_tools）
+# 容忍真实长查询（300s，统一口径）；文件类工具 1 分钟足够；其余默认 120s。
+# None / 0 表示不超时。
 _TOOL_TIMEOUTS = {
     # 注：wrenai_run_sql / run_sql 两个精确 key 是单库时期遗留。
     # 多库 server 化后语义层工具名为 wrenai_<库名>_run_sql，由
     # _tool_timeout_for 的 startswith("wrenai_") 前缀判断覆盖（300s）。
     "wrenai_run_sql": 300,
     "run_sql": 300,
+    "query_cube": 300,   # Cube 通道（单库时期遗留名，与 run_sql 对称）
     "read_file": 60,
     "write_file": 60,
     "edit_file": 60,
@@ -632,8 +648,10 @@ _TOOL_TIMEOUT_MSG = "工具调用超时（{timeout}s）。可能原因：SQL 复
 
 def _tool_timeout_for(name: str) -> int | None:
     """按工具名取超时秒数；None/0 表示不超时。"""
-    # 语义层 run_sql 变体（wrenai_<库名>_run_sql）容忍真实长查询 300s
-    if name.startswith("wrenai_") and "run_sql" in name:
+    # 语义层数据表型工具（wrenai_<库名>_run_sql / _query_cube）容忍真实长查询
+    # 300s —— 用与落盘闸门同一份清单判据，避免 Cube 通道拿 default 120s
+    # 被工具超时打断（2026-09-14 统一；Cube 大结果现在也要落盘，超时即整节没数据）
+    if name.startswith("wrenai_") and is_data_tool(name):
         return 300
     t = _TOOL_TIMEOUTS.get(name, _TOOL_TIMEOUTS.get("default"))
     return t if t and t > 0 else None

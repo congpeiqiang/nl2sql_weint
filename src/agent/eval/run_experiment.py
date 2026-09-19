@@ -61,6 +61,13 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 _logger = logging.getLogger("run_experiment")
 
+# prompt 版本维度：快照物化 + 权威 prompt 名清单（与 api/experiment.py 同源）
+from agent.utils.prompt_versioning import (  # noqa: E402
+    PROMPT_NAMES,
+    PROMPT_REFS_ENV,
+    materialize_prompt_ref,
+)
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]  # src/agent/eval/run_experiment.py → 根
 _SRC = _PROJECT_ROOT / "src"
 
@@ -283,12 +290,45 @@ def _extract_text_content(content) -> str:
     return str(content)
 
 
-def _extract_run_sql(messages) -> tuple[str, str]:
-    """从结果消息抽取最后一次 run_sql 的 (sql, result_text)。
+def _extract_run_cube(messages) -> dict:
+    """Cube 通道的查询定义快照（``agent.utils.wren_call_extract.cube_snapshot``）。
 
-    遍历找最后一条 tool 消息（name 含 run_sql），回看其前一条 AI tool_calls
-    里同名调用的 args.sql；result_text 取该 tool 消息正文（可能本身就是报错文本，
-    由调用方用 looks_like_exec_error 判定执行失败）。
+    单独提出来是为了让**一次扫描只复算一次**：``_state_final_sql_and_cube`` 两样都要，
+    若各写一个函数就会把 wren 引擎编译跑两遍（快照是纯搬运，见该模块 docstring）。
+    """
+    try:
+        from agent.utils.wren_call_extract import cube_snapshot
+
+        return cube_snapshot(messages) or {}
+    except Exception as e:  # noqa: BLE001  fail-open
+        _logger.warning("[worker] Cube 快照提取失败: %s", e)
+        return {}
+
+
+def _extract_run_sql(messages, cube_out: dict | None = None) -> tuple[str, str]:
+    """从结果消息抽取最后一次执行的 (sql, result_text)；两条通道都认。
+
+    **run_sql 通道**（原先唯一支持的）：遍历找最后一条 tool 消息（name 含 run_sql），
+    回看其前一条 AI tool_calls 里同名调用的 args.sql；result_text 取该 tool 消息正文
+    （可能本身就是报错文本，由调用方用 looks_like_exec_error 判定执行失败）。
+
+    **Cube 通道**（2026-09-19 补）：``wrenai_<库>_query_cube`` 的入参是
+    cube/measures/dimensions/filters，**结构上就没有 ``args.sql``**——SQL 由 wren 引擎
+    在服务端编译。于是本函数此前对它恒返回 ``("", "")``，后果不是「少一列 SQL」而是
+    **判错**：``_score_record`` 把空 sql 当成「LLM 跑偏没走到查询工具」→ sql_valid_score
+    = 0.0 + reason「未生成 run_sql」→ **走 Cube 且答对的题被判成 BadCase**；同时
+    Experiment 页的 Output 列因 ``if sql:`` 守卫不重写，显示 16 万字符原始状态。而
+    ``_extract_strategy`` 早已把 Cube 当一等策略（``"C"``），可见是疏漏不是设计。
+    改走与报告/反馈侧同一套复算（``wren_call_extract``），拿到的是真正下发物理库的
+    SQL；定义侧由 ``_extract_run_cube`` 另取，两处同源。
+
+    Cube 复算是进程内 CPU 活（引擎按 mdl.json 指纹缓存，首跑 ~0.9s），本函数因此
+    不再是纯解析——但只在真出现过 Cube 调用时才走（`cube_snapshot` 认不到调用会立刻
+    回空），且实验 worker 本就串行。
+
+    返回值刻意保持 **2 元组**（既有调用方与离线套件按 2 元解包/打桩）。要拿 Cube 定义
+    （规范化聚合口径）的调用方传 ``cube_out`` 出参——快照本来就在函数内算过，从出参里
+    取就不会为了多要一项而把引擎编译跑第二遍。
     """
     sql = ""
     result = ""
@@ -296,8 +336,13 @@ def _extract_run_sql(messages) -> tuple[str, str]:
     for i, m in enumerate(messages):
         if getattr(m, "type", "") == "tool" and "run_sql" in getattr(m, "name", ""):
             last_tool_idx = i
+    snap: dict = {}
+    if cube_out is not None or last_tool_idx < 0:
+        snap = _extract_run_cube(messages)
+        if cube_out is not None:
+            cube_out.update(snap)
     if last_tool_idx < 0:
-        return "", ""
+        return (snap.get("sql") or ""), (snap.get("result") or "")
     result = _extract_text_content(getattr(messages[last_tool_idx], "content", ""))
     for j in range(last_tool_idx - 1, -1, -1):
         prev = messages[j]
@@ -308,6 +353,36 @@ def _extract_run_sql(messages) -> tuple[str, str]:
         if sql:
             break
     return sql, result
+
+
+def _state_final_sql_and_cube(state) -> tuple[str, dict]:
+    """从图最终状态里取「产出 SQL + Cube 定义」——与 jsonl 的 `sql` 字段同源（同一个
+    ``_extract_run_sql``），Cube 定义侧同源于 ``_extract_run_cube``。
+
+    根链 on_chain_end 的 outputs 就是 langgraph 的最终状态 dict（messages 是 LangChain
+    消息对象，与 ainvoke 返回值同一批实例）；形状不符/取不到 → ``("", {})``（调用方保持原样）。
+    """
+    if not isinstance(state, dict):
+        return "", {}
+    msgs = state.get("messages") or []
+    if not msgs:
+        return "", {}
+    box: dict = {}
+    try:
+        sql, _ = _extract_run_sql(msgs, box)
+    except Exception:  # noqa: BLE001 —— 取不到就当没有，不改写
+        return "", {}
+    if not sql:
+        return "", {}
+    # Cube 定义只有真跑过 Cube 才有（run_sql 通道的定义就是 SQL 本身 → spec 为空，
+    # 页面/落盘按「无 cube 键」处理）。混跑（先试 Cube 再退 run_sql）时两者都带出，
+    # 比只报一个通道更有信息量。出参复用，不二次复算。
+    return sql, (box.get("spec") or {})
+
+
+def _state_final_sql(state) -> str:
+    """只要 SQL 的那一半（既有调用方与离线套件契约，形状不变）。"""
+    return _state_final_sql_and_cube(state)[0]
 
 
 def _score_record(question: str, sql: str, result: str, use_judge: bool) -> dict:
@@ -321,14 +396,16 @@ def _score_record(question: str, sql: str, result: str, use_judge: bool) -> dict
     scores: dict[str, float] = {}
     reasons: dict[str, str] = {}
     if not sql:
-        # 没生成 SQL（LLM 跑偏/没走到查询工具）→ 五维全低，属 BadCase
+        # 没生成 SQL（LLM 跑偏/没走到查询工具/纯文本回答）→ 五维全低，属 BadCase。
+        # 文案不再写「未生成 run_sql」：Cube 通道结构上就没有 run_sql，那句话会把
+        # 「走了 Cube 但复算失败」和「根本没查」混成一句，排障时误导。
         return {
             "scores": {
                 "sql_valid_score": 0.0,
                 "sql_exec_success": 0.0,
                 "schema_match_score": 0.0,
             },
-            "reasons": {"sql_valid_score": "未生成 run_sql"},
+            "reasons": {"sql_valid_score": "未生成 SQL（run_sql 与 Cube 两通道都没取到）"},
         }
     v, r = compute_sql_valid_score(sql)
     scores["sql_valid_score"] = v
@@ -403,18 +480,23 @@ def _current_trace_refs() -> tuple[str, str]:
         return "", ""
 
 
-# 参与实验的 Langfuse prompt 名（run 级快照记录各名当前版本号；与 api/experiment.py 的
-# _PROMPT_NAMES 同集——label A/B 入口，两套 prompt 版本计数器各自独立）
-_PROMPT_VERSION_NAMES = ("main_system_prompt", "nl2sql_system_prompt")
+# 参与实验的 Langfuse prompt 名（run 级快照记录各名当前版本号；权威定义在
+# prompt_versioning，与 api/experiment.py 同源——label A/B 入口，两套 prompt
+# 版本计数器各自独立）
+_PROMPT_VERSION_NAMES = PROMPT_NAMES
 
 
-def _run_snapshot(prompt_label: str, semantic: str, skill_ref: str, run_id: str) -> dict:
+def _run_snapshot(
+    prompt_label: str, semantic: str, skill_ref: str, run_id: str, prompt_ref: str = ""
+) -> dict:
     """构造 run 级版本快照（worker 执行时锁定「实际生效版本」，全 arm 各条目恒定）。
 
     字段均为 Langfuse metadata 可存值（str，≤200）：
     - prompt_label / prompt_version_*：label 是该 arm 真实生效的进程级 label；
       prompt_version_<name> 用 get_prompt_version 取该 label 下当前实际版本号
-      （Langfuse 各 prompt 独立计数；取不到 → ""）。
+      （Langfuse 各 prompt 独立计数；取不到 → ""）。PROMPT_REFS 快照生效时这些版本号
+      直接来自快照 manifest（零网络），且与实际装配的正文严格一致。
+    - prompt_ref：prompt 快照目录名（留空 = 未启用快照，即在线拉取）。
     - skill_ref / semantic_ref：该 arm 选择的 git ref（留空 = 磁盘 skill / 语义库 HEAD）。
     """
     from agent.trace.langfuse_client import get_prompt_version
@@ -422,6 +504,7 @@ def _run_snapshot(prompt_label: str, semantic: str, skill_ref: str, run_id: str)
     snap: dict = {
         "run_id": run_id,
         "prompt_label": prompt_label,
+        "prompt_ref": prompt_ref or "(none)",
         "skill_ref": skill_ref or "(disk)",
         "semantic_ref": semantic or "(head)",
     }
@@ -533,6 +616,10 @@ def _experiment_attrs(handler, client, run_name, item, meta, description="", run
     - item 带 expected_output（goodcase 金标）时，同时在 root span 上写
       langfuse.experiment.item.expected_output（官方 SDK 同款属性；UI Experiment 页
       Expected Output 列只读该属性，不回落 dataset item）。
+    - 根链 on_chain_end 时把产出 SQL 写进 Output 列（改写传给官方 handler 的 outputs
+      为 {"sql": …}）+ item metadata.final_sql —— 见 _root_sql_output：Experiment 页的
+      Output 列默认是根观测的整条图状态（十几万字符），A/B 没法看；而 SDK 没有
+      item.output 属性，只能从根观测的 output 入手。
     - 实验属性注入失败只告警、不阻断查询（退化为纯 Dataset Run）。
     """
     attrs = None
@@ -568,7 +655,10 @@ def _experiment_attrs(handler, client, run_name, item, meta, description="", run
     from langfuse._client.propagation import _propagate_attributes
 
     orig_start = handler.on_chain_start
+    # on_chain_end 缺失（非官方 handler/老版本）→ 跳过 Output 列改写，只做属性注入
+    orig_end = getattr(handler, "on_chain_end", None)
     patched = {"n": 0}
+    sql_put = {"n": 0}
 
     def _root_backfill(serialized, inputs, *, run_id, parent_run_id=None, tags=None,
                        metadata=None, **kw):
@@ -600,7 +690,54 @@ def _experiment_attrs(handler, client, run_name, item, meta, description="", run
                 _logger.debug("[worker] experiment root_observation_id 补齐失败: %s", e)
         return result
 
+    def _root_sql_output(outputs, *, run_id, parent_run_id=None, **kw):
+        """根链结束时把产出 SQL 落到 Experiment 页的 Output 列 + item metadata（仅本实验 run）。
+
+        - **Output 列**：v4 Experiment 的 item io 取自 `root_observation_id` 指向的那条**根
+          观测**的 io，而根观测 output 默认是整条图最终状态（实测 15.9 万字符的
+          `{"messages":[…]}`）——既不是 SQL 也不是答案，A/B 时肉眼没法比。SDK 4.14.4 暴露的
+          experiment 属性只有 `item.id/expected_output/metadata/root_observation_id`，
+          **没有 `item.output`**，故唯一入口就是根观测的 output：在官方 handler 记录之前
+          把 outputs 换成 `{"sql": …}`（与 expected_output 同构，可直接并排 diff）。
+          只改「记录成什么」，不碰图本身的返回值与落盘。
+          Cube 通道多带一个 `"cube"`（规范化查询定义）——与 expected_output 的 `cube`
+          键同名同形，走 Cube 的题因此也能在页面上一眼比对「聚合口径对不对」。
+        - **item metadata**：同一次调用给根 span 补
+          `langfuse.experiment.item.metadata.final_sql`（与 experiment_item_metadata 同一批
+          属性，条目详情抽屉/导出可见）。属性要在 span 还 recording 时写，故必须在
+          orig_end 之前。
+        - 与 jsonl 的 `sql` 字段**同一个 _extract_run_sql**，页面与落盘口径不会漂移；
+          取不到 SQL（没走到 run_sql / 异常终态）→ 不改写，保持原始状态。
+        - 作用域：`_experiment_attrs` 只在本条是真实 dataset item 时启用 → 在线 chat-turn
+          trace、纯 Dataset Run 场景都不受影响；只在根链（parent_run_id is None）且首次生效。
+        """
+        if orig_end is not None and parent_run_id is None and not sql_put["n"] and isinstance(outputs, dict):
+            try:
+                sql, cube = _state_final_sql_and_cube(outputs)
+                if sql:
+                    obs = handler._runs.get(run_id)
+                    otel = getattr(obs, "_otel_span", None)
+                    if otel is not None:
+                        otel.set_attribute("langfuse.experiment.item.metadata.final_sql", sql)
+                    sql_put["n"] += 1
+                    _logger.info(
+                        "[worker] 实验 Output 列改写为产出 SQL（%d 字符%s）item=%s",
+                        len(sql), "+cube 定义" if cube else "",
+                        str(attrs.get("experiment_item_id", ""))[:12],
+                    )
+                    payload = {"sql": sql}
+                    if cube:
+                        payload["cube"] = cube
+                    return orig_end(payload, run_id=run_id, parent_run_id=parent_run_id, **kw)
+            except Exception as e:  # noqa: BLE001
+                _logger.debug("[worker] 实验 Output 列改写失败（保持原始状态）: %s", e)
+        if orig_end is None:
+            return None
+        return orig_end(outputs, run_id=run_id, parent_run_id=parent_run_id, **kw)
+
     handler.on_chain_start = _root_backfill
+    if orig_end is not None:
+        handler.on_chain_end = _root_sql_output
     cm = None
     try:
         cm = _propagate_attributes(experiment=attrs)
@@ -621,6 +758,8 @@ def _experiment_attrs(handler, client, run_name, item, meta, description="", run
             except Exception:  # noqa: BLE001
                 pass
         handler.on_chain_start = orig_start
+        if orig_end is not None:
+            handler.on_chain_end = orig_end
 
 
 def _resolve_effective_model(route: str, model: str) -> str:
@@ -664,6 +803,7 @@ def _run_worker(
     run_name: str = "",
     skill_ref: str = "",
     prompt_label: str | None = None,
+    prompt_ref: str = "",
     cancel_file: str = "",
     description: str = "",
     llm_route: str | None = None,
@@ -673,7 +813,9 @@ def _run_worker(
     """单 label（arm）跑完全部查询，写 JSONL。返回 0=成功（含中途停止的部分结果） 1=worker 内部失败。
 
     prompt_label 显式指定时覆盖 LANGFUSE_PROMPT_LABEL（空串 → 走 production 默认）；
-    None（旧调用）→ 沿用 label。skill_ref 非空时注入 SKILLS_REF（skill 版本 A/B）。
+    None（旧调用）→ 沿用 label。prompt_ref 非空时注入 PROMPT_REFS（prompt 版本快照
+    目录名 → 装配时读落盘正文、零网络、可精确重放）。
+    skill_ref 非空时注入 SKILLS_REF（skill 版本 A/B）。
     cancel_file 非空时每题前检查：标记存在 → 中止（已做部分仍落盘）；停止判定归 orchestrator
     （worker 仍返回 0），避免退出码语义被取消路径污染。
     description：整轮实验的人类可读说明（实验级单个，所有 arm/条目同值），写入
@@ -696,6 +838,11 @@ def _run_worker(
             _logger.info("[worker] prompt label 置空 → 走 production")
     else:
         os.environ["LANGFUSE_PROMPT_LABEL"] = label
+    # prompt 版本快照（与 LANGFUSE_PROMPT_LABEL 同源解析：预检按该 label 物化的目录）。
+    # 必须在此之前置好 —— 装配发生在 import agent.graphs.nl2sql_agent 时。
+    if prompt_ref:
+        os.environ[PROMPT_REFS_ENV] = prompt_ref
+        _logger.info("[worker] prompt 版本快照: %s", prompt_ref)
     if skill_ref:
         os.environ["SKILLS_REF"] = skill_ref
         _logger.info("[worker] skill 版本 A/B override: %s", skill_ref)
@@ -724,7 +871,7 @@ def _run_worker(
     # 每次 worker 一个 run id，实验 trace 按此分组
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     # run 级版本快照（执行时锁定实际生效版本：prompt label/各 prompt 版本、skill、语义库）
-    run_snapshot = _run_snapshot(resolved, semantic, skill_ref, run_id)
+    run_snapshot = _run_snapshot(resolved, semantic, skill_ref, run_id, prompt_ref)
     _logger.info(
         "[worker] run 级版本快照: %s",
         json.dumps({k: v for k, v in run_snapshot.items() if k != "run_id"}, ensure_ascii=False),
@@ -794,11 +941,16 @@ def _run_worker(
                         },
                     )
                 msgs = result.get("messages", []) or []
-                sql, result_text = _extract_run_sql(msgs)
+                cube_box: dict = {}
+                sql, result_text = _extract_run_sql(msgs, cube_box)
                 scored = _score_record(question, sql, result_text, use_judge)
                 strategy = _extract_strategy(msgs)
                 trace_id, obs_id = _current_trace_refs()
                 rec["sql"] = sql
+                # Cube 通道的规范化定义（聚合口径）；非 Cube 通道留空 dict。
+                # 落 jsonl 是为了监控/评估能比「同题多跑是否用了同一份口径」——
+                # 光有物理 SQL 也能比，但口径差异是更早、更好读的信号。
+                rec["cube_spec"] = cube_box.get("spec") or {}
                 rec["result_head"] = result_text[:200]
                 rec["scores"] = scored["scores"]
                 rec["reasons"] = scored["reasons"]
@@ -971,6 +1123,8 @@ def _build_arms(args) -> list[dict]:
                     "prompt_label": str(a.get("prompt_label") or ""),
                     "skill_ref": str(a.get("skill_ref") or ""),
                     "semantic_ref": str(a.get("semantic_ref") or ""),
+                    # API 预检已物化的 prompt 快照目录名；空 = 未启用（orchestrator 就地物化）
+                    "prompt_ref": str(a.get("prompt_ref") or ""),
                 }
             )
         if not arms:
@@ -1004,6 +1158,19 @@ def _default_run_name(arm: dict, stamp: str) -> str:
     return f"{base}@{stamp}"
 
 
+def _resolve_arm_prompt_ref(arm: dict) -> str | None:
+    """该臂的 prompt 版本快照目录名；失败 → None（调用方中止整轮）。
+
+    API 路径：预检（`api.experiment._preflight_arms`）已物化并把目录名写进 arm。
+    纯 CLI 路径：arm 不带 → 就地物化（离线跑同一命令也能复现同一版 prompt）。
+    """
+    ref = str(arm.get("prompt_ref") or "")
+    if ref:
+        return ref
+    dest = materialize_prompt_ref(arm.get("prompt_label") or "production")
+    return dest.name if dest is not None else None
+
+
 def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
     queries = json.loads(args.queries_path.read_text(encoding="utf-8"))
     if not isinstance(queries, list) or not queries:
@@ -1031,6 +1198,17 @@ def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
         name = arm["name"]
         run_name = args.run_name or _default_run_name(arm, stamp)
         arm_run_name[name] = run_name
+        # prompt 版本快照：API 预检已物化并写进 arm；纯 CLI 用法（无 arms.json 预检）就地
+        # 物化。拿不到 → 中止整轮（与预检同一口径：宁可不跑，不跑一组版本不明的 A/B）。
+        prompt_ref = _resolve_arm_prompt_ref(arm)
+        if prompt_ref is None:
+            _logger.error(
+                "[orchestrator] arm=%s prompt_label=<%s> 版本快照失败：label 不存在 / "
+                "prompt 被改名 / Langfuse 不可达 / LANGFUSE_ENABLE 或 "
+                "LANGFUSE_PROMPT_ENABLED 已关闭，中止本轮",
+                name, arm.get("prompt_label") or "production",
+            )
+            return 1
         out_path = Path(args.out_dir) / f"exp_{name}.jsonl"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
@@ -1042,6 +1220,7 @@ def _run_orchestrator(args, on_progress=None, stamp: str | None = None) -> int:
             "--out", str(out_path),
             "--run-name", run_name,
             "--prompt-label", arm["prompt_label"],  # 空串显式传 → worker 走 production
+            "--prompt-ref", prompt_ref,  # 快照目录名 → worker 置 PROMPT_REFS 读落盘正文
             "--cancel-file", str(cancel_file),  # 每题前检查停止标记（cooperative cancel）
         ]
         if arm["semantic_ref"]:
@@ -1270,6 +1449,7 @@ def main() -> None:
     parser.add_argument("--out", default="", help="worker 模式：结果 JSONL 输出路径")
     parser.add_argument("--skill-ref", default="", help="worker 模式：skill 版本 git ref（SKILLS_REF，空=磁盘默认）")
     parser.add_argument("--prompt-label", default=None, help="worker 模式：显式 prompt label（空串=production 默认；缺省沿用 --label）")
+    parser.add_argument("--prompt-ref", default="", help="worker 模式：prompt 版本快照目录名（PROMPT_REFS，空=在线拉取）")
     parser.add_argument("--from-badcase", action="store_true", help="（兼容别名）查询集取 Dataset:badcase，等价 --dataset badcase")
     parser.add_argument("--from-badcase-limit", type=int, default=0, help="badcase 回灌条数上限（默认不限）")
     parser.add_argument(
@@ -1319,6 +1499,7 @@ def main() -> None:
             run_name=args.run_name,
             skill_ref=args.skill_ref,
             prompt_label=args.prompt_label,
+            prompt_ref=args.prompt_ref,
             cancel_file=args.cancel_file,
             description=args.description,
             llm_route=args.llm_route,

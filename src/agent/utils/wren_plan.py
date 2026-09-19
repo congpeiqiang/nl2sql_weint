@@ -267,6 +267,67 @@ def _finish(
 
 
 # ── 对外：复算 ────────────────────────────────────────────────────────
+class CubePlanError(ValueError):
+    """Cube 定义编译不出可执行 SQL（原因已本地化，可直接展示给操作者）。
+
+    ``plan_cube_sql``（报告侧）把它连同一切异常一起吞掉 → ``{}``；交互式试算
+    （标注页「按口径试算」）需要把**为什么**告诉人，走 ``plan_cube_sql_checked``。
+    """
+
+
+def _cube_sql_plan(project_path: Any, conn: Any, args: Any) -> Dict[str, Any]:
+    """``plan_cube_sql`` 的真实实现，失败**抛出**（不吞）。
+
+    检查顺序刻意「引擎可用 → 定义完整 → 配置就绪 → 编译」：最常见的错（缺 cube /
+    写错 measure）先报，再报环境问题（连接缺失、mdl 找不到），最后才是引擎编译错
+    （拼错的 measure/dimension 会在这里以引擎原话冒出来）——试算端点按这个顺序给
+    提示，操作者才知道该改定义还是该找运维。
+    """
+    if not probe_wren_api():
+        raise CubePlanError("wren 引擎不可用（当前环境未安装/未启用语义层）")
+    if not isinstance(args, dict):
+        raise CubePlanError("查询定义必须是对象")
+    norm, window_limit, window_offset = strip_cube_window(args)
+    cube = norm.get("cube")
+    measures = _as_str_list(norm.get("measures"))
+    if not cube:
+        raise CubePlanError("查询定义缺少 cube 名")
+    if not measures:
+        raise CubePlanError("查询定义缺少 measures（Cube 查询至少要有一个度量）")
+    if not isinstance(conn, dict) or not conn.get("datasource"):
+        raise CubePlanError("拿不到该库的连接配置（db_config 缺失）")
+    mdl_path = _mdl_path(project_path)
+    if mdl_path is None:
+        raise CubePlanError(f"语义库项目里找不到 mdl.json（project={project_path or '未配置'}）")
+
+    from wren.cube_cli import _build_cube_query  # noqa: PLC0415
+    from wren_core import cube_query_to_sql  # noqa: PLC0415
+
+    # 逐字镜像 wren/mcp_server.py::query_cube 的参数映射（limit/offset 传 None：
+    # 线上由 sql_approval 剥掉，传过去就是那条必错的 LIMIT/OFFSET）
+    cube_query = _build_cube_query(
+        str(cube),
+        ",".join(measures),
+        ",".join(_as_str_list(norm.get("dimensions"))),
+        norm.get("time_dimension") or None,
+        _as_str_list(norm.get("filters")),
+        None,
+        None,
+    )
+    cube_sql = cube_query_to_sql(
+        json.dumps(cube_query, ensure_ascii=False),
+        mdl_path.read_text(encoding="utf-8"),
+    )
+    if not isinstance(cube_sql, str) or not cube_sql.strip():
+        raise CubePlanError("引擎没有编译出 SQL（定义里可能没有有效度量/维度）")
+    plan = _finish(mdl_path, conn, cube_sql, cube_sql=cube_sql, limit=None)
+    if not plan:
+        raise CubePlanError("物理 SQL 生成失败（MDL 与连接不匹配？）")
+    plan["window_limit"] = window_limit
+    plan["window_offset"] = window_offset
+    return plan
+
+
 def plan_cube_sql(project_path: Any, conn: Any, args: Any) -> Dict[str, Any]:
     """Cube 查询定义 → ``{"cube_sql", "dialect_sql", "dialect", ...}``；失败返回 ``{}``。
 
@@ -277,47 +338,29 @@ def plan_cube_sql(project_path: Any, conn: Any, args: Any) -> Dict[str, Any]:
     ``args`` 里的 ``limit``/``offset`` 先经 ``strip_cube_window`` 剥离（线上工具边界
     同样剥离、改在结果集截窗）→ 复算产物与实际下发逐字一致；被剥掉的值以
     ``window_limit``/``window_offset`` 回传，供报告注记说明「窗口是平台侧截的」。
+
+    fail-open：任何失败都返回 ``{}``（调用方按「没这回事」处理）。需要知道失败原因
+    的交互式场景走 ``plan_cube_sql_checked``。
     """
     try:
-        if not probe_wren_api() or not isinstance(args, dict):
-            return {}
-        norm, window_limit, window_offset = strip_cube_window(args)
-        cube = norm.get("cube")
-        measures = _as_str_list(norm.get("measures"))
-        if not cube or not measures:
-            return {}
-        mdl_path = _mdl_path(project_path)
-        if mdl_path is None or not isinstance(conn, dict) or not conn.get("datasource"):
-            return {}
-
-        from wren.cube_cli import _build_cube_query  # noqa: PLC0415
-        from wren_core import cube_query_to_sql  # noqa: PLC0415
-
-        # 逐字镜像 wren/mcp_server.py::query_cube 的参数映射（limit/offset 传 None：
-        # 线上由 sql_approval 剥掉，传过去就是那条必错的 LIMIT/OFFSET）
-        cube_query = _build_cube_query(
-            str(cube),
-            ",".join(measures),
-            ",".join(_as_str_list(norm.get("dimensions"))),
-            norm.get("time_dimension") or None,
-            _as_str_list(norm.get("filters")),
-            None,
-            None,
-        )
-        cube_sql = cube_query_to_sql(
-            json.dumps(cube_query, ensure_ascii=False),
-            mdl_path.read_text(encoding="utf-8"),
-        )
-        if not isinstance(cube_sql, str) or not cube_sql.strip():
-            return {}
-        plan = _finish(mdl_path, conn, cube_sql, cube_sql=cube_sql, limit=None)
-        if plan:
-            plan["window_limit"] = window_limit
-            plan["window_offset"] = window_offset
-        return plan
+        return _cube_sql_plan(project_path, conn, args)
     except Exception as e:  # noqa: BLE001  fail-open
         _logger.debug("[wren_plan] cube 物理 SQL 复算失败: %s", e)
         return {}
+
+
+def plan_cube_sql_checked(project_path: Any, conn: Any, args: Any) -> Dict[str, Any]:
+    """同 ``plan_cube_sql``，但把失败原因**抛成** ``CubePlanError``（供试算端点回报）。
+
+    引擎自己的报错（未知 measure/dimension、MDL 解析失败…）原样包进异常消息——那
+    正是「口径拼写检查」的价值所在，吞掉就没了。
+    """
+    try:
+        return _cube_sql_plan(project_path, conn, args)
+    except CubePlanError:
+        raise
+    except Exception as e:  # noqa: BLE001  引擎异常 → 本地化后抛出
+        raise CubePlanError(f"{type(e).__name__}: {e}") from e
 
 
 def plan_run_sql(project_path: Any, conn: Any, sql: Any, limit: Any = None) -> Dict[str, Any]:

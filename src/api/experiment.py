@@ -40,6 +40,7 @@ from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
 from api._common import json_response, parse_body
+from agent.utils.prompt_versioning import PROMPT_NAMES, materialize_prompt_ref
 
 _logger = logging.getLogger(__name__)
 
@@ -52,8 +53,9 @@ _CANCEL_FILE_NAME = "cancel"
 # 实验级 Description 最大长度（Langfuse run 描述 / span 属性 / 自研 UI 共用上限）
 _DESC_MAX = 2000
 
-# 参与实验的 Langfuse prompt 名（label A/B 入口）
-_PROMPT_NAMES = ("main_system_prompt", "nl2sql_system_prompt")
+# 参与实验的 Langfuse prompt 名（label A/B 入口）。权威定义在 prompt_versioning
+# （预检快照要用同一份清单），此处只做别名，避免两处手工同步。
+_PROMPT_NAMES = PROMPT_NAMES
 
 
 # ── 内部工具 ───────────────────────────────────────────────
@@ -235,7 +237,7 @@ async def list_datasets(request: Request):
 async def prompt_labels(request: Request):
     """列出参与实验的 Langfuse prompt 可用 labels（label A/B 入口）。"""
     name = (request.query_params.get("name") or "").strip()
-    names = [name] if name else list(_PROMPT_NAMES)
+    names = [name] if name else list(PROMPT_NAMES)
     from agent.trace.langfuse_client import get_client
 
     client = get_client()
@@ -407,6 +409,8 @@ async def create_run(request: Request):
                 "prompt_label": str(a.get("prompt_label") or ""),
                 "skill_ref": str(a.get("skill_ref") or ""),
                 "semantic_ref": str(a.get("semantic_ref") or ""),
+                # 预检时填（prompt 版本快照目录名）；前端提交恒空，展示用
+                "prompt_ref": str(a.get("prompt_ref") or ""),
             }
         )
     if not norm_arms:
@@ -450,11 +454,15 @@ async def create_run(request: Request):
 
 
 def _preflight_arms(arms: list[dict]) -> str:
-    """逐臂物化 skill_ref 与 semantic_ref；返回错误描述，全过 → 空串。
+    """逐臂物化 skill_ref、semantic_ref 与 prompt 版本快照；返回错误描述，全过 → 空串。
 
-    物化失败（tag 不存在 / GitLab 不可达 / 名字不合前缀 / 库未建模或未绑 git）→
-    显式报错，不让 worker 静默退化跑「当前版本」得出看似成功实则错误的 A/B 结果。
-    预检同时把物化目录备好，worker 子进程走 marker 快路径零网络。
+    物化失败（tag 不存在 / GitLab 不可达 / 名字不合前缀 / 库未建模或未绑 git /
+    prompt label 不存在或 Langfuse 不可达）→ 显式报错，不让 worker 静默退化跑
+    「当前版本」得出看似成功实则错误的 A/B 结果。预检同时把物化目录备好，worker
+    子进程走 marker 快路径零网络。
+
+    prompt 维度的快照目录名写回 `a["prompt_ref"]`，随 arms.json 传给 orchestrator →
+    worker 置 PROMPT_REFS 读快照（不联网）。注意因此 arms.json 必须在预检**之后**落盘。
 
     semantic_ref 形态：`db=ref`（UI）或 `db=ref,db2=ref2`（多库）；无 `=` 的裸 ref
     运行时本来就不生效（override 解析跳过），预检同样跳过。
@@ -484,6 +492,17 @@ def _preflight_arms(arms: list[dict]) -> str:
                     f"semantic_ref <{part}> 物化失败：库「{db}」未建模 / 无语义库项目，"
                     "或该 ref 本地与远程都不存在（本地目录未绑 git 无法取版本），请检查后重试"
                 )
+        # prompt 版本快照：label 是可变指针，不落盘就永远回不到当时那一版。
+        # 空 label = production（与 worker 的 env 语义一致）。
+        label = str(a.get("prompt_label") or "").strip() or "production"
+        snap = materialize_prompt_ref(label)
+        if snap is None:
+            return (
+                f"prompt_label <{label}> 版本快照失败：label 不存在 / prompt 被改名 / "
+                "Langfuse 不可达 / LANGFUSE_ENABLE=false 或 LANGFUSE_PROMPT_ENABLED=0，"
+                "请检查后重试"
+            )
+        a["prompt_ref"] = snap.name
     return ""
 
 
@@ -508,7 +527,6 @@ async def _execute_run(stamp: str, body: dict) -> None:
         run_dir.mkdir(parents=True, exist_ok=True)
         out_dir = run_dir / "out"
         arms_file = run_dir / "arms.json"
-        arms_file.write_text(json.dumps(body.get("arms") or [], ensure_ascii=False), encoding="utf-8")
 
         ns = SimpleNamespace(
             queries="",  # 纯 dataset 装载（前端数据集多选）；--queries 文件模式暂不开放
@@ -535,13 +553,29 @@ async def _execute_run(stamp: str, body: dict) -> None:
         cur["stage"] = "preflight"
         _write_status(stamp, cur)
 
-        # ── skill_ref / semantic_ref 预检（物化含网络浅克隆，放线程不卡事件循环）──
+        # ── skill_ref / semantic_ref / prompt 快照预检（物化含网络浅克隆，放线程不卡事件循环）──
         pre_err = await asyncio.to_thread(_preflight_arms, body.get("arms") or [])
         if pre_err:
             cur = _read_status(stamp) or {}
             cur["status"] = "error"
             cur["stage"] = "failed"
             cur["error"] = pre_err
+            cur["finished_at"] = datetime.now(timezone.utc).isoformat()
+            _write_status(stamp, cur)
+            return
+
+        # arms.json 必须在预检之后落盘：预检把 prompt_ref（快照目录名）写回各臂，
+        # orchestrator 从这份文件读臂 → 少了它 worker 拿不到快照目录。
+        try:
+            arms_file.write_text(
+                json.dumps(body.get("arms") or [], ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as e:
+            _logger.error("[experiment] arms.json 落盘失败 %s: %s", arms_file, e)
+            cur = _read_status(stamp) or {}
+            cur["status"] = "error"
+            cur["stage"] = "failed"
+            cur["error"] = f"arms.json 落盘失败：{e}"
             cur["finished_at"] = datetime.now(timezone.utc).isoformat()
             _write_status(stamp, cur)
             return

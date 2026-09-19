@@ -133,23 +133,40 @@ def collect(days: int = 1, threshold: float = DEFAULT_THRESHOLD,
         pool.sort(key=lambda t: t.get("start_time") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return pool[0]
 
-    def _session_feedback_type(sid: str) -> str:
-        """会话内最新一条本地用户反馈的 feedback_type（差评采集用）。
+    def _session_latest_feedback(sid: str):
+        """会话内最新一条本地用户反馈记录；没有/读取失败返回 None。
 
-        本地 FeedbackStore 为唯一真相（thread_id == session_id）；类型为空
-        （存量/未判定）时走慢路径判定并回填。任何失败按 ''（非 chat）处理，
-        不误丢差评采集。
+        本地 FeedbackStore 为唯一真相（thread_id == session_id）。抽成函数是因为
+        有**两个**用处，都要同一条记录、不该各查一遍库：①反馈**类型**（差评采集
+        的 chat 过滤）；②用户**评论**与 Cube **聚合口径**（入 Dataset 的字段，
+        2026-09-19 加——本地快照里本来就有，零额外网络）。
         """
         try:
-            from agent.feedback.feedback_type import classify_feedback_type
             from agent.feedback.store import get_store
 
             recs = get_store().session_feedback(sid)
             if not recs:
+                return None
+            return max(recs, key=lambda r: r.updated_at or "")
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[badcase] 读本地反馈失败: %s", e)
+            return None
+
+    def _session_feedback_type(sid: str) -> str:
+        """会话内最新一条本地用户反馈的 feedback_type（差评采集用）。
+
+        类型为空（存量/未判定）时走慢路径判定并回填。任何失败按 ''（非 chat）
+        处理，不误丢差评采集。
+        """
+        try:
+            latest = _session_latest_feedback(sid)
+            if latest is None:
                 return ""
-            latest = max(recs, key=lambda r: r.updated_at or "")
             if latest.feedback_type:
                 return latest.feedback_type
+            from agent.feedback.feedback_type import classify_feedback_type
+            from agent.feedback.store import get_store
+
             ftype = classify_feedback_type(
                 latest.thread_id, latest.message_id, latest.sql
             )
@@ -216,6 +233,31 @@ def collect(days: int = 1, threshold: float = DEFAULT_THRESHOLD,
         }
         if db_name:
             item_meta["db_name"] = str(db_name)
+        # 用户评论 + Cube 聚合口径 + 模型下发的 SQL（2026-09-19 加）：本地反馈快照里
+        # 就有，零额外网络。自动采集的条目 expected_output 恒为 None（还没有人工金标）
+        # ——所以 Cube 定义也只放 metadata，不进 expected_output（放了会看起来像
+        # 「金标就是这句定义」）。人工确认这条坏例时会另写一条 user-annotation 条目，
+        # 那条才带 expected_output.cube。两处 metadata 键名保持一致，监控可同一套读法。
+        # 字段契约（谁是权威、哪些只在 metadata）见 docs/langfuse平台/Dataset字段契约.md：
+        # 读方一律先读 expected_output.*，它是 None 时才退回下面这些 metadata 键。
+        # 这里不写 cube_original / cube_original_readable —— 下面这份
+        # cube_spec 本身就取自同一份不可变快照，无人可改，副本只是噪音。
+        latest_fb = _session_latest_feedback(sid)
+        if latest_fb is not None:
+            if (latest_fb.note or "").strip():
+                item_meta["note"] = latest_fb.note[:2000]
+            if (latest_fb.sql or "").strip():
+                item_meta["physical_sql_original"] = latest_fb.sql
+            if latest_fb.cube_spec:
+                try:
+                    from agent.utils.wren_call_extract import spec_readable_text
+
+                    item_meta["cube_spec"] = json.dumps(
+                        latest_fb.cube_spec, ensure_ascii=False
+                    )
+                    item_meta["cube_spec_readable"] = spec_readable_text(latest_fb.cube_spec)
+                except Exception as e:  # noqa: BLE001
+                    _logger.debug("[badcase] cube_spec 序列化失败（跳过）: %s", e)
         client.create_dataset_item(
             dataset_name="badcase",
             input={"question": question or "(未取到问题)", "session_id": sid},

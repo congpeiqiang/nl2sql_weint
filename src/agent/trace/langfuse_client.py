@@ -21,6 +21,14 @@ import random
 import re
 from contextvars import ContextVar
 
+# prompt 版本快照（PROMPT_REFS 实验注入时优先读落盘正文）。方向单向：
+# prompt_versioning 只在函数内惰性 import 本模块，模块级不反向依赖，无导入环。
+from agent.utils.prompt_versioning import (
+    PROMPT_REFS_ENV,
+    read_snapshot_prompt,
+    snapshot_version,
+)
+
 _logger = logging.getLogger(__name__)
 
 _client = None
@@ -46,10 +54,12 @@ _THREAD_TRACE_MAP: dict[str, tuple[str, str]] = {}
 _TASK_TRACE_MAP: dict[str, tuple[str, str, str, str, str]] = {}
 _TASK_TRACE_CAP = 2000
 
-# M5 灰度：本进程解析到的 prompt label（进程级，import 时掷一次）+ 各 label 已拉到的版本
+# M5 灰度：本进程解析到的 prompt label（进程级，import 时掷一次）+ 各 prompt 已拉到的版本
 _CANARY_RESOLVED: str | None = None
+# 键 "name@label"（不是 label）：main_system_prompt 与 nl2sql_system_prompt 是两个独立
+# prompt，各自版本号，只按 label 存会互相覆盖（后写者赢）→ 报出的版本号是随机的那个
 _PROMPT_VERSIONS: dict[str, int] = {}
-# M4 评估后新增：prompt 来源追踪（"name@label" → langfuse|local），供 metadata.prompt.source
+# M4 评估后新增：prompt 来源追踪（"name@label" → langfuse|local|snapshot），供 metadata.prompt.source
 _PROMPT_SOURCE: dict[str, str] = {}
 
 # ── M-T7：叶子归巢（治理 Tracing 孤儿 root trace 污染）───────────
@@ -408,15 +418,24 @@ def resolve_prompt_label() -> str:
 def prompt_label_info() -> dict:
     """当前进程的 prompt label + 版本 + 来源（供 trace metadata 注入，A→B 切换可见分组）。
 
-    - `source`：当前 label 下所有已装配 prompt 的来源聚合——全部 Langfuse → langfuse；
-      全部本地 → local；有 Langfuse 有本地（同进程混用）→ mixed。排查「主 Langfuse、
-      子本地」这类半回退一眼可见。
+    - `prompt_versions`：每个 prompt 的实际生效版本（"name@label" → version）；
+      `prompt_version` 保留为 main_system_prompt 的版本（确定性取值，不再是「后装配的
+      那个 prompt 覆盖前一个」的随机结果）。
+    - `source`：当前 label 下所有已装配 prompt 的来源聚合——全部同源 → 该源
+      （langfuse|snapshot|local）；混用 → mixed。排查「主 Langfuse、子本地」这类
+      半回退一眼可见，也能一眼看出离线实验是否真的走了 prompt 快照。
     """
     label = resolve_prompt_label()
     info = {"prompt_label": label}
-    ver = _PROMPT_VERSIONS.get(label)
-    if ver:
-        info["prompt_version"] = ver
+    vers = {
+        k.split("@", 1)[0]: v
+        for k, v in _PROMPT_VERSIONS.items()
+        if k.endswith(f"@{label}")
+    }
+    if vers:
+        info["prompt_versions"] = vers
+        if isinstance(vers.get("main_system_prompt"), int):
+            info["prompt_version"] = vers["main_system_prompt"]
     sources = {s for k, s in _PROMPT_SOURCE.items() if k.endswith(f"@{label}")}
     if len(sources) == 1:
         info["source"] = next(iter(sources))
@@ -1151,8 +1170,9 @@ def get_prompt_text(
       宕机时的启动阻塞——兜底逻辑是我们自己的 except，SDK 重试纯属浪费，关掉。
     - 404（prompt 不存在/被改名）与网络故障分开记日志：前者是配置错误（ERROR），
       后者是可用性降级（WARNING）。
-    - 拉到的版本记入 _PROMPT_VERSIONS[label]；来源记 _PROMPT_SOURCE
-      （供 prompt_label_info 注入 metadata.prompt.source = langfuse|local|mixed）。
+    - 拉到的版本记入 _PROMPT_VERSIONS["name@label"]；来源记 _PROMPT_SOURCE
+      （供 prompt_label_info 注入 metadata.prompt.source = langfuse|snapshot|local|mixed）。
+    - PROMPT_REFS（离线实验 prompt 快照）命中时直接返回落盘正文，见下方分支。
     - 总开关 LANGFUSE_ENABLE=false 时同样回退本地（比 LANGFUSE_PROMPT_ENABLED 更顶层）。
     """
     label = label if label is not None else resolve_prompt_label()
@@ -1162,6 +1182,30 @@ def get_prompt_text(
         _PROMPT_SOURCE[source_key] = "local"
         _logger.debug("[langfuse] prompt %s(label=%s) 本地兜底: %s", name, label, reason)
         return fallback
+
+    # 实验 prompt 快照优先。位置在任何开关之前：PROMPT_REFS 只由离线实验 worker 注入，
+    # 生产永不为真；而快照的意义正是「离线也能拿到当时那一版」，所以既不能联网、
+    # 也不该被 LANGFUSE_ENABLE / LANGFUSE_PROMPT_ENABLED 这两道回滚闸门拦成本地兜底。
+    snap = read_snapshot_prompt(name)
+    if snap is not None:
+        snap_text, snap_ver = snap
+        ok_len = len(snap_text.strip()) >= min_chars
+        ok_markers = not required_markers or all(m in snap_text for m in required_markers)
+        if ok_len and ok_markers:
+            if snap_ver is not None:
+                _PROMPT_VERSIONS[source_key] = snap_ver
+            _PROMPT_SOURCE[source_key] = "snapshot"
+            _logger.info(
+                "[langfuse] prompt %s(label=%s) 走实验快照 v%s（PROMPT_REFS=%s）",
+                name, label, snap_ver, os.environ.get(PROMPT_REFS_ENV, ""),
+            )
+            return snap_text
+        # 快照残缺（物化时校验过、事后被改）：沿用同一道护栏回退本地，别带着残缺 prompt 跑
+        miss = [m for m in (required_markers or []) if m not in snap_text]
+        _logger.warning(
+            "[langfuse] prompt %s(label=%s) 快照内容校验不过（%s）→ 转本地兜底",
+            name, label, miss or f"过短(len={len(snap_text)})",
+        )
 
     if not langfuse_enabled() or not prompt_enabled():
         return _local("未启用（LANGFUSE_ENABLE / LANGFUSE_PROMPT_ENABLED）")
@@ -1188,7 +1232,8 @@ def get_prompt_text(
             )
             return _local(f"内容校验不过:{detail}")
         ver = getattr(p, "version", "?")
-        _PROMPT_VERSIONS[label] = ver
+        if isinstance(ver, int):
+            _PROMPT_VERSIONS[source_key] = ver
         _PROMPT_SOURCE[source_key] = "langfuse"
         _logger.info("[langfuse] prompt %s(label=%s) v%s 生效", name, label, ver)
         return text
@@ -1215,11 +1260,16 @@ def get_prompt_version(name: str, label: str | None = None) -> int | None:
     - `label` 缺省走 M5 进程级 A/B 分流（与 system prompt 同 label，A→B 切换一致）。
     - 失败/未启用/label 不存在（404）→ None，调用方回退本地版本（source=local）。
     - 走 SDK 缓存（cache_ttl 60s），服务启动期批量拉 14 个 skill 开销可控。
+    - PROMPT_REFS 快照命中 → 直接返回 manifest 里的版本号（零网络，且不受开关影响），
+      让离线实验的 run 级版本快照（run_experiment._run_snapshot）也能离线拿到真值。
     """
-    if not langfuse_enabled() or not prompt_enabled():
-        return None
     if label is None:
         label = resolve_prompt_label()
+    snap_ver = snapshot_version(name, label)
+    if snap_ver is not None:
+        return snap_ver
+    if not langfuse_enabled() or not prompt_enabled():
+        return None
     try:
         # max_retries=0：M6 启动期串行拉 15 个 skill 版本，SDK 内层重试会放大
         # Langfuse 宕机阻塞；超时 2s（版本查询只取 version，比全文装配更短）。

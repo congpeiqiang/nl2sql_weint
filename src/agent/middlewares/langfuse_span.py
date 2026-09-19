@@ -153,7 +153,8 @@ def _classify_skill(tool_name: str) -> Optional[str]:
 # skill」权威表（见 _resolve_display_skill）。进程级，线程安全靠 GIL。
 _THREAD_ACTIVE_SKILL: dict[str, str] = {}
 _ACTIVE_SKILL_CAP = 2000
-# 匹配 .../{skill}/SKILL.md 路径，提取 skill 目录名（shared/skills、skill_refs 前缀皆可）
+# 匹配 .../{skill}/SKILL.md 路径，提取 skill 目录名（shared/skills、
+# offline_experiment/skill_refs 前缀皆可；本正则与前缀无关, 提取的就是 SKILL.md 上一级目录的名字
 _SKILL_MD_RE = re.compile(r"(?:^|/)(?P<skill>[A-Za-z0-9][A-Za-z0-9_.-]*)/SKILL\.md$")
 
 
@@ -242,6 +243,7 @@ def _resolve_display_skill(tool_name: str, args: dict, thread_id: str, heuristic
     if tool_name in ("read_file", "write_file"):
         p = _vfs_path_from_args(tool_name, args)
         if p:
+            # 取 SKILL.md 前一层的目录
             sk = _skill_name_from_path(p)
             if sk:
                 _set_active_skill(thread_id, sk)

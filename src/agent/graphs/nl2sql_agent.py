@@ -79,9 +79,11 @@ skills = effective_skills_sources(
 # VFS 后端设计（与 main_agent.py 同构，多工作区隔离）
 vfs_root_backend = FilesystemBackend(root_dir=_wm.data_root, virtual_mode=True)
 shared_skills_backend = FilesystemBackend(root_dir=_shared_skills_dir, virtual_mode=True)
-# skill 版本化：SKILLS_REF 物化目录（<data_root>/skill_refs/），skill 脚本经 VFS 也读物化版；
-# 无 SKILLS_REF 时无人引用此路由，零行为变化
-skills_ref_backend = FilesystemBackend(root_dir=_wm.data_root / "skill_refs", virtual_mode=True)
+# skill 版本化：SKILLS_REF 物化目录（<data_root>/offline_experiment/skill_refs/），
+# skill 脚本经 VFS 也读物化版；无 SKILLS_REF 时无人引用此路由，零行为变化
+skills_ref_backend = FilesystemBackend(
+    root_dir=_wm.offline_experiment_dir / "skill_refs", virtual_mode=True
+)
 # 动态工作区：每次操作前从 WorkspaceManager 重新解析 root_dir，切换工作区即时生效
 workspace_data_backend = DynamicFilesystemBackend(get_root_dir=lambda: _wm.active_workspace)
 
@@ -96,7 +98,7 @@ composite_backend = CompositeBackend(
     artifacts_root="/workspace/",
     routes={
         "/shared/skills/": shared_skills_backend,
-        "/skill_refs/": skills_ref_backend,
+        "/offline_experiment/skill_refs/": skills_ref_backend,
         "/workspace/": workspace_data_backend,
         "/": vfs_root_backend,
     },

@@ -22,8 +22,8 @@ tag 命名硬约定（下拉只认这些）：`skills/` 或 `skills-` 前缀—�
 `v1.0.0~v7.0.0` 等非 skill tag。commit + 打前缀 tag + 推送后，下拉自动出现。
 
 未设置 SKILLS_REF → 原样返回默认 sources（当前磁盘 skill），生产与普通实验默认行为
-不变。物化目录放 <data_root>/skill_refs/<safe_ref>/（须在 data_root 内，否则
-vfs_root_backend root=data_root 无法解析）。物化成功写 `.skills_ok` marker
+不变。物化目录放 <data_root>/offline_experiment/skill_refs/<safe_ref>/（须在 data_root
+内，否则 vfs_root_backend root=data_root 无法解析）。物化成功写 `.skills_ok` marker
 （记录 `src@ref`）——同 ref 二次物化（如 API 预检后各 worker 子进程）直接复用目录，
 零网络。物化失败 → None：API 层在 run 预检显式报错，不再静默退化跑默认 skill。
 """
@@ -265,7 +265,7 @@ def _materialize_remote(ref: str, dest_root: Path, origin: str, key: str) -> Opt
             ref,
         )
         return None
-    parent = dest_root.parent  # <data_root>/skill_refs/
+    parent = dest_root.parent  # <data_root>/offline_experiment/skill_refs/
     parent.mkdir(parents=True, exist_ok=True)
     work = parent / f".work_{dest_root.name}_{os.getpid()}"
     if work.exists():
@@ -294,7 +294,7 @@ def _materialize_remote(ref: str, dest_root: Path, origin: str, key: str) -> Opt
 
 
 def materialize_skills_ref(ref: str, src: str = "") -> Optional[Path]:
-    """按 git ref 物化 skill 目录到 <data_root>/skill_refs/<safe_ref>/，进程级缓存。
+    """按 git ref 物化 skill 目录到 <data_root>/offline_experiment/skill_refs/<safe_ref>/，进程级缓存。
 
     顺序（src="" 默认源）：本地仓库 archive（dev / 离线）→ 远程浅克隆（GitLab 真源）；
     已物化目录 marker 匹配时直接复用（跨进程零网络）。src 非空 = <path>@<ref> 显式
@@ -318,7 +318,7 @@ def materialize_skills_ref(ref: str, src: str = "") -> Optional[Path]:
 
         from agent.workspace_manager import get_workspace_manager
 
-        dest_root = get_workspace_manager().data_root / "skill_refs" / _safe_ref(ref)
+        dest_root = get_workspace_manager().offline_experiment_dir / "skill_refs" / _safe_ref(ref)
 
         # 快路径：物化目录已合法且 marker 匹配 → 复用。tag 不可变故永久复用；可变 ref
         # （branch）需 marker 新鲜（<1h，覆盖 API 预检后 worker 子进程窗口）。
@@ -364,4 +364,9 @@ def effective_skills_sources(default: list[str], group: str) -> list[str]:
     dest = materialize_skills_ref(ref, src)
     if dest is None:
         return default
-    return [f"/skill_refs/{_safe_ref(ref)}/{group}/"]
+    # 这个串不是 CompositeBackend 挂载名——SkillsMiddleware 用 backend=vfs_root_backend
+    # （root_dir=data_root）解析，所以它必须是相对 data_root 的物理路径，跟 dest_root
+    # 同源取名（父目录常量来自 workspace_manager，避免两处字面量漂移）。
+    from agent.workspace_manager import OFFLINE_EXPERIMENT_DIR_NAME
+
+    return [f"/{OFFLINE_EXPERIMENT_DIR_NAME}/skill_refs/{_safe_ref(ref)}/{group}/"]

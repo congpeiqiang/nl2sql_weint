@@ -27,7 +27,6 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 import threading
 from pathlib import Path
 from typing import Optional
@@ -95,8 +94,9 @@ def _server_slug(db_name: str) -> str:
 # 版本真源与 skill 侧同构：语义库仓库（正在服务的项目目录）自己的 origin 就是版本
 # 远程。本地 git archive 取不到该 ref（刚推 tag、容器未 fetch）时，src="" 会直取
 # origin 浅克隆——不再静默退化跑当前版本（run 预检用 materialize_semantic_ref 显式
-# 物化，失败即报错）。物化目录落 <tmp>/nl2sql_wren_semantic_cache/<db>/<ref>/ 并写
-# `.nl2sql_wren_ok` marker（记录 src|ref）——API 预检物化后 worker 子进程零网络复用。
+# 物化，失败即报错）。物化目录落 <data_root>/offline_experiment/semantic_refs/<db>/<ref>/
+# 并写 `.nl2sql_wren_ok` marker（记录 src|ref）——API 预检物化后 worker 子进程零网络复用，
+# 且跨容器换代存活（2026-09-12 由 tmp 迁入，见 _cache_dir）。
 _semantic_override_cache: dict[tuple[str, str, str], Optional[str]] = {}
 _semantic_override_lock = threading.Lock()
 
@@ -151,9 +151,19 @@ def _wren_markers_hit(root: Path) -> bool:
 
 
 def _cache_dir(db_name: str, ref: str) -> Path:
+    """物化缓存目录：`<data_root>/offline_experiment/semantic_refs/<db>/<ref>/`。
+
+    2026-09-12 由系统临时目录（`%TEMP%/nl2sql_wren_semantic_cache/`，生产 = 容器 /tmp）
+    迁入：tmp 随容器换代清空 → 每次发版后各语义库版本首用都要重新浅克隆（需 GitLab
+    可达 + `/app/data/.ssh` key），物化后若跑过 wren 构建也白做。放 data_root 下与
+    skill_refs/ prompt_refs/ 同属离线实验产物、运维一处可见；仍在 `FILE_PERMISSIONS`
+    的 `deny /**` 之外（不进 `shared/`），在线 agent 读不到。旧 tmp 目录不自动迁移。
+    """
+    from agent.workspace_manager import get_workspace_manager
+
     return (
-        Path(tempfile.gettempdir()) / "nl2sql_wren_semantic_cache"
-        / _safe_ref(db_name) / _safe_ref(ref)
+        get_workspace_manager().offline_experiment_dir
+        / "semantic_refs" / _safe_ref(db_name) / _safe_ref(ref)
     )
 
 

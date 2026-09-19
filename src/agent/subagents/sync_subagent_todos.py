@@ -80,6 +80,22 @@ _DONE_LABELS = {
 # INTERRUPTED_STUCK_TIMEOUT 兜底防永久卡死。此常量仅历史审批路径保留。
 _AWAIT_APPROVAL_TIMEOUT = 7200  # 等待审批上限 2h（超了按 timeout 强制收尾）
 
+# ── 同步循环时限常量（模块级：便于离线测试把这些上限压到毫秒级）──────
+POST_COMPLETE_MAX_CYCLES = 20      # 完成后继续监控 10s (20 × 0.5s) 让耗时稳定
+STALE_RUN_TIMEOUT = 600            # 子 run 运行时长上限 10min（P1-7，对齐 guards timeout-policy）：超过视为卡死，强制结束（兜底）
+INTERRUPTED_STUCK_TIMEOUT = 120    # 子 run 停在 interrupted 的上限 2min（summarization 瞬时暂停远短于此）：超过视为卡死，强制结束
+COMPLETE_WRITE_MAX_SECONDS = 300   # 完成态写入重试上限：主线程持续 in-flight 时放弃（防僵尸线程）
+# ── P3 主 run 陈旧快照回退守护（trace 72e222c0 / a6f86bbd）──────────
+# 主线程的 auto-continue run 若从「子任务刚启动」的旧 checkpoint 分叉，会在每个节点
+# 边界重写整份 state 快照，把 watcher 刚写好的终态打回（卡片「跑完又回到执行中」）。
+# 既有守护只看 async_tasks[task].status：续跑 run 自己的 check_async_task 会把该字段
+# 写成 success，于是守护「看不见」异常，而 active_queries[task] 仍 true、
+# subagent_steps_map[task] 为空 —— 卡片永久执行中。改为看三要素并重写。
+REGRESSION_GUARD_MAX_SECONDS = 900   # 首次发现回退起，最多再守 15min（独立于 300s 写入上限）
+REGRESSION_GUARD_MAX_REWRITES = 200  # 重写次数上限（防病态刷写；达到即放弃，不僵尸）
+REGRESSION_CHECK_EVERY_CYCLES = 4    # 常规巡检间隔（4 × 0.5s = 2s，与旧行为一致）
+REGRESSION_CHECK_EVERY_CYCLES_HOT = 2  # 已发现回退后的巡检间隔（1s，尽快纠正）
+
 
 # 步骤耗时后缀格式，如 " (3s)"、" (1m30s)"、" (5s...)"
 _DURATION_SUFFIX_RE = re.compile(r"\((\d+[sm])(?:\d+[sm])?\.{0,3}\)\s*$")
@@ -103,6 +119,7 @@ def launch_sync(
     sub_thread_id: str,
     agent_name: str,
     task: Optional[dict] = None,
+    pin_run_id: bool = False,
 ):
     """在守护线程中启动异步同步任务。每个子任务一个线程。
 
@@ -111,10 +128,14 @@ def launch_sync(
         sub_thread_id: 子智能体的 thread_id（= task_id）
         agent_name: 子智能体名称（如 "nl2sql"）
         task: start_async_task 返回的 AsyncTask 字典（含 run_id/created_at/agent_name）
+        pin_run_id: 只跟踪 task["run_id"] 那一个 run（P0 重派发路径用，见 _get_run_status）
+
+    注意：本函数**不幂等**（无条件起线程并覆盖注册表），调用方必须先 is_sync_alive 判断。
     """
     t = threading.Thread(
         target=_run_sync_loop,
         args=(main_thread_id, sub_thread_id, agent_name, task),
+        kwargs={"pin_run_id": pin_run_id},
         daemon=True,
         name=f"subagent-sync-{sub_thread_id[:8]}",
     )
@@ -137,12 +158,15 @@ def _run_sync_loop(
     sub_thread_id: str,
     agent_name: str,
     task: Optional[dict] = None,
+    pin_run_id: bool = False,
 ):
     """守护线程入口：创建新事件循环运行异步同步逻辑。"""
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(
-            _async_sync_loop(main_thread_id, sub_thread_id, agent_name, task)
+            _async_sync_loop(
+                main_thread_id, sub_thread_id, agent_name, task, pin_run_id=pin_run_id
+            )
         )
     except Exception as e:
         _logger.error("[sync] 同步循环异常: %s", e)
@@ -193,6 +217,7 @@ async def _async_sync_loop(
     sub_thread_id: str,
     agent_name: str,
     task: Optional[dict] = None,
+    pin_run_id: bool = False,
 ):
     """核心异步同步循环。每 0.5 秒检查子智能体进度并写入主智能体 state。
 
@@ -236,9 +261,10 @@ async def _async_sync_loop(
     last_sub_todos: Optional[list] = None  # 上一次同步的子智能体 todos
     query_title: Optional[str] = None       # 本任务标题（首次提取）
     sub_agent_done = False
-    has_notified_completion = False
+    final_steps_written = False  # 最终 completed steps 是否已落 state（写失败要重试，见完成分支）
     post_complete_cycles = 0
     final_sub_todos: Optional[list] = None  # 子智能体最终步骤（含耗时）
+    final_steps_cache: Optional[list] = None  # 最终 steps 载荷（只快照一次，失败原样重试）
     query_headers_written = False  # 是否已写入 query_headers 到 state
     active_queries_written = False  # 是否已写入 active_queries=true 到 state
     active_queries_cleared = False  # 是否已写入 active_queries=false 到 state
@@ -254,10 +280,10 @@ async def _async_sync_loop(
     interrupted_since: Optional[float] = None  # 子 run 进入 interrupted（瞬时暂停态）的时间点
     completion_write_retries = 0  # async_tasks 写入失败重试次数
     completion_started_at: Optional[float] = None  # 进入完成分支的时间点（重试上限判定起点）
-    POST_COMPLETE_MAX_CYCLES = 20           # 完成后继续监控 10s (20 × 0.5s) 让耗时稳定
-    STALE_RUN_TIMEOUT = 600                 # 子 run 运行时长上限 10min（P1-7，对齐 guards timeout-policy）：超过视为卡死，强制结束（兜底）
-    INTERRUPTED_STUCK_TIMEOUT = 120         # 子 run 停在 interrupted 的上限 2min（summarization 瞬时暂停远短于此）：超过视为卡死，强制结束
-    COMPLETE_WRITE_MAX_SECONDS = 300        # 完成态写入重试上限：主线程持续 in-flight 时放弃（防僵尸线程）
+    # ── P3 终态回退守护 / 重派发交接 ──
+    watched_run_id: Optional[str] = None   # 本 watcher 跟踪的 run_id（重派发检测基线）
+    regression_since: Optional[float] = None  # 首次发现终态被回退的时间点
+    regression_rewrites = 0                # 因回退而重写终态的次数
 
     # 主智能体步骤耗时追踪（保留原逻辑，仅用于日志/展示，不写回 state）
     prev_main_statuses: dict = {}   # {content: status} 上一次各步骤状态
@@ -266,6 +292,14 @@ async def _async_sync_loop(
 
     wait_for_run_cycles = 0  # 等待 run 出现的周期数
     loop_start = time.monotonic()  # 本任务开始时间（用于运行时长保护）
+
+    # ── P2b 单调基线：本任务上一次已渲染过的 steps 快照 ──
+    # 子 run 被 update_async_task 重派发（或模型重写 todo）时，子线程 todos 会从
+    # pending 重新开始；若照抄就会把**已完成的步骤降级回 pending/in_progress**，
+    # 前端进度条回退（trace a6f86bbd：卡片从 8/8 回到 6/8 再回到「查询执行」转圈）。
+    # 已完成的步骤按内容记账，永不回退。
+    _seen_completed: set[str] = set()
+    _seeded_steps: list = []
 
     # ── P1-9 启动自愈：async_tasks 终态写入与 active_queries=false 是两个不原子写，
     # 中间进程重启会留下"async_tasks=success 但 active_queries=true"的脏状态 → 前端
@@ -281,6 +315,49 @@ async def _async_sync_loop(
             run_status = _boot_status
             sub_agent_done = True
             active_queries_written = True
+            # P3：启动即终态（P1-9 自愈 / P0 钉扎的 run 在 bootstrap 前就结束了）
+            # 也必须记下盯的 run_id，否则整段 post-complete 窗口里
+            # `watched_run_id` 恒 None → 重派发交接检测失效（下面 not sub_agent_done
+            # 分支同样要赋值，两处不可少其一）。
+            if watched_run_id is None:
+                watched_run_id = (task or {}).get("run_id") or (
+                    (await _get_latest_run(client, sub_thread_id)) or {}
+                ).get("run_id")
+        else:
+            # 非终态 = 首启或重派发：读旧 steps 建单调基线；重派发时先写占位，
+            # 免得卡片在子 run 首个 write_todos 之前一直是空/回退态。
+            _seeded_steps = await _read_steps_snapshot(
+                client, main_thread_id, sub_thread_id
+            )
+            for _s in _seeded_steps:
+                _c = str((_s or {}).get("content") or "")
+                if _c.startswith(_SUBAGENT_PREFIX) and (
+                    _s or {}
+                ).get("status") == "completed":
+                    _seen_completed.add(
+                        _strip_duration_suffix(_c[len(_SUBAGENT_PREFIX):])
+                    )
+            if _seeded_steps:
+                _boot_placeholder = _merge_steps_monotonic(
+                    _seeded_steps, [], _seen_completed, sub_thread_id, agent_name,
+                    redispatched=True,
+                )
+                try:
+                    await asyncio.to_thread(
+                        _sync_update_state,
+                        main_thread_id,
+                        {"subagent_steps_map": {sub_thread_id: _boot_placeholder}},
+                    )
+                    _logger.info(
+                        "[sync] 重派发占位已写入 subagent_steps_map[%s]（沿用 %d 步，%d 步已完成）",
+                        sub_thread_id[:8], len(_boot_placeholder),
+                        len(_seen_completed),
+                    )
+                except Exception as _ph_err:
+                    _logger.warning(
+                        "[sync] 写重派发占位失败(下轮正常同步会覆盖): %s",
+                        str(_ph_err)[:100],
+                    )
     except Exception as _boot_err:
         _logger.debug("[sync] 启动终态检查失败(继续正常流程): %s", _boot_err)
 
@@ -289,11 +366,24 @@ async def _async_sync_loop(
         try:
             # ── 1. 检查子智能体 run 状态 ──
             if not sub_agent_done:
-                run_status = await _get_run_status(client, sub_thread_id)
+                _pin = (task or {}).get("run_id") if pin_run_id else None
+                run_status = await _get_run_status(
+                    client, sub_thread_id, expect_run_id=_pin
+                )
                 if run_status is None:
                     # run 可能还没创建，等待重试（最多 20s）
                     wait_for_run_cycles += 1
                     if wait_for_run_cycles > 10:
+                        if _pin:
+                            # P0 钉扎的 run 20s 内没出现（重派发窗口异常）→ 退回「取最新 run」，
+                            # 别退出（退出=卡片永久卡死），也不写终态（下一轮重新判定）。
+                            _logger.warning(
+                                "[sync] 钉扎 run %s 20s 内未出现，退回取最新 run: %s",
+                                str(_pin)[:8], sub_thread_id[:8],
+                            )
+                            pin_run_id = False
+                            wait_for_run_cycles = 0
+                            continue
                         _logger.warning("[sync] 等待 run 超时，退出")
                         break
                     continue  # 继续等待，不退出
@@ -469,9 +559,16 @@ async def _async_sync_loop(
                         _logger.warning("[sync] 取消超时子 run 失败: %s", e)
                 if run_status in _RUN_DONE_STATUSES:
                     sub_agent_done = True
+                    # P3：记下本 watcher 盯的 run_id —— 后续「子线程出现另一个未完成
+                    # 的新 run」即判定为重派发，交接给新 watcher（否则新 run 无人同步）。
+                    if watched_run_id is None:
+                        watched_run_id = (task or {}).get("run_id") or (
+                            (await _get_latest_run(client, sub_thread_id)) or {}
+                        ).get("run_id")
                     _logger.info(
-                        "[sync] 子智能体 %s，进入标题守护+通知模式",
+                        "[sync] 子智能体 %s，进入标题守护+通知模式 (run=%s)",
                         run_status,
+                        str(watched_run_id)[:8],
                     )
 
             # ── 2. 每次读取主智能体当前 todos（实时，非快照）──
@@ -590,30 +687,17 @@ async def _async_sync_loop(
                     client, sub_thread_id
                 )
                 if sub_todos and sub_todos != last_sub_todos:
-                    # 构建子智能体步骤列表（含进度头），步骤 id 加 task 前缀防 React key 冲突
-                    completed = sum(
-                        1 for t in sub_todos if t["status"] == "completed"
-                    )
-                    total = len(sub_todos)
-                    has_in_progress = any(
-                        t["status"] == "in_progress" for t in sub_todos
-                    )
+                    # 构建子智能体步骤列表（含进度头），步骤 id 加 task 前缀防 React key 冲突。
+                    # P2b：经 _merge_steps_monotonic 合并 —— 已完成的步骤永不回退
+                    # （重派发/模型重写 todo 时子线程会从 pending 重来）。
                     task_prefix = sub_thread_id[:8]
-                    steps = [
-                        {
-                            "id": f"__subagent_header_{task_prefix}__",
-                            "content": f"{_SUBAGENT_MARKER} {agent_name} 执行进度 ({completed}/{total})",
-                            "status": "in_progress" if has_in_progress else "completed",
-                        }
-                    ]
-                    for i, t in enumerate(sub_todos):
-                        steps.append(
-                            {
-                                "id": f"__subagent_{task_prefix}_{i}__",
-                                "content": f"{_SUBAGENT_PREFIX}{t['content']}",
-                                "status": t["status"],
-                            }
-                        )
+                    steps = _merge_steps_monotonic(
+                        None, sub_todos, _seen_completed, sub_thread_id, agent_name
+                    )
+                    completed = sum(
+                        1 for s in steps[1:] if s["status"] == "completed"
+                    )
+                    total = len(steps) - 1
                     await asyncio.to_thread(_sync_update_state, main_thread_id, {"subagent_steps_map": {sub_thread_id: steps}})
                     _logger.info(
                         "[sync] 写入 subagent_steps_map[%s]: %d 项, header=%s",
@@ -651,44 +735,61 @@ async def _async_sync_loop(
                 if completion_started_at is None:
                     completion_started_at = time.monotonic()
 
-                # 一次性快照最终步骤 + 写最终 completed steps（best-effort，不重试）
-                if not has_notified_completion:
-                    has_notified_completion = True
-                    final_sub_todos = await _extract_subagent_todos(
-                        client, sub_thread_id
-                    )
-                    _logger.info(
-                        "[sync] 快照最终步骤: %d 项",
-                        len(final_sub_todos) if final_sub_todos else 0,
-                    )
-                    task_prefix = sub_thread_id[:8]
-                    # P1-7：按终态展示（已取消/超时终止/执行失败…），不再一律「已完成」
-                    done_label = _DONE_LABELS.get(run_status, "已完成")
-                    if final_sub_todos:
-                        completed_steps = [
-                            {
-                                "id": f"__subagent_header_{task_prefix}__",
-                                "content": f"{_SUBAGENT_MARKER} {agent_name} 执行进度 ({done_label})",
-                                "status": "completed",
-                            }
-                        ]
-                        for i, t in enumerate(final_sub_todos):
-                            completed_steps.append(
+                # 快照最终步骤（只做一次）→ 写最终 completed steps，**写失败重试到成功**。
+                # 旧实现是「置位 has_notified_completion 在写入之前 + 失败仅 WARNING」——
+                # 主线程 in-flight run 期间 update_state 被拒时（同下方 async_tasks 的处境）
+                # 最终步骤永久丢失：async_tasks 已是 success、subagent_steps_map 却冻在
+                # 中间态（前端进度卡恒 6/8，trace a6f86bbd）。此处与 async_tasks 对齐：
+                # 载荷只快照一次并缓存，失败按 2s 退避原样重试，直到成功或超 300s 上限。
+                if not final_steps_written:
+                    if final_steps_cache is None and final_sub_todos is None:
+                        final_sub_todos = await _extract_subagent_todos(
+                            client, sub_thread_id
+                        )
+                        _logger.info(
+                            "[sync] 快照最终步骤: %d 项",
+                            len(final_sub_todos) if final_sub_todos else 0,
+                        )
+                        task_prefix = sub_thread_id[:8]
+                        # P1-7：按终态展示（已取消/超时终止/执行失败…），不再一律「已完成」
+                        done_label = _DONE_LABELS.get(run_status, "已完成")
+                        if final_sub_todos:
+                            final_steps_cache = [
+                                {
+                                    "id": f"__subagent_header_{task_prefix}__",
+                                    "content": f"{_SUBAGENT_MARKER} {agent_name} 执行进度 ({done_label})",
+                                    "status": "completed",
+                                }
+                            ] + [
                                 {
                                     "id": f"__subagent_{task_prefix}_{i}__",
                                     "content": f"{_SUBAGENT_PREFIX}{t['content']}",
                                     "status": "completed",
                                 }
-                            )
+                                for i, t in enumerate(final_sub_todos)
+                            ]
+                    if final_steps_cache:
                         try:
-                            await asyncio.to_thread(_sync_update_state, main_thread_id, {"subagent_steps_map": {sub_thread_id: completed_steps}})
+                            await asyncio.to_thread(
+                                _sync_update_state,
+                                main_thread_id,
+                                {"subagent_steps_map": {sub_thread_id: final_steps_cache}},
+                            )
+                            final_steps_written = True
                             _logger.info(
                                 "[sync] 写入最终 subagent_steps_map[%s]: %d 项",
-                                task_prefix,
-                                len(completed_steps),
+                                sub_thread_id[:8],
+                                len(final_steps_cache),
                             )
                         except Exception as e:
-                            _logger.warning("[sync] 写入最终 steps 失败: %s", e)
+                            _logger.warning(
+                                "[sync] 写入最终 steps 失败(将重试): %s",
+                                str(e)[:100],
+                            )
+                            await asyncio.sleep(2)
+                    else:
+                        # 无最终步骤可写（子线程 state 里没有 todos）→ 视为已完成
+                        final_steps_written = True
 
                 # 写 async_tasks 单 key（基于传入 task 字典 + run_status，无读-改-写竞态）。
                 # 失败持续重试，直到主线程 in-flight run 结束写入成功，或超上限放弃。
@@ -809,36 +910,105 @@ async def _async_sync_loop(
                         run_status,
                     )
 
-                # async_tasks + active_queries=false 都落地后，进入固定宽限期再退出
-                if async_tasks_written and active_queries_cleared:
+                # async_tasks + active_queries=false + 最终 steps 都落地后，进入固定宽限期再退出。
+                # 必须把 final_steps_written 计入闸门：否则「完成后多活 10s」会在最终步骤
+                # 还没写进去时就 break，卡片永久停在中间态（P1，trace a6f86bbd）。
+                if async_tasks_written and active_queries_cleared and final_steps_written:
                     post_complete_cycles += 1
-                    # 每 4 个周期（2s）检查一次终态是否被 auto-continue run 中断回退覆盖。
-                    # 场景：sync 写入终态 → 前端触发 auto-continue → auto-continue run 被中断
-                    # → LangGraph 回退到该 run 开始前的 checkpoint → 若 checkpoint 不含 sync
-                    # 的写入（竞态窗口），终态丢失，UI 表现为进度条卡死。
-                    if post_complete_cycles % 4 == 0:
-                        try:
-                            current_status = await _read_task_status(
+                    # 终态回退巡检（P3，trace 72e222c0）。场景：sync 写入终态 → 前端
+                    # auto-continue → 续跑 run 从「子任务刚启动」的旧 checkpoint 分叉，
+                    # 每个节点边界重写整份 state 快照 → 卡片被打回「执行中」。
+                    # 既有实现只查 async_tasks.status，会被续跑 run 自己的
+                    # check_async_task 回写成 success 而漏判（生产实测：status=success、
+                    # active_queries=true、steps 空，卡片永久执行中）→ 改查三要素。
+                    _every = (
+                        REGRESSION_CHECK_EVERY_CYCLES_HOT
+                        if regression_since is not None
+                        else REGRESSION_CHECK_EVERY_CYCLES
+                    )
+                    if _every and post_complete_cycles % _every == 0:
+                        _why = _terminal_regression(
+                            await _read_sync_fields(
                                 client, main_thread_id, sub_thread_id
+                            ),
+                            len(final_steps_cache or []),
+                        )
+                        if _why:
+                            if regression_since is None:
+                                regression_since = time.monotonic()
+                            regression_rewrites += 1
+                            _logger.warning(
+                                "[sync] 终态被回退(%s)！重写终态=%s [第%d次]",
+                                _why, run_status, regression_rewrites,
                             )
-                            if current_status is not None and current_status not in _RUN_DONE_STATUSES:
-                                _logger.warning(
-                                    "[sync] 终态被回退！当前 async_tasks=%s，重新写入终态=%s",
-                                    current_status, run_status,
+                            # 三个写入闸门一起复位：下一个周期原样重写终态
+                            # （载荷已缓存，不会重新快照、不会丢步骤）
+                            async_tasks_written = False
+                            active_queries_cleared = False
+                            final_steps_written = False
+                            post_complete_cycles = 0
+                            # 不 continue：下面的守护上限判定必须每轮都跑到，否则
+                            # 「每轮都检出回退」的病态场景会永远跳过上限、变死循环。
+                        # 重派发交接：update_async_task 在子线程起**新 run**，而本 watcher
+                        # 仍盯着已完成的旧 run。若就这么退出，新 run 无人同步——P0 的
+                        # is_sync_alive 会因本线程尚在而跳过重建。故检测到新 run 就交给
+                        # 一个钉扎它的新 watcher，再退出（launch_sync 覆盖注册表，本线程
+                        # 的 finally 见 _ACTIVE_LOOPS 已非自己，不会误删新线程）。
+                        _latest = await _get_latest_run(client, sub_thread_id)
+                        _latest_id = (_latest or {}).get("run_id")
+                        if (
+                            _latest_id
+                            and watched_run_id
+                            and _latest_id != watched_run_id
+                            and (_latest or {}).get("status")
+                            not in _RUN_DONE_STATUSES
+                        ):
+                            _logger.warning(
+                                "[sync] 检测到重派发新 run %s（旧 %s）→ 交接并退出",
+                                str(_latest_id)[:8], str(watched_run_id)[:8],
+                            )
+                            try:
+                                _hand = dict(task or {})
+                                _hand["task_id"] = sub_thread_id
+                                _hand["agent_name"] = agent_name
+                                _hand["run_id"] = _latest_id
+                                _hand["status"] = "running"
+                                launch_sync(
+                                    main_thread_id,
+                                    sub_thread_id,
+                                    agent_name,
+                                    _hand,
+                                    pin_run_id=True,
                                 )
-                                async_tasks_written = False
-                                active_queries_cleared = False
-                        except Exception as _e:
-                            _logger.warning("[sync] 终态回退检查失败: %s", _e)
+                            except Exception as _e:  # noqa: BLE001
+                                _logger.warning("[sync] 交接重派发 watcher 失败: %s", _e)
+                            break
+                    # 回退守护上限：重写次数 / 守护时长任一超限即放弃（防僵尸线程）
+                    if regression_since is not None and (
+                        regression_rewrites >= REGRESSION_GUARD_MAX_REWRITES
+                        or (time.monotonic() - regression_since)
+                        > REGRESSION_GUARD_MAX_SECONDS
+                    ):
+                        _logger.error(
+                            "[sync] 回退守护超限(%d 次 / %ds)，放弃: %s",
+                            REGRESSION_GUARD_MAX_REWRITES,
+                            REGRESSION_GUARD_MAX_SECONDS,
+                            sub_thread_id[:8],
+                        )
+                        break
                     if post_complete_cycles >= POST_COMPLETE_MAX_CYCLES:
                         _logger.info(
                             "[sync] 退出: cycles=%d", post_complete_cycles
                         )
                         break
-                elif (time.monotonic() - completion_started_at) > COMPLETE_WRITE_MAX_SECONDS:
+                elif (
+                    time.monotonic() - completion_started_at
+                ) > COMPLETE_WRITE_MAX_SECONDS and not regression_rewrites:
                     # 兜底：主线程长时间 in-flight（如长查询）时放弃重试，避免僵尸线程。
                     # 前端会因 active_queries 仍 true 持续轮询，但 async_tasks 缺失时仍不自动续跑；
                     # 这是极端场景的降级（至少不占线程）。
+                    # 注意 `and not regression_rewrites`：已经在自愈重写的任务不适用这个
+                    # 300s 上限（否则守护会在第 300 秒被杀），改由 REGRESSION_GUARD_MAX_* 兜底。
                     _logger.error(
                         "[sync] 完成写入超过 %ds 仍未成功(主线程持续 in-flight?)，放弃: %s",
                         COMPLETE_WRITE_MAX_SECONDS, sub_thread_id[:8],
@@ -854,9 +1024,23 @@ async def _async_sync_loop(
 # ── 辅助函数 ────────────────────────────────────────────────────
 
 
-async def _get_run_status(client, thread_id: str) -> Optional[str]:
-    """获取线程上最新 run 的状态。"""
+async def _get_run_status(
+    client, thread_id: str, expect_run_id: Optional[str] = None
+) -> Optional[str]:
+    """获取线程上 run 的状态。
+
+    expect_run_id（P0 重派发路径专用）：只在 run 列表里匹配该 run_id。
+    update_async_task 用 multitask_strategy="interrupt" 换 run，列表在窗口期里
+    可能仍是**旧 run 的终态**；不钉扎就会开局即写终态，卡片再次冻结（trace a6f86bbd）。
+    匹配不到返回 None → 走调用方的等待分支重试，绝不因钉扎失败而放弃。
+    """
     try:
+        if expect_run_id:
+            runs = await client.runs.list(thread_id=thread_id, limit=5)
+            for r in runs or []:
+                if r.get("run_id") == expect_run_id:
+                    return r.get("status", "unknown")
+            return None
         runs = await client.runs.list(thread_id=thread_id, limit=1)
         if not runs:
             return None
@@ -938,6 +1122,144 @@ async def _read_task_status(
     except Exception as e:
         _logger.warning("[sync] read_task_status failed: %s", e)
         return None
+
+
+async def _read_steps_snapshot(
+    client, main_thread_id: str, task_id: str
+) -> list:
+    """读主线程 state 中 subagent_steps_map[task_id] 的当前步骤列表（P2b 单调基线）。
+
+    与 _read_task_status 同源（同一份 state），用于 watcher 启动时恢复「已完成的步骤」：
+    重派发/重启后子线程 todos 从头开始，若不记账就会把已完成步骤降级回 pending，
+    前端进度条回退。取不到时返回空列表（不阻塞）。
+    """
+    try:
+        state = await client.threads.get_state(thread_id=main_thread_id)
+        steps = ((state.get("values") or {}).get("subagent_steps_map") or {}).get(
+            task_id
+        )
+        return steps if isinstance(steps, list) else []
+    except Exception as e:
+        _logger.warning("[sync] read_steps_snapshot failed: %s", e)
+        return []
+
+
+async def _read_sync_fields(
+    client, main_thread_id: str, task_id: str
+) -> Optional[dict]:
+    """一次 get_state 读出进度卡的三要素（P3 回退守护）。
+
+    返回 {"status", "aq", "steps"}：
+      status = async_tasks[task_id].status（终态集合判定用）
+      aq     = active_queries[task_id]（watcher 收尾应写 False）
+      steps  = subagent_steps_map[task_id]（列表；空列表表示卡片无步骤）
+    读失败返回 None（调用方跳过本轮判定，不误判回退）。
+    比连续调 _read_task_status + _read_steps_snapshot 少一次 HTTP（同一份 state）。
+    """
+    try:
+        state = await client.threads.get_state(thread_id=main_thread_id)
+        values = state.get("values") or {}
+        tasks = values.get("async_tasks") or {}
+        entry = tasks.get(task_id)
+        steps = (values.get("subagent_steps_map") or {}).get(task_id)
+        return {
+            "status": entry.get("status") if isinstance(entry, dict) else None,
+            "aq": (values.get("active_queries") or {}).get(task_id),
+            "steps": steps if isinstance(steps, list) else [],
+        }
+    except Exception as e:
+        _logger.warning("[sync] read_sync_fields failed: %s", e)
+        return None
+
+
+def _terminal_regression(fields: Optional[dict], expected_steps: int) -> Optional[str]:
+    """判定主线程 state 里该任务的卡片是否被回退；返回原因（None = 正常）。
+
+    三要素（P3，trace 72e222c0）：只查 async_tasks.status 会漏判——续跑 run 自己的
+    check_async_task Command 会把该字段回写成 success，但 active_queries 仍 true、
+    subagent_steps_map 为空（或步骤数缩水），卡片就此永久「执行中」。
+    """
+    if not fields:
+        return None
+    status = fields.get("status")
+    if status is not None and status not in _RUN_DONE_STATUSES:
+        return f"async_tasks.status={status}"
+    if fields.get("aq"):
+        return "active_queries=true"
+    steps = fields.get("steps") or []
+    if expected_steps and len(steps) < expected_steps:
+        return f"steps={len(steps)}<{expected_steps}"
+    return None
+
+
+def _merge_steps_monotonic(
+    prev_steps: Optional[list],
+    sub_todos: Optional[list],
+    seen_completed: set,
+    sub_thread_id: str,
+    agent_name: str,
+    redispatched: bool = False,
+) -> list:
+    """把子智能体 todos 渲染成前端 steps，并保证「已完成的步骤永不回退」（P2b）。
+
+    Args:
+        prev_steps: 上一轮已落 state 的 steps（仅 sub_todos 为空时用于占位沿用）
+        sub_todos: _extract_subagent_todos 的结果（content 已含耗时后缀）
+        seen_completed: 已完成的步骤内容（去前缀去耗时后缀）集合，**原地更新**
+        redispatched: 重派发占位写入（此时无 sub_todos，header 强制 in_progress）
+
+    子 run 被 update_async_task 重派发、或模型重写 todo 列表时，子线程 todos 会把
+    已完成的步骤重新标成 pending/in_progress；照抄就会让前端进度条回退（trace
+    a6f86bbd：卡片 8/8 → 6/8 → 「查询执行」重新转圈）。此处以内容为 key 记账：
+    凡曾 completed 过的步骤，渲染时一律 completed。
+    header 步骤由本函数生成（content 随计数变化），不参与单调集合。
+    """
+    task_prefix = sub_thread_id[:8]
+    items: list = []  # [(content, status)]，content 不含 "└ " 前缀
+
+    if sub_todos:
+        for t in sub_todos:
+            content = str(t.get("content") or "")
+            status = t.get("status") or "pending"
+            key = _strip_duration_suffix(content)
+            if status == "completed":
+                seen_completed.add(key)
+            elif key in seen_completed:
+                status = "completed"  # 单调：已完成的不回退
+            items.append((content, status))
+    else:
+        for s in prev_steps or []:
+            content = str((s or {}).get("content") or "")
+            if not content.startswith(_SUBAGENT_PREFIX):
+                continue  # 跳过旧 header 步骤，header 由本函数重新生成
+            body = content[len(_SUBAGENT_PREFIX):]
+            status = (s or {}).get("status") or "pending"
+            if _strip_duration_suffix(body) in seen_completed:
+                status = "completed"
+            items.append((body, status))
+
+    completed = sum(1 for _, st in items if st == "completed")
+    total = len(items)
+    has_in_progress = any(st == "in_progress" for _, st in items)
+    header_text = f"{_SUBAGENT_MARKER} {agent_name} 执行进度 ({completed}/{total})"
+    if redispatched:
+        header_text += " · 已重新派发，继续执行"
+    steps = [
+        {
+            "id": f"__subagent_header_{task_prefix}__",
+            "content": header_text,
+            "status": "in_progress" if (redispatched or has_in_progress) else "completed",
+        }
+    ]
+    steps.extend(
+        {
+            "id": f"__subagent_{task_prefix}_{i}__",
+            "content": f"{_SUBAGENT_PREFIX}{content}",
+            "status": status,
+        }
+        for i, (content, status) in enumerate(items)
+    )
+    return steps
 
 
 def _lookup_task_description(

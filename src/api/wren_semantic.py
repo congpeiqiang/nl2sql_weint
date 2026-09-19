@@ -48,6 +48,69 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
+# ── 业务知识：wren v5 规范布局 ──────────────────────────────
+# wren 的 knowledge/ 只有 5 个子目录，且**只有 .md 会被消费**：
+#   rules/*.md                    → context.load_knowledge_rules()（按文件名排序拼接）
+#   sql/*.md                      → memory.markdown.load_query_pairs()（读 front-matter 的 nl+sql）
+#   glossary|metrics|caveats/*.md → mcp_server.get_all_knowledge()
+# 因此读/写只认这 5 个目录下的 .md —— 写到别处（如 knowledge/glossary.yml）等于没写，
+# agent 一个字都读不到。子目录常量与 wren 的 _KNOWLEDGE_SUBDIRS 对齐。
+_KNOWLEDGE_CATEGORIES: dict[str, str] = {
+    "glossary": "glossary",
+    "metrics": "metrics",
+    "rules": "rules",
+    "sql_patterns": "sql",
+    "caveats": "caveats",
+}
+_KNOWLEDGE_DIRS = frozenset(_KNOWLEDGE_CATEGORIES.values())
+# sql 条目走「自然语言问题 + SQL」结构化表单（front-matter 由此渲染）；其余是自由 Markdown
+_MARKDOWN_CATEGORIES = ("glossary", "metrics", "rules", "caveats")
+# 文件名里不允许出现的字符（含控制字符；跨 Windows/Linux 都安全）
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+
+def _library_dir(project: Path, category: str) -> Path | None:
+    """分类名 → 项目内 knowledge/<子目录>；未知分类返回 None。"""
+    sub = _KNOWLEDGE_CATEGORIES.get(category)
+    return (project / "knowledge" / sub) if sub else None
+
+
+def _truthy(v: object) -> bool:
+    """query 参数 / JSON body 里的布尔归一化：body 可能是 bool，也可能是字符串
+    （`"true"`/`"1"`，前端或 curl 传参两种写法都见过）。"""
+    if isinstance(v, bool):
+        return v
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_knowledge_file(project: Path, rel_path: str) -> tuple[Path | None, str]:
+    """把前端给的相对路径解析成项目内的知识文件，返回 (绝对路径, 规范化相对路径)。
+
+    只接受 `knowledge/<5 分类之一>/<名字>.md`。允许中文/空格/大小写（生产库文件名就是
+    `术语表.md`、`报工与工时.md`，必须能原地编辑不改名），拒绝 .. 逃逸、绝对路径、
+    反斜杠、二级子目录、非 .md、隐藏文件与非法字符。不合法时路径返回 None。
+    """
+    raw = str(rel_path or "").strip()
+    if not raw or "\\" in raw or raw.startswith("/"):
+        return None, raw
+    parts = raw.split("/")
+    if len(parts) != 3 or parts[0] != "knowledge" or parts[1] not in _KNOWLEDGE_DIRS:
+        return None, raw
+    fname = parts[2]
+    if not fname.endswith(".md") or fname.startswith(".") or _INVALID_FILENAME_CHARS.search(fname):
+        return None, raw
+    if fname == ".md":
+        return None, raw
+    safe = f"knowledge/{parts[1]}/{fname}"
+    target = (project / safe).resolve()
+    if not _is_within(target, project):
+        return None, safe
+    # 二次确认父目录就是分类目录本身（防软链/大小写差异绕过）
+    if target.parent != (project / "knowledge" / parts[1]).resolve():
+        return None, safe
+    return target, safe
+
+
 def _read_project_name(project_path: Path) -> str:
     """读 wren_project.yml 的 name 字段；失败回退目录名。"""
     yml = project_path / "wren_project.yml"
@@ -847,33 +910,131 @@ async def knowledge_template(request: Request):
 
 
 async def save_knowledge(request: Request):
-    """Step 3b：保存业务知识文件。"""
+    """Step 3b：保存业务知识（wren 规范布局，见 _resolve_knowledge_file）。
+
+    body：
+      files:     {"knowledge/glossary/术语表.md": "正文"}   Markdown 分类写原文
+      sql_pairs: {"knowledge/sql/未报工名单.md": {"nl","sql",["datasource","tags","body"]}}
+                 —— 由 wren 自己的 render_query_markdown 渲染 front-matter，保证与
+                 load_query_pairs/parse_query_markdown 往返一致
+      deletes:   ["knowledge/caveats/旧陷阱.md"]            删除（幂等）
+
+    返回 saved / deleted / rejected；rejected 是非法的路径（前端据此报错，不静默吞掉）。
+    """
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
 
     data = await parse_body(request)
-    files: dict[str, str] = data.get("files", {}) or {}
-    if not files:
-        return json_response({"error": "files 必填"}, status=400)
+    files = data.get("files") or {}
+    sql_pairs = data.get("sql_pairs") or {}
+    deletes = data.get("deletes") or []
+    if not isinstance(files, dict) or not isinstance(sql_pairs, dict) or not isinstance(deletes, list):
+        return json_response({"error": "files / sql_pairs 需为对象，deletes 需为数组"}, status=400)
+    if not files and not sql_pairs and not deletes:
+        return json_response({"error": "files / sql_pairs / deletes 至少给一项"}, status=400)
+
+    from wren.memory.markdown import parse_query_markdown, render_query_markdown
 
     saved: list[str] = []
-    for rel_path, content in files.items():
-        # 安全：路径必须在项目目录内，且不允许 .. 逃逸
-        safe = rel_path.replace("\\", "/").strip("/")
-        if ".." in safe or safe.startswith("/"):
-            _logger.warning("[wren_semantic] 拒绝非法路径: %s", rel_path)
-            continue
-        target = (project / safe).resolve()
-        if not _is_within(target, project):
-            _logger.warning("[wren_semantic] 路径逃逸拒绝: %s", rel_path)
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        saved.append(safe)
+    deleted: list[str] = []
+    rejected: list[str] = []
 
-    return json_response({"ok": True, "saved": saved})
+    def _reject(rel_path: object, why: str) -> None:
+        _logger.warning("[wren_semantic] 拒绝知识文件 %s: %s", rel_path, why)
+        rejected.append(str(rel_path))
+
+    # 1) 自由 Markdown 分类：原文落盘
+    for rel_path, content in files.items():
+        target, safe = _resolve_knowledge_file(project, rel_path)
+        if target is None:
+            _reject(rel_path, "路径非法（只允许 knowledge/<分类>/<名>.md）")
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(content), encoding="utf-8")
+            saved.append(safe)
+        except OSError as e:
+            _reject(safe, f"写入失败: {e}")
+
+    # 2) SQL 条目：结构化字段 → wren 渲染器生成 front-matter
+    for rel_path, pair in sql_pairs.items():
+        target, safe = _resolve_knowledge_file(project, rel_path)
+        if target is None:
+            _reject(rel_path, "路径非法（只允许 knowledge/<分类>/<名>.md）")
+            continue
+        if not isinstance(pair, dict):
+            _reject(safe, "sql_pairs 的值需为对象")
+            continue
+        nl = str(pair.get("nl") or "").strip()
+        sql = str(pair.get("sql") or "").strip()
+        if not nl or not sql:
+            # 没有 nl+sql 的 sql/*.md 不会被 wren 读取 → 拒写，不留垃圾文件
+            _reject(safe, "nl 与 sql 均不能为空")
+            continue
+
+        # source / created_at 沿用文件已有值（重存不改出处），新文件默认 user
+        old: dict = {}
+        if target.is_file():
+            try:
+                old = parse_query_markdown(target)
+            except Exception as e:
+                _logger.debug("[save_knowledge] %s 旧 front-matter 解析失败: %s", safe, e)
+
+        def _field(key: str, fallback=None):
+            val = pair[key] if key in pair else fallback
+            if isinstance(val, str):
+                val = val.strip()
+            return val or None
+
+        raw_tags = pair["tags"] if "tags" in pair else old.get("tags")
+        if isinstance(raw_tags, (list, tuple)):
+            tags = [str(t).strip() for t in raw_tags if str(t).strip()]
+        elif isinstance(raw_tags, str):
+            tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+        else:
+            tags = []
+        body = pair["body"] if "body" in pair else old.get("_body")
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                render_query_markdown(
+                    nl,
+                    sql,
+                    datasource=_field("datasource", old.get("datasource")),
+                    tags=tags or None,
+                    source=_field("source", old.get("source")) or "user",
+                    created_at=_field("created_at", old.get("created_at")),
+                    body=str(body).strip() if body else None,
+                ),
+                encoding="utf-8",
+            )
+            saved.append(safe)
+        except OSError as e:
+            _reject(safe, f"写入失败: {e}")
+
+    # 3) 删除（幂等：文件已不存在视为完成，不计入 deleted）
+    for rel_path in deletes:
+        target, safe = _resolve_knowledge_file(project, rel_path)
+        if target is None:
+            _reject(rel_path, "路径非法（只允许 knowledge/<分类>/<名>.md）")
+            continue
+        try:
+            if target.is_file():
+                target.unlink()
+                deleted.append(safe)
+        except OSError as e:
+            _reject(safe, f"删除失败: {e}")
+
+    if rejected and not saved and not deleted:
+        return json_response(
+            {"error": "没有可写入的文件，路径或内容不合法", "rejected": rejected}, status=400
+        )
+
+    _logger.info("[save_knowledge] %s: 写入 %d / 删除 %d / 拒绝 %d", name, len(saved), len(deleted), len(rejected))
+    return json_response({"ok": True, "saved": saved, "deleted": deleted, "rejected": rejected})
 
 
 async def open_directory(request: Request):
@@ -925,13 +1086,7 @@ async def push_to_git(request: Request):
         )
     # 是否强制覆盖远端（force push）。默认非强制：远端已有不同历史时普通推送会被
     # git 拒绝（rejected / non-fast-forward），需要用户在前端显式勾选强制覆盖。
-    # body 里可能是 JSON bool，也可能是字符串（"true"/"false"），统一归一化。
-    raw_force = data.get("force", False)
-    if isinstance(raw_force, bool):
-        force = raw_force
-    else:
-        force = str(raw_force or "").strip().lower() in ("1", "true", "yes", "on")
-    push_flags = ["--force"] if force else []
+    push_flags = ["--force"] if _truthy(data.get("force", False)) else []
 
     if not remote_url:
         return json_response({"error": "remote_url 必填"}, status=400)
@@ -1055,77 +1210,73 @@ async def push_to_git(request: Request):
 
 
 async def read_knowledge(request: Request):
-    """读取语义库的业务知识文件，返回结构化数据供前端表单编辑。"""
+    """读取语义库业务知识：按 wren 规范遍历 knowledge/ 下 5 个子目录，逐文件返回。
+
+    每个条目 = 一个 `.md` 文件（这是 wren 唯一会消费的形态）：
+      glossary/metrics/rules/caveats → {name, file, content}（自由 Markdown 正文）
+      sql_patterns                   → {name, file, nl, sql, [datasource, tags, body, ...]}
+    """
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
 
-    import yaml as _yaml
+    from wren.memory.markdown import parse_query_markdown
 
-    result = {
-        "glossary": [],
-        "metrics": [],
-        "rules": [],
-        "sql_patterns": [],
-        "caveats": [],
-    }
+    result: dict[str, list[dict]] = {cat: [] for cat in _KNOWLEDGE_CATEGORIES}
 
-    # glossary.yml
-    gf = project / "knowledge" / "glossary.yml"
-    if gf.is_file():
-        try:
-            data = _yaml.safe_load(gf.read_text(encoding="utf-8")) or {}
-            result["glossary"] = data.get("terms", []) or []
-        except Exception as e:
-            _logger.debug("[read_knowledge] glossary.yml 解析失败: %s", e)
-
-    # metrics.yml
-    mf = project / "knowledge" / "metrics.yml"
-    if mf.is_file():
-        try:
-            data = _yaml.safe_load(mf.read_text(encoding="utf-8")) or {}
-            result["metrics"] = data.get("metrics", []) or []
-        except Exception as e:
-            _logger.debug("[read_knowledge] metrics.yml 解析失败: %s", e)
-
-    # rules/*.md
-    rules_dir = project / "knowledge" / "rules"
-    if rules_dir.is_dir():
-        for md_file in sorted(rules_dir.glob("*.md")):
+    for category in _MARKDOWN_CATEGORIES:
+        d = _library_dir(project, category)
+        if not d or not d.is_dir():
+            continue
+        for md_file in sorted(d.glob("*.md")):
+            if md_file.name.startswith("."):
+                continue
             try:
                 content = md_file.read_text(encoding="utf-8")
-                result["rules"].append({
-                    "name": md_file.stem,
-                    "category": "general",
-                    "description": content.strip(),
-                    "scope": "global",
-                    "file": f"knowledge/rules/{md_file.name}",
-                })
-            except Exception as e:
-                _logger.debug("[read_knowledge] rules/%s 解析失败: %s", md_file.name, e)
+            except (OSError, UnicodeDecodeError) as e:
+                _logger.warning("[read_knowledge] %s 读取失败: %s", md_file, e)
+                continue
+            result[category].append({
+                "name": md_file.stem,
+                "file": f"knowledge/{d.name}/{md_file.name}",
+                "content": content,
+            })
 
-    # sql/*.yml
-    sql_dir = project / "knowledge" / "sql"
-    if sql_dir.is_dir():
-        for yml_file in sorted(sql_dir.glob("*.yml")):
+    sql_dir = _library_dir(project, "sql_patterns")
+    if sql_dir and sql_dir.is_dir():
+        for md_file in sorted(sql_dir.glob("*.md")):
+            if md_file.name.startswith("."):
+                continue
             try:
-                data = _yaml.safe_load(yml_file.read_text(encoding="utf-8")) or {}
-                patterns = data.get("patterns", [])
-                for p in patterns:
-                    p["file"] = f"knowledge/sql/{yml_file.name}"
-                    result["sql_patterns"].append(p)
-            except Exception as e:
-                _logger.debug("[read_knowledge] sql/%s 解析失败: %s", yml_file.name, e)
-
-    # caveats.yml
-    cf = project / "knowledge" / "caveats.yml"
-    if cf.is_file():
-        try:
-            data = _yaml.safe_load(cf.read_text(encoding="utf-8")) or {}
-            result["caveats"] = data.get("caveats", []) or []
-        except Exception as e:
-            _logger.debug("[read_knowledge] caveats.yml 解析失败: %s", e)
+                fm = parse_query_markdown(md_file)
+            except (OSError, UnicodeDecodeError) as e:
+                _logger.warning("[read_knowledge] %s 解析失败: %s", md_file, e)
+                continue
+            nl, sql = fm.get("nl"), fm.get("sql")
+            if not nl or not sql:
+                # 与 load_query_pairs 同判据：缺 nl+sql 的 md 不是知识条目（wren 会跳过）
+                continue
+            item: dict = {
+                "name": md_file.stem,
+                "file": f"knowledge/sql/{md_file.name}",
+                "nl": str(nl),
+                "sql": str(sql),
+                "source": str(fm.get("source", "user")),
+                "body": str(fm.get("_body", "") or ""),
+            }
+            if fm.get("datasource"):
+                item["datasource"] = str(fm["datasource"])
+            if fm.get("tags"):
+                raw_tags = fm["tags"]
+                item["tags"] = (
+                    [str(t) for t in raw_tags]
+                    if isinstance(raw_tags, (list, tuple))
+                    else [str(raw_tags)]
+                )
+            if fm.get("created_at"):
+                item["created_at"] = str(fm["created_at"])
+            result["sql_patterns"].append(item)
 
     return json_response({"ok": True, "knowledge": result})
 
@@ -1279,11 +1430,19 @@ async def git_status(request: Request):
     ok_status, status_out = git_repo._run(["status", "--porcelain"], cwd=cwd)
     has_local_changes = bool(status_out.strip()) if ok_status else False
 
+    # 未提交改动的**具体文件**（与 pull_ref 护栏同判据）：前端「更新」对话框据此
+    # 列出是哪几个文件挡着。注意 has_local_changes（含未跟踪文件）比这个宽 ——
+    # 未跟踪文件不拦更新，别用前者决定是否放行（2026-09-15 生产：保存知识只写盘
+    # 不提交 → 工作树常年脏，用户只看到一句看不懂的拒绝）。
+    changes = git_repo.local_changes(cwd)
+
     return json_response({
         "ok": True,
         "is_git": True,
         "has_updates": has_updates,
         "has_local_changes": has_local_changes,
+        "local_changes": changes["blocking"],
+        "generated_changes": changes["generated"],
         "branch": branch,
         "commit": info.get("commit", ""),
         "remote_branch": remote_branch,
@@ -1324,6 +1483,12 @@ async def git_pull(request: Request):
     ref 来源：query `?ref=<分支或tag>` 优先，其次 JSON body `{"ref": "..."}`。
     传分支 → 重置本地同名分支到远程（并修复被 tag 锁死的 refspec）；传 tag →
     detached 检出该 tag。核心逻辑在 git_repo.pull_ref（含本地改动/未推送提交护栏）。
+
+    `discard_local`（query `?discard_local=1` 或 body `{"discard_local": true}`）：
+    用户在前端显式确认「放弃本地改动」时传 true —— 后端先 `git stash` 备份本地改动
+    再更新，返回 `stash_ref`（可找回），而不是静默覆盖。缺省 false = 保持原有的
+    拒绝行为。生产背景：平台「保存知识」只写盘不提交（wren_semantic.save_knowledge），
+    所以工作树常常是脏的，只给一句拒绝提示会让更新按钮变成死路。
     """
     name = request.path_params["name"]
     project = _find_project(name)
@@ -1334,17 +1499,19 @@ async def git_pull(request: Request):
         return json_response({"error": "该语义库不是 Git 仓库"}, status=400)
 
     ref = (request.query_params.get("ref") or "").strip()
-    if not ref:
+    discard_local = _truthy(request.query_params.get("discard_local"))
+    if not ref or not discard_local:
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001  无 body / 非 JSON
             body = None
         if isinstance(body, dict):
-            ref = str(body.get("ref") or "").strip()
+            ref = ref or str(body.get("ref") or "").strip()
+            discard_local = discard_local or _truthy(body.get("discard_local"))
 
     from agent.utils import git_repo
 
-    result = git_repo.pull_ref(str(project), ref)
+    result = git_repo.pull_ref(str(project), ref, discard_local=discard_local)
     if not result.get("ok"):
         return json_response({"error": result.get("message", "更新失败")}, status=400)
     if result.get("changed"):

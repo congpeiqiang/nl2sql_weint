@@ -1,9 +1,13 @@
 """报告文件访问 API —— build_report 生成的报告预览 / 下载。
 
-GET /api/reports/{filename}?download=1
+GET  /api/reports/{filename}            → 文件内容（text/markdown），前端预览用
+GET  /api/reports/{filename}?download=1 → attachment（Content-Disposition），下载
+HEAD /api/reports/{filename}            → 只回状态码（200/404），存在性探测用
 
-- 无 download：返回文件内容（text/markdown），前端预览用
-- download=1：返回 attachment（Content-Disposition），浏览器原生下载
+HEAD 的用途：前端渲染「报告/图表附件」按钮前先探一次，模型手写出错的文件名
+（2026-09-14 实例：真名 `…_20260914_165606.html`，模型写了 `…_165623`）就不会
+变成一个点了才 404 的按钮。**只有 404 才算「不存在」**——前端对 405/网络错误
+一概按「可能存在」处理（fail-open），因此新前端配旧后端不会把真附件藏起来。
 
 安全：filename 只允许基本文件名（不含路径分隔符），并做路径穿越防护，
 只能读取当前活跃工作区 report/ 目录内的文件——不接受绝对路径、`..` 等。
@@ -55,6 +59,16 @@ async def get_report_file(request: Request):
     if path is None:
         return Response("报告不存在或非法文件名", status_code=404, media_type="text/plain")
 
+    if request.method == "HEAD":
+        # 存在性探测：只回状态码 + 真实字节数，不回正文（前端据此决定是否渲染
+        # 附件按钮；GET 行为完全不变）
+        try:
+            size = path.stat().st_size
+        except OSError as e:
+            _logger.warning("[report_file] HEAD 取大小失败 %s: %s", path, e)
+            return Response(status_code=404, media_type="text/plain")
+        return Response(status_code=200, headers={"Content-Length": str(size)})
+
     download = (request.query_params.get("download") or "").lower() in ("1", "true", "yes")
     try:
         body = path.read_bytes()
@@ -86,5 +100,5 @@ def _quote_filename(name: str) -> str:
 
 
 routes: list[BaseRoute] = [
-    Route("/api/reports/{filename}", get_report_file, methods=["GET"]),
+    Route("/api/reports/{filename}", get_report_file, methods=["GET", "HEAD"]),
 ]

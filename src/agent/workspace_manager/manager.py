@@ -79,6 +79,11 @@ _SHARED_RESOURCES_DIR = Path(
     or (Path(_DATA_ROOT) / "shared" if _DATA_ROOT else _REPO_AGENT_DIR / "shared")
 )
 
+# 离线实验产物根目录名（<data_root>/offline_experiment/，见 offline_experiment_dir）。
+# 单一来源：skills_versioning / prompt_versioning 的物化落点与 VFS 路径都从这里取名，
+# 避免字面量在四处漂移。2026-09-12 由 data_root 根下平铺迁入（旧目录不自动迁移）。
+OFFLINE_EXPERIMENT_DIR_NAME = "offline_experiment"
+
 
 class WorkspaceManager:
     """统一工作区路径解析器。
@@ -303,6 +308,21 @@ class WorkspaceManager:
     #                 nl2sql_process_data/, large_tool_results/
     #   全局共享：    memory/, skills/, model_config.json, checkpoint/,
     #                 trace/, feedback/, fts.sqlite
+
+    @property
+    def offline_experiment_dir(self) -> Path:
+        """离线实验产物根目录（`<data_root>/offline_experiment`）。
+
+        收纳离线 A/B 实验的**版本物化缓存**：`skill_refs/`（SKILLS_REF → git archive /
+        远程浅克隆）与 `prompt_refs/`（prompt label → 版本号 + 正文快照）。放 data_root
+        下、而非 `shared/` 内：落 `FILE_PERMISSIONS` 的 `deny /**` 与
+        `execute_guard` 的 allow 之外，在线 agent 的 read_file/ls/glob/grep 与
+        execute 都摸不到（与 `eval_runs/` 同一封堵思路）。
+
+        注意：实验的 run 产物（manifest/status/out/arms.json）**不在这里**，仍在
+        `<active_workspace>/eval/experiment_runs/`——它按工作区隔离。
+        """
+        return self.data_root / OFFLINE_EXPERIMENT_DIR_NAME
 
     @property
     def shared_data_root(self) -> Path:
