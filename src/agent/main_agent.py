@@ -7,6 +7,7 @@ import agent.subagents.check_progress  # noqa: F401
 # 自动同步子智能体 todos 到主智能体 state（零前端改动方案）
 import agent.subagents.sync_launcher  # noqa: F401
 # 透传父 run 的 configurable 到异步子 agent run（前端选库 db_name 才能到达子 agent）
+import agent.middlewares.deepagents_async_config_patch
 # 修复 Windows/Py3.13 下 _resolve_path 的 `\\?\` 前缀误报越界（必须早于实例化导入）
 import agent.utils.filesystem_backend_patch  # noqa: F401
 
