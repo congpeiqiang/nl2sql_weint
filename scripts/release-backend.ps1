@@ -75,7 +75,16 @@ for ($i = 0; $i -lt $nPart; $i++) {
 Write-Host "   全部 $nPart 片已上传（共 $tarMB MB）" -ForegroundColor Green
 
 Write-Host "== 3/5 服务器拼接 + 解压 + 重建镜像 ==" -ForegroundColor Cyan
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && tar -xzf backend_release.tar.gz -C backend && rm -f backend_release.tar.gz && docker-compose build langgraph-api 2>&1 | tail -3"
+# 解压前先清掉服务器上的旧代码目录：tar 解压**不会删除**「仓库里已删/已改名」的文件，
+# 于是被删的代码会一直躺在 backend/ 里被烤进镜像。2026-09-20 事故正是被这点放大：
+# 一个 09-02 的老副本 + 09-18 丢 import 的 main_agent.py 共存，制造出「补丁文件在、
+# import 不在」的假象，白排查一轮（也说明只清 src/ 就够——prompt 在 src/agent/prompt 下）。
+# 两点边界：
+#   - scripts/ 不动：服务器上可能有仓库里没有的运维脚本（如 cron 调用的），删了不会随包回来。
+#   - src/agent/workspace 是 **AGENT_DATA_ROOT 未配置时**的运行时数据回退目录（默认工作区 +
+#     db_config.json + feedback SQLite），tar 本来就排除它，故先移出、解压后放回：无论生产
+#     是否配了 AGENT_DATA_ROOT 都不会丢数据。
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api 2>&1 | tail -3"
 if ($LASTEXITCODE -ne 0) { throw "构建失败" }
 
 Write-Host "== 4/5 三步重启（v1 compose 需 stop/rm/up）==" -ForegroundColor Cyan
