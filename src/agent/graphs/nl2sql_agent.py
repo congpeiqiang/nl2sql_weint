@@ -20,6 +20,7 @@ from agent.middlewares.model_timeout import ModelTimeoutMiddleware
 from agent.middlewares.sql_approval import build_sql_approval_middleware
 from agent.middlewares.query_gate import QueryGateMiddleware
 from agent.middlewares.tool_filter import ToolFilterMiddleware
+from agent.middlewares.dynamic_mcp_tools import DynamicMCPToolsMiddleware
 from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
 from agent.middlewares.message_slimmer import MessageSlimmerMiddleware
 from agent.middlewares.query_result_offload import QueryResultOffloadMiddleware
@@ -70,6 +71,13 @@ for pattern in tool_names:
     for tn, t in tool_index.items():
         if pattern in tn and t not in resolved_tools:
             resolved_tools.append(t)
+
+# 运行期新增库的工具走的是另一条通道（DynamicMCPToolsMiddleware 从注册表并入），
+# 拿不到上面这份 resolved_tools —— 把同一份 YAML 白名单注册给注册表，否则新库
+# 工具会**绕过** nl2sql.yaml 的 tools: 过滤直接暴露给模型。
+from agent.tools.mcp_tool import set_sub_tool_filter  # noqa: E402
+
+set_sub_tool_filter(lambda tn: any(p in tn for p in tool_names))
 
 # 技能（SKILLS_REF 实验注入时换版本，默认磁盘不变）
 skills = effective_skills_sources(
@@ -210,6 +218,10 @@ def dynamic_prompt(request: ModelRequest) -> str:
 # 内层后追加的 system 文本落在最终 system prompt 末尾，才能压过
 # TodoListMiddleware 默认的"简单任务可跳过 write_todos"指引（见 write_todos.py 模块 docstring）。
 _middleware = [
+    # 运行期工具注册表接线（新增/删除库免重启）：并入新库工具、摘除已下线工具、
+    # 执行时改道到注册表里的当前实例。必须在最外层——先并入，再交给内层
+    # ToolFilterMiddleware 按当前库裁剪（挂反了新库工具会绕过按库过滤）。
+    DynamicMCPToolsMiddleware(),
     TraceRecorderMiddleware(
         db_path=str(_wm.shared_trace_db),
         agent_type="nl2sql_agent",

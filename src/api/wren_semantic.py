@@ -7,10 +7,13 @@
 「语义库」本身没有独立实体，本质是磁盘上的 Wren 项目目录，靠 `db_config.json`
 里某条库的 `wren_project` 路径字段与数据库配置关联。
 
-关键约束（重启门槛）：新增/删除语义库后，Wren MCP 工具（`wrenai_*`）要**重启
-后端进程**才生效——`_sub_tools` 是进程启动时构建的单例。`SemanticDbDetector`
-缓存可 `invalidate()` 即时刷新（前端 semantic 标记），但 server 本身必须重启。
-所有写接口在响应里返回 `requires_restart: true` 提示前端。
+热加载（2026-09-19，**重启门槛已消除**）：新增/删除/重新关联语义库后，Wren MCP
+工具（`wrenai_*`）**无需重启后端**即可生效——`_invalidate_detector()` 同时失效
+`SemanticDbDetector` 缓存并触发 `mcp_tool` 运行期工具注册表的后台对账；关联某个
+库的接口再补一次同步加载，把「加载了几个工具 / 失败原因」当场返回。语义库**内容**
+更新（git pull + context build）一直不需要重启：每次工具调用新起的 MCP 子进程会
+重新读 `target/mdl.json`。响应里的 `requires_restart` 恒为 `false`（保留字段兼容
+老前端），详情见 `mcp` 字段。原理见 `agent/middlewares/dynamic_mcp_tools.py`。
 """
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
 from api._common import json_response, parse_body
-from api.db_config import _scan_wren_projects
+from api.db_config import _ensure_mcp_tools, _scan_wren_projects
 from mcp_server.db_mcp_server.db.core.db_config_store import get_store
 
 _logger = logging.getLogger(__name__)
@@ -412,12 +415,37 @@ def _build_with_profile(
 
 
 def _invalidate_detector() -> None:
+    """失效 detector 缓存，并触发运行期 MCP 工具注册表的后台对账（免重启）。
+
+    语义库的新增/删除/改名/重新关联都走这里。对账按 **server 指纹**决定是否重新
+    加载，所以**内容更新（git pull + context build）不会触发重载**（没必要：每次
+    工具调用新起的子进程都重读 `target/mdl.json`）。对账在守护线程里跑：加载完成
+    才换上新条目，因此调用方**没有**「工具短暂消失」的空窗。
+    """
     try:
         from agent.utils.semantic_db import get_detector
 
         get_detector().invalidate()
     except Exception as e:  # noqa: BLE001
         _logger.warning("[wren_semantic] detector invalidate 失败: %s", e)
+    try:
+        from agent.tools.mcp_tool import reload_sub_entries_in_background
+
+        reload_sub_entries_in_background()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[wren_semantic] MCP 工具注册表对账触发失败: %s", e)
+
+
+async def _sync_mcp_tools_many(db_names) -> dict:
+    """批量把若干库的语义工具同步装进运行期注册表 → ``{库名: 结果}``。
+
+    顺序执行（每个库都要起一次 MCP 子进程，并发起反而抢资源）；单个库失败不影响
+    其余，结果里如实带回 ``status`` / ``error``。
+    """
+    out: dict = {}
+    for db in db_names:
+        out[db] = await _ensure_mcp_tools(db)
+    return out
 
 
 def _fallback_generate(tables, foreign_keys, scope):
@@ -476,8 +504,15 @@ async def associate_local(request: Request):
     if not get_store().set_wren_project(target_db, str(p.resolve())):
         return json_response({"error": f"数据库 '{target_db}' 不存在"}, status=404)
     _invalidate_detector()
+    # 同步把该库的 wrenai 工具装进运行期注册表：响应里就能看到工具数与失败原因
+    mcp = await _ensure_mcp_tools(target_db)
     return json_response(
-        {"ok": True, "project": _project_detail(str(p.resolve())), "requires_restart": True}
+        {
+            "ok": True,
+            "project": _project_detail(str(p.resolve())),
+            "requires_restart": False,
+            "mcp": mcp,
+        }
     )
 
 
@@ -537,16 +572,19 @@ async def from_git(request: Request):
         _logger.warning("[wren_semantic] %s 构建未完成: %s", project_root, build_note)
 
     # 关联
+    mcp = None
     if target_db:
         get_store().set_wren_project(target_db, str(project_root.resolve()))
         _invalidate_detector()
+        mcp = await _ensure_mcp_tools(target_db)  # 工具随即可用，无需重启
 
     return json_response(
         {
             "ok": True,
             "project": _project_detail(str(project_root.resolve())),
             "build_note": build_note,
-            "requires_restart": True,
+            "requires_restart": False,
+            "mcp": mcp,
         }
     )
 
@@ -565,9 +603,19 @@ async def delete_project(request: Request):
         return json_response({"error": "项目名与请求 name 不一致，拒绝删除"}, status=400)
 
     # 解绑
-    for db in _associated_dbs(project):
+    unbound = list(_associated_dbs(project))
+    for db in unbound:
         get_store().set_wren_project(db, "")
     _invalidate_detector()
+    # 这些库的语义工具立即下线（免重启）：模型清单里不再出现，存量调用由
+    # DynamicMCPToolsMiddleware 挡掉，不会执行指向已删目录的陈旧实例
+    try:
+        from agent.tools.mcp_tool import invalidate_sub_entries
+
+        for db in unbound:
+            invalidate_sub_entries(db)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[wren_semantic] MCP 工具下线失败: %s", e)
     # 删除目录（Windows 上 git 文件可能只读，需要 onexc 处理）
     def _on_rm_error(func, path, exc_info):
         import stat
@@ -602,7 +650,12 @@ async def build_project(request: Request):
         # memory index 失败不影响 build 结果（知识库索引可选）
         idx_ok, idx_out = _run_wren(project, "memory", "index", timeout=600)
         tail = ("；memory index 完成" if idx_ok else f"；memory index 失败: {idx_out}")
-        return json_response({"ok": True, "message": "context build 完成" + tail})
+        # 关联库的工具重装一遍（免重启）：语义库**内容**更新本就不需要重载，但若该库
+        # 此前加载失败（如建库时还没有 MDL），条目会卡在失败态，build 是重试的时机
+        mcp = await _sync_mcp_tools_many(_associated_dbs(project))
+        return json_response(
+            {"ok": True, "message": "context build 完成" + tail, "mcp": mcp}
+        )
     return json_response({"ok": False, "message": f"context build 失败: {out}"}, status=400)
 
 
@@ -698,11 +751,15 @@ async def create_project(request: Request):
     # 关联数据库 → 语义库
     get_store().set_wren_project(db_name, str(dest.resolve()))
     _invalidate_detector()
+    # 这里**不做**同步加载：目录刚建、models/ 还是空的，此时加载工具既无意义（还没
+    # 人会查）又可能耗掉重试超时。工具在 introspect → build 之后由 build_project
+    # 的同步加载（或后台对账）装进注册表。
 
     return json_response({
         "ok": True,
         "project": _project_detail(str(dest.resolve())),
         "path": str(dest.resolve()),
+        "requires_restart": False,
     })
 
 

@@ -5,16 +5,24 @@
 
 路由：
     GET    /api/db-configs              列表（密码脱敏 + semantic 标记）
-    POST   /api/db-configs              新增/更新
+    POST   /api/db-configs              新增/更新（含该库 MCP 工具热加载）
     GET    /api/db-configs/{name}       单条（脱敏）
-    DELETE /api/db-configs/{name}       删除
+    DELETE /api/db-configs/{name}       删除（含该库 MCP 工具即时下线）
     POST   /api/db-configs/{name}/test  连通性测试
+    GET    /api/mcp/status              运行期 MCP 工具注册表状态
+    POST   /api/mcp/reload              全量对账 MCP 工具注册表（免重启）
     GET    /healthz                     存活检查
 
 （GET /api/wren-projects 已迁至 wren_semantic.py，返回语义库丰富元信息）
+
+热加载（2026-09-19）：新增/删除库不再需要重启后端。写路径失效 detector 缓存后，
+把该库的 wrenai server **同步**加载进 `mcp_tool` 的运行期注册表（`ensure_sub_loaded`），
+工具立刻对该进程内所有会话可见；删除则立即摘掉。原理与边界见
+`agent/middlewares/dynamic_mcp_tools.py` 模块 docstring。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from starlette.requests import Request
@@ -160,7 +168,10 @@ async def upsert_config(request: Request):
         get_detector().invalidate()
     except Exception:  # noqa: BLE001
         pass
-    return json_response({"ok": True, "name": name})
+    # 该库的 wrenai 工具立即进运行期注册表（免重启）。同步等待是刻意的：响应体
+    # 里带回"加载了几个工具 / 失败原因"，让"配好了但工具没起来"当场可见。
+    mcp = await _ensure_mcp_tools(name)
+    return json_response({"ok": True, "name": name, "mcp": mcp})
 
 
 async def delete_config(request: Request):
@@ -173,7 +184,60 @@ async def delete_config(request: Request):
         get_detector().invalidate()
     except Exception:  # noqa: BLE001
         pass
-    return json_response({"ok": True, "name": name})
+    # 工具立即下线（免重启）：模型清单里不再出现；历史消息里的存量调用由
+    # DynamicMCPToolsMiddleware 返回错误 ToolMessage，不会执行陈旧实例
+    removed: list = []
+    try:
+        from agent.tools.mcp_tool import invalidate_sub_entries
+        removed = invalidate_sub_entries(name)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[db_config] %s: MCP 工具下线失败: %s", name, e)
+    return json_response({
+        "ok": True, "name": name,
+        "mcp": {"removed_servers": removed},
+    })
+
+
+# ── MCP 工具注册表（运行期，免重启增删库）──────────────────
+async def _ensure_mcp_tools(name: str, force: bool = True) -> dict:
+    """把某库的语义工具同步进运行期注册表；失败只上报、不抛（保存本身已成功）。"""
+    try:
+        from agent.tools.mcp_tool import ensure_sub_loaded
+
+        # 必须放线程：内部起 MCP 子进程是阻塞调用（且要用自己的事件循环），
+        # 直接 await 会把 API 服务的事件循环卡住秒级
+        return await asyncio.to_thread(ensure_sub_loaded, name, force)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[db_config] %s: MCP 工具热加载失败: %s", name, e)
+        return {"db_name": name, "status": "error", "error": str(e)}
+
+
+async def mcp_status(request: Request):
+    """运行期 MCP 工具注册表状态（排查"某库工具没起来"的直接抓手）。"""
+    from agent.tools.mcp_tool import get_mcp_status
+
+    return json_response(get_mcp_status())
+
+
+async def reload_mcp(request: Request):
+    """全量对账运行期工具注册表：新增/删除库或语义库后免重启生效的手动开关。
+
+    与写路径自动加载同一套逻辑（`refresh_sub_entries`）；响应体即对账结果
+    （added/changed/removed/loaded/counts），可直接判断哪个 server 没起来。
+    """
+    try:
+        from agent.utils.semantic_db import get_detector
+        get_detector().invalidate()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from agent.tools.mcp_tool import refresh_sub_entries
+
+        result = await asyncio.to_thread(refresh_sub_entries)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[db_config] MCP 工具对账失败: %s", e)
+        return json_response({"ok": False, "error": str(e)}, status=500)
+    return json_response({"ok": True, **result})
 
 
 async def test_config(request: Request):
@@ -206,5 +270,7 @@ routes: list[BaseRoute] = [
     Route("/api/db-configs/{name}", get_config, methods=["GET"]),
     Route("/api/db-configs/{name}", delete_config, methods=["DELETE"]),
     Route("/api/db-configs/{name}/test", test_config, methods=["POST"]),
+    Route("/api/mcp/status", mcp_status, methods=["GET"]),
+    Route("/api/mcp/reload", reload_mcp, methods=["POST"]),
     Route("/healthz", healthz, methods=["GET"]),
 ]
