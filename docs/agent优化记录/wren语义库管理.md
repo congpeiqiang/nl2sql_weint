@@ -79,7 +79,7 @@ POST /api/wren-projects/from-git
 3. **凭据处理**：默认**不信任**仓库内的 `config/connection_*.json`。若 `target_db` 给定，用该 `DBConfig` 的已解密连接信息**重写生成** connection 文件（复用 `McpSqlConfig.from_env` 的字段映射）；若仓库自带凭据且用户显式允许（`overwrite_connection=false`）则保留。
 4. **构建 MDL**：检测 `target/mdl.json` 是否在仓库内；缺则本地执行 `wren context build`（可选 `wren memory index`）。
 5. **关联**：upsert `target_db` 的 `wren_project` 指向新目录；`SemanticDbDetector.invalidate()`。
-6. **提示重启**：返回 `requires_restart: true`，前端提示「新增语义库后需重启后端，MCP 工具 `wrenai_*` 才生效」。
+6. **即时生效**（2026-09-19 起）：返回 `requires_restart: false` + `mcp: {status, tools_loaded, error?}`；关联库的 `wrenai_*` 工具由写接口**同步装进运行期注册表**，无需再重启后端（原「需重启」口径已废）。
 
 ### 3.3 删除本地语义库
 
@@ -90,7 +90,7 @@ DELETE /api/wren-projects/{name}
 - 找到项目目录；先解绑所有指向它的 `DBConfig.wren_project`（置空），再删除目录。
 - `dangerouslyDeleteFiles` 需显式二次确认（删除不可逆）。
 - 删除前 `wren_project.yml` 的 `name` 与请求 name 一致才执行（防误删）。
-- 同样返回 `requires_restart: true`。
+- 同样即时生效：解绑后该库的 `wrenai_*` 工具立刻从注册表摘除（`invalidate_sub_entries`），模型不再可见，存量调用被拒。
 
 ### 3.4 其他管理功能建议（一并纳入设计，分优先级）
 

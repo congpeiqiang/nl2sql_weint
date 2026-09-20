@@ -36,6 +36,10 @@
 
 ### 2.2 两层固化（重启的根因）
 
+> **本节是历史病理**：2026-09-19 已按 §十 消除（注册表 + 动态工具通道）。下面描述的是
+> 改动前的状态，读的时候别当成现状。
+
+
 **第一层：`_sub_tools` 进程级单例**（[mcp_tool.py:217-230](src/agent/tools/mcp_tool.py#L217-L230)）
 
 ```python
@@ -210,11 +214,12 @@ agent = create_deep_agent(tools=resolved_tools, ...)  # 工具进图
 
 | 文件 | 说明 |
 |------|------|
-| [mcp_tool.py](src/agent/tools/mcp_tool.py) | `_get_sub_server_config()` 每库启动 server；`_sub_tools` 单例 |
+| [mcp_tool.py](src/agent/tools/mcp_tool.py) | `_get_sub_server_config()` 每库一个 server 配置；**运行期工具注册表 `_sub_entries`**（§3.1，免重启增删库） |
+| [middlewares/dynamic_mcp_tools.py](src/agent/middlewares/dynamic_mcp_tools.py) | 把注册表接进模型清单与执行链（2026-09-19，免重启），见该文件 docstring |
 | [graphs/nl2sql_agent.py](src/agent/graphs/nl2sql_agent.py) | 工具按 YAML pattern 烘焙进 agent 图；`dynamic_prompt` 注入路由 |
 | [semantic_db.py](src/agent/utils/semantic_db.py) | `SemanticDbDetector` / `wrenai_server_name()` 库名→前缀 |
 | [path_resolver.py](src/agent/utils/path_resolver.py) | `_inject_db_name()` dbmcp 工具 db_name 注入（可复用于路线 B） |
-| [wren_semantic.py](src/api/wren_semantic.py) | 语义库管理 API，写操作返回 `requires_restart: true` |
+| [wren_semantic.py](src/api/wren_semantic.py) | 语义库管理 API，写操作返回 `requires_restart: false` + `mcp` 实时结果（2026-09-19 起免重启） |
 | [db_config.json](src/agent/workspace/db_config.json) | 库配置（默认工作区），`wren_project` 字段关联语义库 |
 | [多工作区隔离方案](多工作区隔离方案.md) | 2026-08-20 已实施，工作区隔离 + 重启策略 |
 
@@ -252,4 +257,80 @@ agent = create_deep_agent(tools=resolved_tools, ...)  # 工具进图
 
 - 当前工具命名仍遵循 `wrenai_<库名>_<工具名>`（`wrenai_server_name()` 统一推导，本次未发现命名变更）。
 - 路线 A 不改变 server 生命周期；新增/删除语义库仍需重启后端（与多工作区切换重启策略一致）。
+  → **2026-09-19 已消除**，见 §十。
 - 后续根治目标仍是路线 B：单 server + 运行时 project 路由（免重启 + 消除库名前缀）。
+  → 重启问题已由 §十 解决，路线 B 只剩"消除库名前缀"这一项收益，优先级下调。
+
+---
+
+## 十、重启门槛消除实施记录（2026-09-19）
+
+### 10.1 问题的真实结构
+
+§2.2 记的"两层固化"只对了一半——**发现层本来就是热的**：
+
+| 层 | 变化前 | 结论 |
+|---|---|---|
+| 发现层 `SemanticDbDetector` | `invalidate()` 已由 db_config / 语义库 API 调用 | 早已热 |
+| **语义库内容** | 每次工具调用新起 MCP 子进程读 `target/mdl.json` | 从来不需要重启 |
+| **工具清单** `load_sub_tools()` | 进程启动时一次性构建，`_sub_tools` 单例 | ← 真正的门槛 |
+| **图内 `ToolNode.tools_by_name`** | `create_deep_agent` 编译时固化 | ← 真正的门槛 |
+
+所以只有最后一层要动。官方早已给出动态工具通道（`langchain` `agents/factory.py` 的
+`DYNAMIC_TOOL_ERROR_TEMPLATE`）：`wrap_model_call` 里 `request.override(tools=...)`
+（模型能看见什么）+ `wrap_tool_call` 里 `request.override(tool=...)`（这个名字实际执行
+哪个实例）。`ToolNode._run_one` 对未注册工具**延迟校验**、`_execute_tool_sync` 用
+`request.tool` 执行 —— 而本仓已有 8 个 `wrap_tool_call` 中间件，factory 的未知工具校验
+早已关闭（`if not has_wrap_tool_call`），通道是通的。
+
+### 10.2 改动
+
+| 文件 | 改动 |
+|---|---|
+| `mcp_tool.py` | 新增**运行期工具注册表** `_sub_entries`（`{server: _SubEntry(config, fingerprint, db_name, tools, status, loaded_at)}` + `RLock` + 无锁快照/名字索引）。`_get_sub_server_config` 拆出 `_build_sub_entry(db)`；`load_sub_tools()` 改为 `refresh_sub_entries()`；新增 `ensure_sub_loaded` / `refresh_sub_entries` / `invalidate_sub_entries` / `reload_sub_entries_in_background` / `set_sub_tool_filter` / `sub_tools_snapshot` / `lookup_sub_tool` / `sub_registry_warmed` |
+| `middlewares/dynamic_mcp_tools.py`（新） | 并入新增工具、摘除已下线工具、执行时改道到当前实例、对已下线工具的调用返回 `status=error` 的 ToolMessage（**不执行陈旧实例**） |
+| `graphs/nl2sql_agent.py` | 注册 YAML `tools:` 过滤器给注册表（否则新库工具绕过白名单）；中间件挂在 `_middleware` **最外层**（先并入，再交给内层 `ToolFilterMiddleware` 按库裁剪） |
+| `api/db_config.py` | upsert → `invalidate` detector + **同步** `ensure_sub_loaded(db)`，响应带 `mcp: {status, tools_loaded, error?}`；delete → `invalidate_sub_entries(db)`，响应带 `mcp.removed_servers`；新增 `GET /api/mcp/status`、`POST /api/mcp/reload` |
+| `api/wren_semantic.py` | `_invalidate_detector()` 额外触发后台对账；`associate_local`/`from_git` 同步加载目标库；`delete_project` 即时摘除；`build_project` 成功后重装（此前加载失败可自愈）；`requires_restart` 恒 `false` |
+
+### 10.3 三个关键判据
+
+1. **指纹决定重载**：`server 名 | 语义库路径 | wren 可执行路径`。**连接信息不进指纹**——
+   它写进 Wren profile 文件，每次工具调用新起的子进程会重读，改密码/换 host 本来就即时生效，
+   重载工具是白起进程。同理语义库**内容**更新不触发重载。
+2. **加载完成才换条目**：`_load_entry()` 先在局部对象上加载成功，再进注册表 + 重建快照 →
+   调用方**没有**"工具短暂消失"的空窗（对账/重指向都是原地替换）。
+3. **fail-open 与 fail-closed 的分界**：注册表**未预热**时执行侧只并入、不摘除、不拒绝
+   （不许因"注册表里没有"误杀健康工具）；预热后按注册表**权威判定**——没有就是下线了，
+   拒绝执行并给指引。启动加载失败仍由预检 `evaluate_mcp_preflight` 响亮拦住（不变）。
+
+### 10.4 已知边界
+
+- 注册表的写锁是**粗锁**（加载期间持锁，最坏 ~123s：2 次 60s 超时 + 3s 间隔）。读方
+  （每次模型调用/工具调用）走无锁快照，用户查询不受影响；受影响的只是并发的另一个管理员操作。
+- `dbmcp` 是静态 server，全局 `invalidate_sub_entries()` 不摘它、对账也不重起它。
+- 删除库时**不**自动清理 `db_config.json` 之外的引用（报告、反馈、会话里的库名照旧）。
+- 运行期新加的工具**也要过 YAML `tools:` 白名单**（`set_sub_tool_filter`），与启动那条路一致。
+
+### 10.5 验证
+
+**(a) 离线注册表逻辑**（`d:\tmp\test_mcp_hot_reload.py`，72/72 通过）：启动加载与快照、新增库当轮可见、
+幂等不重复加载、内容变更不重载、重指向才重载、全量对账增删、执行侧改道/拒绝（并断言 handler 未
+被调用）、未预热 fail-open、过滤器对新旧工具一致 + 过滤器异常 fail-open、后台对账单飞、写路径
+API 响应与调用参数、源码契约（挂载顺序/路由/过滤器注册）。
+
+**(b) 真图跑通动态工具通道**（`d:\tmp\test_dynamic_tool_channel.py`，13/13 通过）：上面这套断言
+全部建立在一个**从源码读出、本仓从未实测**的前提上——`ToolNode` 对未注册工具延迟校验，且在
+`wrap_tool_call` 里被 `request.override(tool=...)` 真正执行。本测试用**真** `create_agent` +
+真 `ToolNode` + 真 `bind_tools`（模型脚本化，MCP 加载换成内存 BaseTool，零网络零子进程）钉死四条：
+
+① 图里固化的是陈旧实例 → 执行时改道到注册表当前实例（工具返回值带版本标记，跑出 `:v1` 而非
+`STALE`）；② 图里**根本没有**该工具（新库场景，`tool=None`）→ 仍能执行注册表实例；③ 工具已下线
+→ 返回 `status=error` 的 ToolMessage 且**未执行**（无 `v1` 输出）；④ `bind_tools` 实际收到的清单
+= 静态工具 + 注册表合并结果，且同名工具去重、`dbmcp` 未被挤掉。
+
+
+**生产 E2E 待做**（需重启后端一次以装载新代码，之后不该再因增删库重启）：
+新增一个库 → 同一进程不重启，切到该库发起查询能用 `wrenai_<新库>_*`；删除该库 → 工具消失、
+旧会话里指向它的调用返回错误而非执行成功；`GET /api/mcp/status` 能看到每个 server 的状态与
+加载时间。
