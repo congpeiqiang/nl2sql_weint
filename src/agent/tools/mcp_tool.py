@@ -43,6 +43,7 @@ _all_tools: Optional[List] = None  # 所有工具（向后兼容）
 _tools_loaded = False
 _mcp_server_results: Dict[str, str] = {}  # server_name → "ok" | error message
 _mcp_server_tool_counts: Dict[str, int] = {}  # server_name → 成功加载的工具数（失败=0）
+_skipped_servers: set = set()  # 被有意跳过的 server（无配置 → 不加载，区别于「有配置但加载失败」）
 
 # 关键 server 前缀：语义层（wrenai_*）与 SQL 直连执行（dbmcp）——缺任何一个，
 # 建模库查询整体失效（2026-09-08 事故：wrenai_WIT 加载失败被总数"✅ 预检通过: 20"
@@ -209,6 +210,27 @@ class _SubEntry:
     tools: List = field(default_factory=list)
     status: str = "pending"  # "ok" 或失败原因
     loaded_at: float = 0.0
+
+
+def _has_any_database() -> bool:
+    """检查是否有任何数据库配置（db_config.json 或 .env DB_* 变量）。
+
+    零配置部署时 db_config_store 和 .env 都没有数据库 → 跳过 dbmcp（不启动
+    子进程），避免 ValueError 被当成 critical 失败阻断服务。
+    """
+    # 1. db_config_store（前端 UI 写入的运行时配置）
+    try:
+        from mcp_server.db_mcp_server.db.core.db_config_store import get_store
+        store = get_store()
+        if store.get_all_decrypted():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    # 2. .env 回退（历史配置方式）
+    try:
+        return bool(settings.get_databases())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _dbmcp_config() -> Dict[str, Any]:
@@ -447,15 +469,18 @@ def _prune_orphan_entries() -> List[str]:
 def refresh_sub_entries(load: bool = True) -> Dict[str, Any]:
     """全量对账：把注册表对齐到当前 db_config + 语义库（新增/改名/删除/重指向）。
 
-    只对 ``fingerprint`` 变了的 server 重新加载工具 —— 语义库**内容**更新
-    （git pull + 重新构建）不触发重载：每次工具调用新起的 MCP 子进程会重新读
-    ``target/mdl.json``，本来就即时生效。
+    重新加载只发生在两种情形：
+    - ``fingerprint`` 变了（server 名 / 语义库路径 / wren 可执行路径）；
+    - **上次加载失败**（``status != "ok"``）——必须重试，见下方注释。
+
+    语义库**内容**更新（git pull + 重新构建）自身不触发重载：每次工具调用新起的
+    MCP 子进程会重新读 ``target/mdl.json``，本来就即时生效。
 
     ``load=False`` 时只做增删对齐、不加载（供离线测试与"先摘掉再补上"场景）。
 
     Returns:
-        {"added": [...], "changed": [...], "removed": [...], "loaded": {name: status},
-         "counts": {name: 工具数}}
+        {"added": [...], "changed": [...], "retried": [...], "removed": [...],
+         "loaded": {name: status}, "counts": {name: 工具数}}
     """
     from agent.utils.semantic_db import get_detector
 
@@ -475,16 +500,21 @@ def refresh_sub_entries(load: bool = True) -> Dict[str, Any]:
                 continue
             expected[entry.server_name] = entry
 
+        _skipped_servers.discard("dbmcp")  # 每次对账重新判定
         if settings.NL2SQL_DBMCP_ENABLED:
-            dbmcp = _SubEntry(
-                server_name="dbmcp", config=_dbmcp_config(), fingerprint="dbmcp",
-            )
-            current = _sub_entries.get("dbmcp")
-            if current is not None:  # 静态 server：沿用已加载的工具，不重复起进程
-                dbmcp.tools = current.tools
-                dbmcp.status = current.status
-                dbmcp.loaded_at = current.loaded_at
-            expected["dbmcp"] = dbmcp
+            if _has_any_database():
+                dbmcp = _SubEntry(
+                    server_name="dbmcp", config=_dbmcp_config(), fingerprint="dbmcp",
+                )
+                current = _sub_entries.get("dbmcp")
+                if current is not None:  # 静态 server：沿用已加载的工具，不重复起进程
+                    dbmcp.tools = current.tools
+                    dbmcp.status = current.status
+                    dbmcp.loaded_at = current.loaded_at
+                expected["dbmcp"] = dbmcp
+            else:
+                _skipped_servers.add("dbmcp")
+                _logger.info("[mcp] 未配置任何数据库，跳过 dbmcp 加载")
 
         removed = [n for n in list(_sub_entries) if n not in expected]
         for n in removed:
@@ -492,6 +522,7 @@ def refresh_sub_entries(load: bool = True) -> Dict[str, Any]:
 
         added: List[str] = []
         changed: List[str] = []
+        retried: List[str] = []
         to_load: List[_SubEntry] = []
         for name, entry in expected.items():
             current = _sub_entries.get(name)
@@ -500,6 +531,17 @@ def refresh_sub_entries(load: bool = True) -> Dict[str, Any]:
                 to_load.append(entry)
             elif current.fingerprint != entry.fingerprint:
                 changed.append(name)
+                to_load.append(entry)
+            elif current.status != "ok":
+                # 上次加载失败的条目**必须重试**：指纹不含构建产物（也不含连接信息，
+                # 那是有意的），所以「先建空语义库（加载失败）→ 后构建」这条路径下
+                # 指纹一字不变，若照旧按指纹跳过就会永久停在 0 工具（2026-09-20
+                # 生产实测：新建 aliyun-chinook_semantic → 后台对账如期尝试 → 失败 →
+                # 此后每次对账都跳过它）。任何一次瞬时失败（wren 崩溃、启动超时）
+                # 同理会让该库一直死到人工 build / 保存库配置 / 重启，与「不许静默
+                # 降级」相悖。代价可控：本函数只在启动与写路径的后台对账（单飞线程）
+                # 里跑，不在请求路径上，且健康条目依旧不重载。
+                retried.append(name)
                 to_load.append(entry)
 
         loaded: Dict[str, str] = {}
@@ -514,6 +556,7 @@ def refresh_sub_entries(load: bool = True) -> Dict[str, Any]:
         return {
             "added": added,
             "changed": changed,
+            "retried": retried,
             "removed": removed,
             "loaded": loaded,
             "counts": {n: len(e.tools) for n, e in _sub_entries.items()},
@@ -611,9 +654,11 @@ def reload_sub_entries_in_background() -> bool:
 def _bg_refresh_sub_entries() -> None:
     try:
         result = refresh_sub_entries()
+        # !%s = 上次失败被重试的条目（排查「某库工具一直没起来」时看这一项）
         _logger.info(
-            "[mcp] 后台对账完成: +%s ~%s -%s counts=%s",
-            result["added"], result["changed"], result["removed"], result["counts"],
+            "[mcp] 后台对账完成: +%s ~%s !%s -%s counts=%s",
+            result["added"], result["changed"], result["retried"], result["removed"],
+            result["counts"],
         )
     except Exception as e:  # noqa: BLE001
         _logger.warning("[mcp] 后台对账失败: %s", e)
@@ -743,6 +788,7 @@ def evaluate_mcp_preflight() -> Dict[str, Any]:
         "failed": failed,
         "critical_failed": critical,
         "counts": dict(_mcp_server_tool_counts),
+        "skipped": sorted(_skipped_servers),  # 被有意跳过的 server（无配置）
         "allow_degraded": allow,
         "block_startup": bool(critical) and not allow,
     }

@@ -1,0 +1,68 @@
+{
+  "components": [
+    {
+      "type": "data_table",
+      "columns": [
+        {
+          "key": "type",
+          "label": "知识类型"
+        },
+        {
+          "key": "use",
+          "label": "作用"
+        },
+        {
+          "key": "sample",
+          "label": "示例"
+        }
+      ],
+      "rows": [
+        {
+          "cells": {
+            "type": "术语表 glossary",
+            "use": "业务术语 → 字段映射",
+            "sample": "「活跃用户」= login_date ≥ 30 天"
+          }
+        },
+        {
+          "cells": {
+            "type": "指标定义 metrics",
+            "use": "指标计算公式",
+            "sample": "销售额 = SUM(amount)"
+          }
+        },
+        {
+          "cells": {
+            "type": "业务规则 rules",
+            "use": "每次对话都会注入给 AI",
+            "sample": "默认查最近 30 天"
+          }
+        },
+        {
+          "cells": {
+            "type": "SQL 示例 sql",
+            "use": "问题 + 参考 SQL 的典型查询",
+            "sample": "「每月销量」+ SELECT …"
+          }
+        },
+        {
+          "cells": {
+            "type": "注意事项 caveats",
+            "use": "数据质量与边界情况提醒",
+            "sample": "退款单金额是负数"
+          }
+        }
+      ]
+    },
+    {
+      "type": "bullets",
+      "items": [
+        "一个文件 = 一条知识",
+        "「AI 补充」生成草稿后再保存",
+        "保存后即时生效",
+        "口径问题多源于知识缺失"
+      ]
+    }
+  ],
+  "notes": "强调这是「花小钱办大事」的一步：不填也能用，但业务口径类问题几乎都源于知识缺失。建议每个语义库至少先写规则与指标两类。"
+}

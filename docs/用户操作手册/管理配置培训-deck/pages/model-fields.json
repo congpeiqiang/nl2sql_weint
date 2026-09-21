@@ -1,0 +1,72 @@
+{
+  "components": [
+    {
+      "type": "data_table",
+      "columns": [
+        {
+          "key": "field",
+          "label": "字段"
+        },
+        {
+          "key": "desc",
+          "label": "说明"
+        },
+        {
+          "key": "note",
+          "label": "示例 / 备注"
+        }
+      ],
+      "rows": [
+        {
+          "cells": {
+            "field": "Provider ID（路由）",
+            "desc": "接入点唯一标识",
+            "note": "小写字母开头，可用小写字母、数字、短横线"
+          }
+        },
+        {
+          "cells": {
+            "field": "显示名称",
+            "desc": "界面展示用",
+            "note": "留空则使用 Provider ID"
+          }
+        },
+        {
+          "cells": {
+            "field": "Base URL",
+            "desc": "OpenAI-compatible 接入点",
+            "note": "如 https://.../v1；填写后才能获取模型列表"
+          }
+        },
+        {
+          "cells": {
+            "field": "API 协议",
+            "desc": "协议类型",
+            "note": "OpenAI 兼容（集成商可提供 Anthropic 探活兼容方案）"
+          }
+        },
+        {
+          "cells": {
+            "field": "API Key",
+            "desc": "鉴权密钥",
+            "note": "加密存储；编辑时留空 = 保留原密钥"
+          }
+        },
+        {
+          "cells": {
+            "field": "模型列表",
+            "desc": "该接入点下的模型",
+            "note": "点「获取可用模型」自动拉取，或「添加模型」手动填 ID"
+          }
+        }
+      ]
+    },
+    {
+      "type": "callout",
+      "variant": "warn",
+      "text": "校验规则：Provider ID 不能为空且格式受限；必须填 Base URL；至少配置一个模型，否则无法保存。"
+    }
+  ],
+  "footnote": "每个模型可单独设置：上下文窗口（如 256K）、最大输出 token（如 32K）、温度参数（默认 0）。",
+  "notes": "逐字段演示一遍即可，不要念表。重点强调两个易错点：Base URL 不填就拿不到模型列表；API Key 编辑时留空是「保留原密钥」而不是清空。"
+}

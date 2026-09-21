@@ -118,8 +118,8 @@ def preflight_check():
         sys.exit(1)
 
     if not tools:
-        print(f"\n🚫 就绪门控: MCP 工具列表为空，服务不启动。", flush=True)
-        sys.exit(1)
+        print(f"\n⚠️ MCP 工具列表为空（所有 server 加载失败或被跳过），服务仍启动但功能受限。", flush=True)
+        print("   请通过前端 UI 配置数据库/语义库/模型后，对应 MCP 工具将自动加载。\n", flush=True)
 
     # 报告各服务器状态（带工具数）
     for name, status in _mcp_server_results.items():
@@ -144,9 +144,15 @@ def preflight_check():
     #    10 分钟撞墙 + 僵尸续跑。关键 server（wrenai_*/dbmcp）缺失 = 拒绝启动；
     #    MCP_ALLOW_DEGRADED=1 可显式降级）──
     v = evaluate_mcp_preflight()
+    # 报告被跳过的 server（无配置 → 不加载，区别于加载失败）
+    for n in v.get("skipped", []):
+        if n == "dbmcp":
+            print("  ⏭ dbmcp: 未配置任何数据库，已跳过（通过 UI 添加后自动加载）", flush=True)
+
     if v["ok"]:
         breakdown = ", ".join(f"{n}={c}" for n, c in sorted(v["counts"].items())) or "-"
-        print(f"✅ 预检通过: {len(tools)} 个 MCP 工具就绪（{breakdown}）\n", flush=True)
+        skipped_note = f"，跳过 {', '.join(v['skipped'])}" if v["skipped"] else ""
+        print(f"✅ 预检通过: {len(tools)} 个 MCP 工具就绪（{breakdown}{skipped_note}）\n", flush=True)
         return
 
     print("\n" + "!" * 64, flush=True)

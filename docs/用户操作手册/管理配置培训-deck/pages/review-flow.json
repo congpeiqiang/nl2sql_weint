@@ -1,0 +1,25 @@
+{
+  "components": [
+    {
+      "type": "flowchart",
+      "direction": "LR",
+      "nodes": [
+        { "id": "pending", "label": "待判断", "kind": "round" },
+        { "id": "labeling", "label": "标注中", "kind": "diamond" },
+        { "id": "verified", "label": "已验证 Good Set", "kind": "rect" },
+        { "id": "rejected", "label": "已驳回 BadCase", "kind": "rect" }
+      ],
+      "edges": [
+        { "from": "pending", "to": "labeling", "label": "判定有效" },
+        { "from": "labeling", "to": "verified", "label": "补金标" },
+        { "from": "labeling", "to": "rejected", "label": "有效差评" }
+      ]
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "text": "点赞自动入集门槛宽松，优先复核这批；有效差评转为 BadCase 考题。撤回会删 Langfuse Dataset item，删除待评估记录不可恢复。"
+    }
+  ],
+  "notes": "讲清「为什么要点赞点踩」：用户的每次点击都会变成题。再讲三种操作的代价，避免现场有人随手删数据。"
+}

@@ -1,0 +1,866 @@
+{
+  "version": "5",
+  "filename": "管理配置培训-模型数据库语义库-v2.pptx",
+  "narrative": "training",
+  "theme": {
+    "id": "thesis"
+  },
+  "meta": {
+    "organization": "DataAgent 智能数据助手",
+    "date": "2026-09",
+    "version": "v2",
+    "confidentiality": "internal"
+  },
+  "assets": {
+    "images": {}
+  },
+  "slides": [
+    {
+      "type": "cover",
+      "id": "cover",
+      "heading": "管理配置培训：模型 → 数据库 → 语义库",
+      "subheading": "DataAgent 智能数据助手 · 内部培训资料 · 2026-09",
+      "components": [],
+      "notes": "开场 1 分钟：今天只讲一件事——管理配置怎么配。配完三步（模型、数据库、语义库），前端就能用中文提问查数。全程跟着界面走，不需要写代码。\n\n封面信息：内部培训资料 ｜ 2026-09 ｜ 主讲人：____________"
+    },
+    {
+      "type": "chapter",
+      "id": "ch-preface",
+      "heading": "前言：智能问数的演进与现实",
+      "subheading": "先建立判断：我们走到哪一步、难在哪里",
+      "components": [],
+      "notes": "这一部分不配置任何东西，只建立共同认知。听众若只关心操作，可提示：这两页讲完就进入实操。"
+    },
+    {
+      "type": "content",
+      "kind": "process",
+      "id": "evolution",
+      "heading": "从 NL2SQL 到决策建议：五个台阶",
+      "components": [
+        {
+          "type": "chevron_process",
+          "items": [
+            {
+              "title": "NL2SQL",
+              "text": "自然语言转一条 SQL"
+            },
+            {
+              "title": "ChatBI",
+              "text": "对话式追问与可视化"
+            },
+            {
+              "title": "智能问数",
+              "text": "查数 + 图表 + 口径解读"
+            },
+            {
+              "title": "预测",
+              "text": "趋势与异常预判"
+            },
+            {
+              "title": "决策建议",
+              "text": "从看数据到给行动"
+            }
+          ]
+        },
+        {
+          "type": "bullets",
+          "items": [
+            "查不准就谈不上预测",
+            "治理要求逐级提高",
+            "人发起、AI 执行、人复核"
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "我们当前在「智能问数」阶段：先把查得准、看得懂、能复现做实，再谈预测与决策。"
+        }
+      ],
+      "notes": "讲演进时强调「递进」：每一级都以上一级的准确性为前提。收尾落到我们当前的位置——智能问数，这也是本次配置培训的全部目标范围。"
+    },
+    {
+      "type": "content",
+      "kind": "comparison",
+      "id": "hard-use",
+      "heading": "落地难在哪（一）：决定能不能用的三件事",
+      "components": [
+        {
+          "type": "data_table",
+          "columns": [
+            {
+              "key": "pain",
+              "label": "难点"
+            },
+            {
+              "key": "why",
+              "label": "难在哪里"
+            },
+            {
+              "key": "how",
+              "label": "我们的应对"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "pain": "LLM 能力边界",
+                "why": "幻觉、结果不稳定",
+                "how": "流水线 + 自动纠错 ≤3 次"
+              }
+            },
+            {
+              "cells": {
+                "pain": "工程编排",
+                "why": "编排决定稳定性",
+                "how": "异步编排、上下文压缩"
+              }
+            },
+            {
+              "cells": {
+                "pain": "数据库治理",
+                "why": "口径不统一",
+                "how": "语义库 + 知识入字典"
+              }
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "这三件决定「能不能用」，缺一件都跑不起来。"
+        }
+      ],
+      "notes": "完整说法（口播用）：① LLM 能力边界——幻觉、同题多跑结果不一致、对复杂口径理解偏差，我们用 SQL-of-Thought 流水线加 9 类 31 小类错误自动纠错（最多 3 次）兜住；② Harness Engineering——模型只是引擎，上下文管理、工具、提示词与编排才决定稳定性，应对是主/子 Agent 异步编排、上下文压缩、技能系统、消息瘦身；③ 数据库治理——业务含义不在表里：指标口径不统一、应用场景及其 cube 指标缺失，应对是语义库建模 + 五类业务知识把口径写进字典。"
+    },
+    {
+      "type": "content",
+      "kind": "comparison",
+      "id": "hard-trust",
+      "heading": "落地难在哪（二）：决定敢不敢用、能不能持续好用",
+      "components": [
+        {
+          "type": "data_table",
+          "columns": [
+            {
+              "key": "pain",
+              "label": "难点"
+            },
+            {
+              "key": "why",
+              "label": "难在哪里"
+            },
+            {
+              "key": "how",
+              "label": "我们的应对"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "pain": "安全",
+                "why": "数据不敢开放",
+                "how": "加密 + 只读 + 写审批"
+              }
+            },
+            {
+              "cells": {
+                "pain": "评估与验证",
+                "why": "没有题就不知好坏",
+                "how": "好差题集 + A/B 门禁"
+              }
+            },
+            {
+              "cells": {
+                "pain": "用户容忍度",
+                "why": "错一次就可能弃用",
+                "how": "过程可核 + 反馈闭环"
+              }
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "结论：智能问数不是「接个大模型」就结束，而是模型 + 工程 + 数据治理三件事同时做。"
+        }
+      ],
+      "notes": "完整说法（口播用）：④ 安全——企业数据不敢开放给 AI 随便查，应对是数据库与语义库鉴权：连接信息加密、只读通道、写操作审批（即将上线）；⑤ 评估与验证——不好构建评测集，没有题就无法回答「改版后变好了吗」，应对是用户反馈 → 待标注复核 → BadCase/GoodCase 集 → 离线测试 A/B + 发布门禁；⑥ 使用者容忍度——用户对「偶尔答错」的容忍度远低于对同事出错，错一次就可能弃用，应对是过程透明（SQL 与步骤可核）、点赞点踩闭环、培训统一提问规范。"
+    },
+    {
+      "type": "content",
+      "kind": "process",
+      "id": "agenda",
+      "heading": "配置主线：四步跑通",
+      "components": [
+        {
+          "type": "chevron_process",
+          "items": [
+            {
+              "title": "① 新增模型",
+              "text": "接入 LLM API"
+            },
+            {
+              "title": "② 数据库配置",
+              "text": "接入物理数据源"
+            },
+            {
+              "title": "③ 语义库配置",
+              "text": "AI 的业务字典"
+            },
+            {
+              "title": "④ 验证查询",
+              "text": "前端提问确认"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "主线四步跑通即可提问查数；关键词、深度思考、评估、工作区保持默认，保存后即时生效、无需重启后端。"
+        },
+        {
+          "type": "callout",
+          "variant": "warn",
+          "text": "SQL审批功能暂未上线，培训中可忽略。"
+        }
+      ],
+      "notes": "给出全场路线图，并明确先后依赖：必须先把数据库配好，语义库才有库可选。告诉听众其余模块默认即可，把注意力留给主线。"
+    },
+    {
+      "type": "chapter",
+      "id": "ch-model",
+      "heading": "PART 01　新增模型",
+      "subheading": "入口：设置 → 模型。为系统接入可调用的 LLM API",
+      "components": [],
+      "notes": "进入 PART 01。强调这是唯一需要管理员操作、且影响全系统的配置：模型配错，所有人提问都会失败。"
+    },
+    {
+      "type": "content",
+      "kind": "data",
+      "id": "model-fields",
+      "heading": "接入点字段：填什么、注意什么",
+      "components": [
+        {
+          "type": "data_table",
+          "columns": [
+            {
+              "key": "field",
+              "label": "字段"
+            },
+            {
+              "key": "desc",
+              "label": "说明"
+            },
+            {
+              "key": "note",
+              "label": "示例 / 备注"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "field": "Provider ID（路由）",
+                "desc": "接入点唯一标识",
+                "note": "小写字母开头，可用小写字母、数字、短横线"
+              }
+            },
+            {
+              "cells": {
+                "field": "显示名称",
+                "desc": "界面展示用",
+                "note": "留空则使用 Provider ID"
+              }
+            },
+            {
+              "cells": {
+                "field": "Base URL",
+                "desc": "OpenAI-compatible 接入点",
+                "note": "如 https://.../v1；填写后才能获取模型列表"
+              }
+            },
+            {
+              "cells": {
+                "field": "API 协议",
+                "desc": "协议类型",
+                "note": "OpenAI 兼容（集成商可提供 Anthropic 探活兼容方案）"
+              }
+            },
+            {
+              "cells": {
+                "field": "API Key",
+                "desc": "鉴权密钥",
+                "note": "加密存储；编辑时留空 = 保留原密钥"
+              }
+            },
+            {
+              "cells": {
+                "field": "模型列表",
+                "desc": "该接入点下的模型",
+                "note": "点「获取可用模型」自动拉取，或「添加模型」手动填 ID"
+              }
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warn",
+          "text": "校验规则：Provider ID 不能为空且格式受限；必须填 Base URL；至少配置一个模型，否则无法保存。"
+        }
+      ],
+      "footnote": "每个模型可单独设置：上下文窗口（如 256K）、最大输出 token（如 32K）、温度参数（默认 0）。",
+      "notes": "逐字段演示一遍即可，不要念表。重点强调两个易错点：Base URL 不填就拿不到模型列表；API Key 编辑时留空是「保留原密钥」而不是清空。"
+    },
+    {
+      "type": "content",
+      "kind": "process",
+      "id": "model-ops",
+      "heading": "获取模型 · 探活容量 · 默认与激活",
+      "components": [
+        {
+          "type": "numbered_cards",
+          "items": [
+            {
+              "title": "获取可用模型",
+              "text": "自动拉取模型清单并验证连通性",
+              "sub": "①"
+            },
+            {
+              "title": "刷新真实容量",
+              "text": "读取真实上下文窗口与最大输出",
+              "sub": "②"
+            },
+            {
+              "title": "设置默认模型",
+              "text": "用户未手动选择时使用它",
+              "sub": "③"
+            },
+            {
+              "title": "激活 / 备用",
+              "text": "多接入点其一为激活，删除后自动回退",
+              "sub": "④"
+            },
+            {
+              "title": "保存即生效",
+              "text": "顶栏「模型选择」可切换",
+              "sub": "⑤"
+            }
+          ]
+        }
+      ],
+      "footnote": "常见问题：拉不到列表 → 手动填模型 ID；容量标注「官方 / 默认」→ 未实时探到，可手动改；API Key 显示已配置但编辑留空 → 保存时保留原密钥。",
+      "notes": "澄清术语：界面上没有「探活」按钮，探活对应「刷新真实容量」。这一步决定模型能输出多长、上下文多宽，配错会导致长报告被截断。"
+    },
+    {
+      "type": "chapter",
+      "id": "ch-db",
+      "heading": "PART 02　数据库配置",
+      "subheading": "入口：顶栏数据库下拉框旁 ⚙️ 或 设置 → 数据库",
+      "components": [],
+      "notes": "进入 PART 02。提醒：这一步是语义库的前置条件，语义库新建时必须从这些库里选目标库。"
+    },
+    {
+      "type": "content",
+      "kind": "data",
+      "id": "db-fields",
+      "heading": "数据库配置字段与连接测试",
+      "components": [
+        {
+          "type": "data_table",
+          "columns": [
+            {
+              "key": "field",
+              "label": "字段"
+            },
+            {
+              "key": "desc",
+              "label": "说明"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "field": "名称（db_name）",
+                "desc": "下拉框与提问时的标识，如「生产MySQL」"
+              }
+            },
+            {
+              "cells": {
+                "field": "类型",
+                "desc": "MySQL / ClickHouse / PostgreSQL"
+              }
+            },
+            {
+              "cells": {
+                "field": "Host / Port",
+                "desc": "数据库地址和端口"
+              }
+            },
+            {
+              "cells": {
+                "field": "数据库名",
+                "desc": "物理库名"
+              }
+            },
+            {
+              "cells": {
+                "field": "用户名 / 密码",
+                "desc": "密码加密存储；编辑时留空 = 保留原密码"
+              }
+            },
+            {
+              "cells": {
+                "field": "Wren 项目（语义层）",
+                "desc": "选中走语义层，留空走直连"
+              }
+            },
+            {
+              "cells": {
+                "field": "测试连接",
+                "desc": "保存前验证地址与凭据是否正确"
+              }
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "新增或修改（含首次配语义层、改 Host 与密码）保存后立即生效、无需重启后端；若提示工具未起来，到语义库页构建一次即可。"
+        }
+      ],
+      "notes": "重点讲两件事：一是「Wren 项目」留空与选中的区别（直连 vs 语义层）；二是所有改动保存即生效，不需要重启后端。测试连接建议每次改完都点一次。"
+    },
+    {
+      "type": "chapter",
+      "id": "ch-semantic",
+      "heading": "PART 03　语义库配置",
+      "subheading": "语义库是给 AI 用的业务字典：按业务口径预先建模",
+      "components": [],
+      "notes": "进入 PART 03，本次培训的重点。可以先问一句：为什么 AI 会答错？多半不是模型笨，而是它不知道你们的业务口径。"
+    },
+    {
+      "type": "content",
+      "kind": "data",
+      "id": "semantic-ways",
+      "heading": "四种接入方式：按现状选一条",
+      "components": [
+        {
+          "type": "data_table",
+          "columns": [
+            {
+              "key": "way",
+              "label": "方式"
+            },
+            {
+              "key": "fit",
+              "label": "适用场景"
+            },
+            {
+              "key": "action",
+              "label": "关键动作"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "way": "① 新建（推荐）",
+                "fit": "没有现成项目",
+                "action": "选库 → 提取表结构 → 填知识 → 校验构建 → 应用"
+              }
+            },
+            {
+              "cells": {
+                "way": "② 从 Git 拉取",
+                "fit": "团队已有仓库",
+                "action": "填仓库地址与分支，关联数据库；同名先备份"
+              }
+            },
+            {
+              "cells": {
+                "way": "③ 关联本地目录",
+                "fit": "项目已在服务器",
+                "action": "填目录绝对路径 + 关联数据库"
+              }
+            },
+            {
+              "cells": {
+                "way": "④ 接入 Git",
+                "fit": "先建库后有仓库",
+                "action": "备份本地 → 整目录替换 → 自动构建"
+              }
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warn",
+          "text": "凭据安全：连接凭据不从 Git 仓库读取，一律用「关联数据库」的本地加密连接信息。"
+        }
+      ],
+      "notes": "让听众先选路径，再讲后续步骤：已有仓库就走 ②，从零开始就走 ①。安全那句要念出来——它回答了「把语义库放 Git 会不会泄露密码」。"
+    },
+    {
+      "type": "content",
+      "kind": "process",
+      "id": "semantic-step12",
+      "heading": "新建语义库：骨架与表结构",
+      "components": [
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Step 1　基本信息",
+              "text": "选目标库 → 填项目名（英文）→ 创建项目"
+            },
+            {
+              "title": "Step 2　提取表结构",
+              "text": "勾选要建模的表 → 生成模型文件"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "经验：只勾选与业务查询相关的表，建模范围越聚焦，AI 选表越准。"
+        }
+      ],
+      "footnote": "项目名称即语义库目录名，建议英文，如 sales_analysis；必须先完成数据库配置，这一步才有库可选。",
+      "notes": "现场演示要留时间：提取表结构这一步会把库里的表全列出来，第一次看到容易懵。提醒大家「少即是多」——151 张表不必全选。"
+    },
+    {
+      "type": "content",
+      "kind": "data",
+      "id": "semantic-knowledge",
+      "heading": "五类业务知识：口径写在这里",
+      "components": [
+        {
+          "type": "data_table",
+          "columns": [
+            {
+              "key": "type",
+              "label": "知识类型"
+            },
+            {
+              "key": "use",
+              "label": "作用"
+            },
+            {
+              "key": "sample",
+              "label": "示例"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "type": "术语表 glossary",
+                "use": "业务术语 → 字段映射",
+                "sample": "「活跃用户」= login_date ≥ 30 天"
+              }
+            },
+            {
+              "cells": {
+                "type": "指标定义 metrics",
+                "use": "指标计算公式",
+                "sample": "销售额 = SUM(amount)"
+              }
+            },
+            {
+              "cells": {
+                "type": "业务规则 rules",
+                "use": "每次对话都会注入给 AI",
+                "sample": "默认查最近 30 天"
+              }
+            },
+            {
+              "cells": {
+                "type": "SQL 示例 sql",
+                "use": "问题 + 参考 SQL 的典型查询",
+                "sample": "「每月销量」+ SELECT …"
+              }
+            },
+            {
+              "cells": {
+                "type": "注意事项 caveats",
+                "use": "数据质量与边界情况提醒",
+                "sample": "退款单金额是负数"
+              }
+            }
+          ]
+        },
+        {
+          "type": "bullets",
+          "items": [
+            "一个文件 = 一条知识",
+            "「AI 补充」生成草稿后再保存",
+            "保存后即时生效",
+            "口径问题多源于知识缺失"
+          ]
+        }
+      ],
+      "notes": "强调这是「花小钱办大事」的一步：不填也能用，但业务口径类问题几乎都源于知识缺失。建议每个语义库至少先写规则与指标两类。"
+    },
+    {
+      "type": "content",
+      "kind": "process",
+      "id": "semantic-step45",
+      "heading": "校验 · 构建 · 应用 · 上传",
+      "components": [
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Step 4　校验与构建",
+              "text": "「校验」检查语义库是否有效，并显示模型 / 视图 / 关系数量；「构建」生成查询所需的 MDL 文件，修改模型或知识后可反复执行"
+            },
+            {
+              "title": "Step 5　应用与上传",
+              "text": "「应用至项目」把语义库关联到选中数据库，后续查询走语义层通道；「上传至 Git」可选，填仓库地址、分支、标签与提交信息"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "日常操作：Git 来源可「更新」拉取分支或标签，并可勾选更新后自动构建；「删除」会解绑所有关联并删除本地目录，不可恢复，有二次确认。"
+        },
+        {
+          "type": "callout",
+          "variant": "warn",
+          "text": "高频排错：配了语义层仍提示找不到库，九成是未「构建」（没有 MDL 文件），点一次构建即可。"
+        }
+      ],
+      "notes": "把「构建 = 生成 MDL」这句话讲透，它解释了后面绝大多数报错。演示时改一处知识、再点一次构建，让听众看到流程闭环。"
+    },
+    {
+      "type": "chapter",
+      "id": "ch-other",
+      "heading": "PART 04　其他功能模块",
+      "subheading": "关键词 / 深度思考 / SQL审批 / 评估 / 工作区",
+      "components": [],
+      "notes": "进入 PART 04。这一节节奏要快，目的是「让听众知道有这些开关、但不要动它们」。"
+    },
+    {
+      "type": "content",
+      "kind": "data",
+      "id": "other-modules",
+      "heading": "五个模块速览：保持默认",
+      "components": [
+        {
+          "type": "data_table",
+          "columns": [
+            {
+              "key": "module",
+              "label": "模块（设置标签页）"
+            },
+            {
+              "key": "use",
+              "label": "作用"
+            },
+            {
+              "key": "advice",
+              "label": "使用建议"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "module": "关键词",
+                "use": "自定义哪些词会被当成数据查询（逗号分隔）",
+                "advice": "默认配置即可"
+              }
+            },
+            {
+              "cells": {
+                "module": "深度思考",
+                "use": "打开后回答前展示推理折叠块，可展开查看过程",
+                "advice": "默认即可；排查结果异常时临时开启"
+              }
+            },
+            {
+              "cells": {
+                "module": "SQL审批",
+                "use": "写操作 SQL 执行前人工审批（批准/拒绝/编辑后提交）",
+                "advice": "功能暂未上线，可忽略"
+              }
+            },
+            {
+              "cells": {
+                "module": "评估",
+                "use": "后台自动打分链路总开关、LLM-judge 开关与采样率",
+                "advice": "默认即可；省 token 时可只关 LLM 打分"
+              }
+            },
+            {
+              "cells": {
+                "module": "工作区",
+                "use": "隔离不同项目的库配置 / 语义库 / 对话 / 报告",
+                "advice": "单项目使用保持默认工作区"
+              }
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warn",
+          "text": "以上配置保存后均即时生效，无需重启后端；普通用户不要改动，误改后联系管理员恢复。"
+        }
+      ],
+      "notes": "一句话过每个模块即可。唯一需要展开的是「工作区」——多项目并行时才用，单项目保持默认。"
+    },
+    {
+      "type": "chapter",
+      "id": "ch-review",
+      "heading": "PART 05　待标注工作台",
+      "subheading": "面向开发与语义库维护人员：处理用户反馈的标注流水线",
+      "components": [],
+      "notes": "进入 PART 05。提醒听众：从这里开始是维护人员的工作，普通用户只需知道「点赞点踩是有用的」。"
+    },
+    {
+      "type": "content",
+      "kind": "process",
+      "id": "review-flow",
+      "heading": "反馈闭环：从点赞点踩到考题",
+      "components": [
+        {
+          "type": "flowchart",
+          "nodes": [
+            {
+              "id": "pending",
+              "label": "待判断",
+              "kind": "round"
+            },
+            {
+              "id": "labeling",
+              "label": "标注中",
+              "kind": "diamond"
+            },
+            {
+              "id": "verified",
+              "label": "已验证 Good Set",
+              "kind": "rect"
+            },
+            {
+              "id": "rejected",
+              "label": "已驳回 BadCase",
+              "kind": "rect"
+            }
+          ],
+          "edges": [
+            {
+              "from": "pending",
+              "to": "labeling",
+              "label": "判定有效"
+            },
+            {
+              "from": "labeling",
+              "to": "verified",
+              "label": "补金标"
+            },
+            {
+              "from": "labeling",
+              "to": "rejected",
+              "label": "有效差评"
+            }
+          ],
+          "direction": "LR"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "点赞自动入集门槛宽松，优先复核这批；有效差评转为 BadCase 考题。撤回会删 Langfuse Dataset item，删除待评估记录不可恢复。"
+        }
+      ],
+      "notes": "讲清「为什么要点赞点踩」：用户的每次点击都会变成题。再讲三种操作的代价，避免现场有人随手删数据。"
+    },
+    {
+      "type": "chapter",
+      "id": "ch-offline",
+      "heading": "PART 06　离线测试",
+      "subheading": "面向开发与维护人员：改了提示词/技能/语义库，效果变好还是变差",
+      "components": [],
+      "notes": "进入 PART 06。这一节回答一个管理问题：改了东西，怎么知道变好还是变差。"
+    },
+    {
+      "type": "content",
+      "kind": "process",
+      "id": "offline",
+      "heading": "三步跑一轮 A/B 门禁",
+      "components": [
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Step 1　数据集与参数",
+              "text": "选题集；设条数上限与门禁阈值 ±0.05"
+            },
+            {
+              "title": "Step 2　对比臂",
+              "text": "每臂 = 臂名 + Prompt / Skill / 语义库版本"
+            },
+            {
+              "title": "Step 3　运行",
+              "text": "点运行看实时进度，历史可回看"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "结果解读：核心评分含业务正确分、SQL 合法性、执行成功率、语义匹配；PASS 可发布，FAIL 不建议发布。"
+        }
+      ],
+      "footnote": "第一个臂设为线上基准 ref；门禁阈值默认 ±0.05，整体与简单查询子集双重门槛；LLM 判分开关默认关闭。",
+      "notes": "重点讲「对比臂」的概念：一次只改一个变量，否则分不清是谁的功劳。门禁阈值默认 ±0.05，整体与简单查询子集双重门槛。"
+    },
+    {
+      "type": "content",
+      "kind": "points",
+      "id": "summary-keys",
+      "heading": "三个必须记住的点",
+      "components": [
+        {
+          "type": "numbered_cards",
+          "items": [
+            {
+              "title": "未构建就没有 MDL",
+              "text": "语义层报「找不到库」的第一大原因",
+              "sub": "最高频问题"
+            },
+            {
+              "title": "保存即生效",
+              "text": "库、语义库、模型、评估开关都无需重启",
+              "sub": "运维省心"
+            },
+            {
+              "title": "结果不准先查知识",
+              "text": "术语、指标口径、规则入库后重新提问",
+              "sub": "口径优先"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "配置顺序：① 模型 → ② 数据库 → ③ 语义库（补知识 · 校验 · 构建 · 应用）→ ④ 前端提问验证；维护人员另负责待标注与离线测试。"
+        }
+      ],
+      "notes": "结尾三句话最好让听众复述一遍。如果时间不够，就只讲第一条——它解决了现场八成的「怎么不好使」提问。"
+    },
+    {
+      "type": "ending",
+      "id": "ending",
+      "heading": "Q & A",
+      "subheading": "配套资料：用户操作手册.md · 系统功能清单_客户培训.md · wrenai语义库编写教程.md",
+      "components": [
+        {
+          "type": "bullets",
+          "items": [
+            "用户操作手册.md　配置与使用全流程",
+            "系统功能清单_客户培训.md　功能与角色",
+            "wrenai语义库编写教程.md　语义库怎么写"
+          ]
+        }
+      ],
+      "notes": "收尾：把配套资料的位置念一遍，并说明会后可索取 pptx 与手册。留 5-10 分钟答疑，优先回答配置类问题。"
+    }
+  ]
+}

@@ -31,15 +31,19 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]  # src/agent/settings/env_lo
 
 
 def load_env() -> None:
-    """加载项目环境变量：`.env`（dev 基线）为底，`DEPLOY_ENV=prod` 时叠加 `.env.prod` 的 LANGFUSE_*。
+    """加载项目环境变量：按 DEPLOY_ENV 选择环境文件。
 
-    - 容器内（DEPLOY_ENV=prod）：docker env_file 已注入 .env.prod 的 LANGFUSE_*（含在
-      pre 里）→ 跳过 → 注入值保持；`.env` 镜像内不存在 → 无操作。
-    - 宿主机/本机手动连生产（`export DEPLOY_ENV=prod`）：LANGFUSE_* 不在 pre 里 →
-      `.env` 先设 dev 值，再被 `.env.prod` 覆盖为生产值 → 连生产项目；本机
-      AGENT_DATA_ROOT 保持不动。
-    - dev（DEPLOY_ENV 未设或 =dev）：只读 `.env`，不碰 `.env.prod`。
-    - 显式 export LANGFUSE_*：在 pre 里 → 尊重用户指定，不被任何文件覆盖。
+    三环境支持（2026-09-21）：
+    - `DEPLOY_ENV` 未设或 "dev"（本地开发）→ `.env`
+    - `DEPLOY_ENV=dev-server`（开发服务器 34）→ `.env.dev`
+    - `DEPLOY_ENV=prod`（生产服务器 64）→ `.env` + `.env.prod` 叠加 LANGFUSE_*
+
+    优先级（高→低）：
+    0. 已注入的真实 env（docker env_file / 手动 export）恒优先——不覆盖。
+    1. `.env.prod` / `.env.dev` 的指定前缀覆盖 `.env` 的 dev 值。
+    2. `.env`：开发基线（本机 AGENT_DATA_ROOT、dev 凭据等）。
+
+    显式 export LANGFUSE_*：在 pre 里 → 尊重用户指定，不被任何文件覆盖。
     """
     from dotenv import dotenv_values, load_dotenv
 
@@ -48,14 +52,28 @@ def load_env() -> None:
     # 记录脚本启动前已存在的真实 env（容器注入 / 手动 export）——之后不覆盖
     pre = {k for k in os.environ}
     load_dotenv(_PROJECT_ROOT / ".env", override=False)  # dev 基线，填缺不覆盖
+
+    # dev-server：加载 .env.dev（完整覆盖，不限于 LANGFUSE_* 前缀）
+    if deploy_env == "dev-server":
+        dev_file = _PROJECT_ROOT / ".env.dev"
+        if dev_file.exists():
+            dev_cfg = dotenv_values(dev_file) or {}
+            for key, val in dev_cfg.items():
+                if val not in (None, "") and key not in pre:
+                    os.environ[key] = str(val)
+
     # Langfuse trace Environment 属性（UI Environment 列）对接到 DEPLOY_ENV：
     # 显式 export / .env 文件的 LANGFUSE_TRACING_ENVIRONMENT 恒优先（rule #1）；
-    # 否则从 DEPLOY_ENV 推导，prod→production，其余→development。
+    # 否则从 DEPLOY_ENV 推导，prod→production，dev-server→dev-server，其余→development。
     # 离线实验 worker 会显式覆盖为 experiment（run_experiment._run_worker）。
     if not os.environ.get("LANGFUSE_TRACING_ENVIRONMENT"):
-        os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = (
-            "production" if deploy_env == "prod" else "development"
-        )
+        if deploy_env == "prod":
+            os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = "production"
+        elif deploy_env == "dev-server":
+            os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = "dev-server"
+        else:
+            os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = "development"
+
     if deploy_env != "prod":
         return
     prod = _PROJECT_ROOT / ".env.prod"

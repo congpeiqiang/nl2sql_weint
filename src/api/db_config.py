@@ -223,7 +223,9 @@ async def reload_mcp(request: Request):
     """全量对账运行期工具注册表：新增/删除库或语义库后免重启生效的手动开关。
 
     与写路径自动加载同一套逻辑（`refresh_sub_entries`）；响应体即对账结果
-    （added/changed/removed/loaded/counts），可直接判断哪个 server 没起来。
+    （added/changed/retried/removed/loaded/counts），可直接判断哪个 server 没起来。
+    上次加载失败的条目会被**重试**（`retried` 列出），所以它同时是「某库工具一直
+    没起来（建库时还没 MDL 之类）」的恢复手段——不必重启后端，也不必去动库配置。
     """
     try:
         from agent.utils.semantic_db import get_detector

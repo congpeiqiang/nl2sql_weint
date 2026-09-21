@@ -1,0 +1,26 @@
+{
+  "components": [
+    {
+      "type": "data_table",
+      "columns": [
+        { "key": "field", "label": "字段" },
+        { "key": "desc", "label": "说明" }
+      ],
+      "rows": [
+        { "cells": { "field": "名称（db_name）", "desc": "下拉框与提问时的标识，如「生产MySQL」" } },
+        { "cells": { "field": "类型", "desc": "MySQL / ClickHouse / PostgreSQL" } },
+        { "cells": { "field": "Host / Port", "desc": "数据库地址和端口" } },
+        { "cells": { "field": "数据库名", "desc": "物理库名" } },
+        { "cells": { "field": "用户名 / 密码", "desc": "密码加密存储；编辑时留空 = 保留原密码" } },
+        { "cells": { "field": "Wren 项目（语义层）", "desc": "选中走语义层，留空走直连" } },
+        { "cells": { "field": "测试连接", "desc": "保存前验证地址与凭据是否正确" } }
+      ]
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "text": "新增或修改（含首次配语义层、改 Host 与密码）保存后立即生效、无需重启后端；若提示工具未起来，到语义库页构建一次即可。"
+    }
+  ],
+  "notes": "重点讲两件事：一是「Wren 项目」留空与选中的区别（直连 vs 语义层）；二是所有改动保存即生效，不需要重启后端。测试连接建议每次改完都点一次。"
+}

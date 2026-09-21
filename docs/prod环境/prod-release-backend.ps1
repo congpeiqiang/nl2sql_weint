@@ -1,9 +1,8 @@
 ﻿# ============================================================
-# NL2SQL 后端发布脚本（一键：打包 -> 上传 -> 重建 -> 三步重启 -> 验证）
-# 运行环境：本机 PowerShell（已配置 SSH 密钥免密，无需输密码）
-# 用法：  .\release-backend.ps1
-# 参数：  -LocalRoot 本地后端根（默认 D:\code_work_space\llm\nl2sql）
-#         -Server / -SshUser / -AppDir 服务器信息
+# NL2SQL 生产环境（192.168.25.64）后端发布脚本
+# 功能：打包本地后端代码 -> 分片上传到 64 -> 重建镜像 -> 三步重启 -> 验证
+# 用法：.\prod-release-backend.ps1
+# 前置：本机已配好到 64 的 SSH 密钥（免密登录）
 # ============================================================
 param(
     [string]$LocalRoot = "D:\code_work_space\llm\nl2sql",
@@ -11,9 +10,7 @@ param(
     [string]$Server    = "192.168.25.64",
     [string]$SshUser   = "weint",
     [string]$AppDir    = "/home/weint/apps/nl2sql/nl2sql-app",
-    # 分片大小(MB) / 每片重试次数。VPN 链路不稳时把 ChunkMB 调小（连接寿命短
-    # 于单片传输时间就必断），链路好时调大减少连接次数。2026-09-18 加：经 VPN
-    # 直传 34.9MB 单连接在 ~480KB 处被 reset（28KB/s），无法靠重试整包救回。
+    # 分片大小(MB) / 每片重试次数。VPN 链路不稳时把 ChunkMB 调小
     [double]$ChunkMB  = 0.5,
     [int]$MaxRetry    = 8
 )
@@ -25,30 +22,27 @@ $ErrorActionPreference = "Stop"
 $tar = Join-Path $WorkDir "backend_release.tar.gz"
 if (Test-Path $tar) { Remove-Item $tar }
 
-Write-Host "== 1/5 本地打包（gzip + 排除大目录/环境变量/探针）==" -ForegroundColor Cyan
-# -czf 而非 -cf：34.9MB → 9.2MB（3.8x），链路越差这个杠杆越大。服务器侧解压
-# 用 tar -xzf（见 3/5）。19s 本机 CPU 换 3.8 倍传输量，稳赚。
+Write-Host "== 1/5 本地打包（gzip 压缩，排除开发文件）==" -ForegroundColor Cyan
+# 排除项说明：
+#   - .venv / node_modules：依赖在服务器镜像内，不传
+#   - .env / .env.prod：生产环境变量只在服务器，不传本地副本
+#   - src/agent/workspace：运行时数据目录（AGENT_DATA_ROOT 未配置时的回退）
+#   - src/agent/workspace-temp：运行时临时数据（db_config.json / eval / process_data / 临时查询结果）
+#   - src/agent/workspace_manager/workspaces.json：运行时注册表（dev 机条目会覆盖生产）
+#   - src/agent/shared/model_config.json：运行时模型配置（容器读 AGENT_DATA_ROOT 那份）
 tar -czf $tar `
   --exclude=.venv --exclude=.git --exclude=logs --exclude=.langgraph_api `
   --exclude=.idea --exclude=docs --exclude=.tmp --exclude=__pycache__ `
   --exclude=docker --exclude="*.bin" --exclude="*.log" `
   --exclude=.env --exclude=.env.prod --exclude=src/agent/workspace `
-  --exclude=src/agent/workspace-temp `
-  --exclude=src/agent/workspace_manager/workspaces.json `
+  --exclude=src/agent/workspace-temp --exclude=src/agent/workspace_manager/workspaces.json `
   --exclude=src/agent/shared/model_config.json `
   -C $LocalRoot .
-# ↑ workspaces.json 是运行时注册表（dev 机条目），随 tar 上生产会覆盖服务器
-#   注册表（2026-09-08 ee/cpq 工作区消失事故）；治本后注册表住数据卷，此排除
-#   为双保险（服务器 backend/ 里的旧残留仍会进镜像，但新代码不再读它）。
-# ↑ model_config.json 同理：gitignore 的运行时模型配置，容器读 AGENT_DATA_ROOT
-#   （/app/data/shared）那份；本机 src 里这份是 AGENT_DATA_ROOT 外置前的旧种子，
-#   带上生产只会铺到 /app/src/agent/shared/ 下当隐患（AGENT_DATA_ROOT 一失效就
-#   被静默读走）。2026-09-21 加。
 if ($LASTEXITCODE -ne 0) { throw "打包失败" }
 $tarMB = [math]::Round((Get-Item $tar).Length/1MB,2)
 Write-Host "   打包完成：$tarMB MB（gzip 后）"
 
-# SSH/SCP 公共选项：keepalive 防止链路空闲被判死；ConnectTimeout 避免卡在握手。
+# SSH/SCP 公共选项：keepalive 防止链路空闲被判死；ConnectTimeout 避免卡在握手
 $SshOpt = @("-o","ServerAliveInterval=20","-o","ServerAliveCountMax=6","-o","ConnectTimeout=15")
 
 Write-Host "== 2/5 上传到服务器（分片 $ChunkMB MB × N，每片独立重试 $MaxRetry 次）==" -ForegroundColor Cyan
@@ -84,7 +78,7 @@ Write-Host "== 3/5 服务器拼接 + 解压 + 重建镜像 ==" -ForegroundColor 
 # 解压前先清掉服务器上的旧代码目录：tar 解压**不会删除**「仓库里已删/已改名」的文件，
 # 于是被删的代码会一直躺在 backend/ 里被烤进镜像。2026-09-20 事故正是被这点放大：
 # 一个 09-02 的老副本 + 09-18 丢 import 的 main_agent.py 共存，制造出「补丁文件在、
-# import 不在」的假象，白排查一轮（也说明只清 src/ 就够——prompt 在 src/agent/prompt 下）。
+# import 不在」的假象，白排查一轮。
 # 两点边界：
 #   - scripts/ 不动：服务器上可能有仓库里没有的运维脚本（如 cron 调用的），删了不会随包回来。
 #   - src/agent/workspace 是 **AGENT_DATA_ROOT 未配置时**的运行时数据回退目录（默认工作区 +

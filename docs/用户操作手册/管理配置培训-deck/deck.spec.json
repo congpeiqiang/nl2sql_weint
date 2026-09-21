@@ -1,0 +1,47 @@
+{
+  "version": "1",
+  "filename": "管理配置培训-模型数据库语义库-v2.pptx",
+  "narrative": "training",
+  "theme": "thesis",
+  "meta": {
+    "organization": "DataAgent 智能数据助手",
+    "date": "2026-09",
+    "confidentiality": "internal",
+    "version": "v2"
+  },
+  "pages": [
+    { "id": "cover", "type": "cover", "heading": "管理配置培训：模型 → 数据库 → 语义库", "summary": "DataAgent 智能数据助手 · 内部培训资料 · 2026-09" },
+
+    { "id": "ch-preface", "type": "chapter", "heading": "前言：智能问数的演进与现实", "summary": "先建立判断：我们走到哪一步、难在哪里" },
+    { "id": "evolution", "type": "content", "kind": "process", "focus": "chevron_process", "heading": "从 NL2SQL 到决策建议：五个台阶", "summary": "NL2SQL → ChatBI → 智能问数 → 预测 → 决策建议；我们当前在智能问数阶段" },
+    { "id": "hard-use", "type": "content", "kind": "comparison", "heading": "落地难在哪（一）：决定能不能用的三件事", "summary": "LLM 能力边界 / Harness Engineering / 数据库治理，以及我们的应对" },
+    { "id": "hard-trust", "type": "content", "kind": "comparison", "heading": "落地难在哪（二）：决定敢不敢用、能不能持续好用", "summary": "安全 / 评估与验证 / 使用者容忍度，以及我们的应对" },
+    { "id": "agenda", "type": "content", "kind": "process", "focus": "chevron_process", "heading": "配置主线：四步跑通", "summary": "新增模型 → 数据库配置 → 语义库配置 → 验证查询；辅助模块保存即生效" },
+
+    { "id": "ch-model", "type": "chapter", "heading": "PART 01　新增模型", "summary": "入口：设置 → 模型。为系统接入可调用的 LLM API" },
+    { "id": "model-fields", "type": "content", "kind": "data", "focus": "data_table", "heading": "接入点字段：填什么、注意什么", "summary": "Provider ID / 显示名称 / Base URL / API 协议 / API Key / 模型列表，以及保存校验规则" },
+    { "id": "model-ops", "type": "content", "kind": "process", "focus": "steps", "heading": "获取模型 · 探活容量 · 默认与激活", "summary": "五个动作与三个常见问题" },
+
+    { "id": "ch-db", "type": "chapter", "heading": "PART 02　数据库配置", "summary": "入口：顶栏数据库下拉框旁 ⚙️ 或 设置 → 数据库" },
+    { "id": "db-fields", "type": "content", "kind": "data", "focus": "data_table", "heading": "数据库配置字段与连接测试", "summary": "七项字段说明，含 Wren 项目（语义层）与测试连接，以及生效规则" },
+
+    { "id": "ch-semantic", "type": "chapter", "heading": "PART 03　语义库配置", "summary": "语义库是给 AI 用的业务字典：按业务口径预先建模" },
+    { "id": "semantic-ways", "type": "content", "kind": "data", "focus": "data_table", "heading": "四种接入方式：按现状选一条", "summary": "新建 / 从 Git 拉取 / 关联本地目录 / 接入 Git，以及凭据安全说明" },
+    { "id": "semantic-step12", "type": "content", "kind": "process", "focus": "steps", "heading": "新建语义库：骨架与表结构", "summary": "Step 1 基本信息与项目骨架，Step 2 提取表结构并生成模型文件" },
+    { "id": "semantic-knowledge", "type": "content", "kind": "data", "focus": "data_table", "heading": "五类业务知识：口径写在这里", "summary": "glossary / metrics / rules / sql / caveats 五类的用途与示例" },
+    { "id": "semantic-step45", "type": "content", "kind": "process", "focus": "steps", "heading": "校验 · 构建 · 应用 · 上传", "summary": "Step 4 校验与构建 MDL，Step 5 应用至项目与上传 Git，含日常操作与高频排错" },
+
+    { "id": "ch-other", "type": "chapter", "heading": "PART 04　其他功能模块", "summary": "关键词 / 深度思考 / SQL审批 / 评估 / 工作区" },
+    { "id": "other-modules", "type": "content", "kind": "data", "focus": "data_table", "heading": "五个模块速览：保持默认", "summary": "各模块的作用与使用建议，含 SQL审批未上线的说明" },
+
+    { "id": "ch-review", "type": "chapter", "heading": "PART 05　待标注工作台", "summary": "面向开发与语义库维护人员：处理用户反馈的标注流水线" },
+    { "id": "review-flow", "type": "content", "kind": "process", "focus": "flowchart", "heading": "反馈闭环：从点赞点踩到考题", "summary": "待判断 → 标注中 → 已验证 / 已驳回；好评入 Good Set，差评转 BadCase，以及三种操作的代价" },
+
+    { "id": "ch-offline", "type": "chapter", "heading": "PART 06　离线测试", "summary": "面向开发与维护人员：改了提示词/技能/语义库，效果变好还是变差" },
+    { "id": "offline", "type": "content", "kind": "process", "focus": "steps", "heading": "三步跑一轮 A/B 门禁", "summary": "数据集与参数、对比臂、运行，以及结果解读与门禁判定" },
+
+    { "id": "summary-keys", "type": "content", "kind": "points", "focus": "numbered_cards", "heading": "三个必须记住的点", "summary": "配置顺序回顾 + 未构建就没有 MDL、保存即生效、结果不准先查业务知识 + 角色分工" },
+
+    { "id": "ending", "type": "ending", "heading": "Q & A", "summary": "配套资料：用户操作手册.md · 系统功能清单_客户培训.md · wrenai语义库编写教程.md" }
+  ]
+}

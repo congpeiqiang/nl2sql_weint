@@ -379,12 +379,15 @@ def _profile_name(project_path: Path, target_db: str) -> str:
 
 
 def _build_with_profile(
-    project_path: Path, target_db: str, overwrite_connection: bool = True
+    project_path: Path, target_db: str, overwrite_connection: bool = True,
+    force_build: bool = False,
 ) -> tuple[bool, str]:
     """拉取后的构建链路：生成 connection → 注册 profile → set-profile → context build。
 
     返回 (ok, 各步骤结果摘要)；ok 仅取决于 context build 是否成功。target/mdl.json
-    已存在时跳过构建（拉取的仓库常带构建产物，无需连库重建）。步骤间 best-effort：
+    已存在时跳过构建（拉取的仓库常带构建产物，无需连库重建）；`force_build=True`
+    时不做这个跳过——「接管已有仓库」（`_adopt_git_into`）必须让构建产物与 profile
+    对本机关联库成立，跳过会留下仓库原作者的数据源。步骤间 best-effort：
     profile add 失败（如已存在同名 profile）不阻断后续 set-profile / build。
 
     - `overwrite_connection=True`（默认，且给了 target_db）：用 target_db 的本地
@@ -392,7 +395,7 @@ def _build_with_profile(
     - `overwrite_connection=False` 或未给 target_db：保留仓库自带连接，直接按
       wren_project.yml 的 profile 构建。
     """
-    if (project_path / "target" / "mdl.json").is_file():
+    if not force_build and (project_path / "target" / "mdl.json").is_file():
         return True, "已存在 target/mdl.json，跳过构建"
 
     profile = _profile_name(project_path, target_db)
@@ -477,6 +480,298 @@ def _fallback_generate(tables, foreign_keys, scope):
     return generated
 
 
+# ── 「接入 Git」：给已建好的本地语义库接上远程仓库 ─────────────
+# 用户诉求（2026-09-20）：「语义库创建后，能不能就支持更新 git 上的仓库，因为有些
+# 时候 git 上已经有对应的语义库了」。缺口：新建出来的库没有 .git → 卡片上没有
+# 「更新」按钮、git_pull 直接 400；Git 导入又因同名目录被 409 挡住 → 只能删库重来
+# （连带解绑数据库）。这里补上反向路径：把已有远程仓库的内容**接管**进一个本地目录。
+_ADOPT_TIME_FMT = "%Y%m%d-%H%M%S"
+# 回报给前端的内容清单截断长度：列几个够用户认出是什么，其余只给数量
+_ADOPT_LIST_LIMIT = 5
+
+
+class _AdoptError(Exception):
+    """接管流程的用户可见结果：带 HTTP 状态 + 附加字段（由端点原样回给前端）。
+
+    `status=200` 是刻意为之的特例，专给「业务上可确认」的结果用（本地有自建内容 /
+    同名目录已存在）：前端 `handle()` 把**任何**非 2xx 压成一句 Error，附加字段
+    （`code` / `local_files`）会被丢掉，对话框就没法据此渲染确认勾选。与
+    `git_repo.pull_ref` 用 `blocked` 字段表达「可确认的拒绝」是同一套做法。
+    """
+
+    def __init__(self, message: str, status: int = 400, **extra):
+        super().__init__(message)
+        self.status = status
+        self.extra = extra
+
+
+def _rmtree_force(path: Path) -> None:
+    """尽力删除目录：Windows 上 git 对象文件是只读的，rmtree 需先改权限。
+
+    best-effort（失败只告警不抛）：调用方一般已达成主要目的，留一个残留目录不该让
+    整个操作报错。`delete_project` 的目录删除走同一套处理。
+    """
+    def _on_rm_error(func, target, exc_info):  # noqa: ANN001
+        import stat
+
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except Exception as e2:  # noqa: BLE001
+            _logger.warning("[wren_semantic] 删除失败 %s: %s", target, e2)
+
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path, onexc=_on_rm_error)
+    except TypeError:
+        # Python < 3.12 用 onerror
+        shutil.rmtree(path, onerror=_on_rm_error, ignore_errors=False)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[wren_semantic] rmtree 失败 %s: %s", path, e)
+
+
+def _local_content_state(project: Path) -> dict:
+    """判定本地目录是「刚建出来的空骨架」还是「有自建内容」。
+
+    返回 ``{"files": [...], "pristine": bool, "built": bool}``；`files` 是接管会
+    覆盖掉的自建内容（项目内相对路径，posix 风格，已排序）。
+
+    判据宁严勿松——判错两个方向的代价不对等：多问一次只是多点一下确认，少问一次会
+    把人家自己写的东西换掉。故：
+      - 根目录除 `wren_project.yml` 之外的任何条目 → 内容（未知文件也算）；
+      - `models/` `views/` `cubes/` 下任何文件（`.gitkeep` 除外）→ 内容；
+      - `knowledge/` 下正文与 wren_templates 任一模板**逐字相同**的文件 → 不算内容
+        （新建时生成的模板/示例，本就该被仓库版本替换）；
+      - `target/` 下任何文件（含 `mdl.json`）→ 内容（已构建，产物可再生但可能白建）；
+      - `config/connection_*.json` → 不算内容（本地凭据，构建时按 db_config 重新生成，
+        且通常被仓库 .gitignore 忽略）。
+    """
+    from agent.utils import wren_templates as tpl
+
+    template_bodies = {
+        body.strip()
+        for body in (
+            tpl.knowledge_yml(),
+            tpl.rules_general_md(),
+            tpl.glossary_template(),
+            tpl.metrics_template(),
+            tpl.sql_template(),
+            tpl.caveats_template(),
+        )
+        if body and body.strip()
+    }
+    if not project.is_dir():
+        return {"files": [], "pristine": True, "built": False}
+
+    content: list[str] = []
+    built = False
+    for cur, dirs, files in os.walk(project):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        cur_path = Path(cur)
+        rel_dir = cur_path.relative_to(project)
+        for fname in files:
+            rel = fname if str(rel_dir) == "." else f"{rel_dir.as_posix()}/{fname}"
+            top = rel.split("/", 1)[0]
+            if rel == "wren_project.yml":
+                continue  # 新建时生成，会被仓库版本替换
+            if top == "config" and fname.startswith("connection_"):
+                continue  # 本地凭据，构建时重新生成
+            if top == "target" and fname == "mdl.json":
+                built = True
+            if fname == ".gitkeep":
+                continue
+            if top == "knowledge":
+                try:
+                    body = (cur_path / fname).read_text(encoding="utf-8").strip()
+                except (OSError, UnicodeDecodeError):
+                    body = ""
+                if body and body in template_bodies:
+                    continue  # 新建时生成的模板/示例
+            content.append(rel)
+    return {"files": sorted(content), "pristine": not content, "built": built}
+
+
+def _adopt_backup_dir(root: Path, name: str, stamp: str) -> Path:
+    """备份目录路径：`<workspace>/<name>.备份-<ts>`（同秒重复时补序号）。
+
+    命名含「备份」是刻意的——`db_config._scan_wren_projects` 会跳过名字含
+    `备份`/`backup` 的目录，备份因此不会被当成语义库列进前端下拉。
+    """
+    backup = root / f"{name}.备份-{stamp}"
+    n = 0
+    while backup.exists():
+        n += 1
+        backup = root / f"{name}.备份-{stamp}-{n}"
+    return backup
+
+
+async def _adopt_git_into(
+    project: Path,
+    repo_url: str,
+    ref: str = "",
+    *,
+    discard_local: bool = False,
+    target_db: str = "",
+    build: bool = True,
+    overwrite_connection: bool = True,
+) -> dict:
+    """把远程仓库内容接管进**已存在**的本地语义库目录（`from_git` / `git_adopt` 共用）。
+
+    顺序刻意排成「先 clone 到保险的位置，再动本地目录」——clone 成功之前不碰本地半分，
+    交换用两次同盘 `rename`（原子），第二次失败就把备份 rename 回来。任何失败都保证
+    本地目录完好（这是「用户点一下就把自己写的知识换掉」的场景，不能有中间态）。
+
+    为什么不用「本地 git init + fetch + checkout -f」就地接管（沙箱实测过）：远程没有
+    的本地文件会作为**未跟踪残留**留下来，一起被 build 烤进 MDL → 得到「远程+本地」
+    混合语义库，比直接覆盖更难发现。干净 clone + 整目录交换没有这个中间态。
+
+    关联天然保住：`_associated_dbs` 按 `wren_project` 解析后的**路径**匹配，而交换是
+    同名同盘的 rename，路径字符串不变 → 库关联一条都不会掉，无需重挂。
+
+    成功返回载荷；用户可见的失败抛 `_AdoptError`（带状态与附加字段）。
+    """
+    from datetime import datetime
+
+    from agent.utils import git_repo
+
+    try:
+        git_repo.validate_repo_url(repo_url)
+    except ValueError as e:
+        raise _AdoptError(str(e), status=400) from e
+    if target_db:
+        try:
+            get_store().get(target_db)  # 先校验，别等目录换完了才发现库不存在
+        except KeyError as e:
+            raise _AdoptError(f"数据库 '{target_db}' 不存在", status=404) from e
+
+    state = _local_content_state(project)
+    if not state["pristine"] and not discard_local:
+        shown = "、".join(state["files"][:_ADOPT_LIST_LIMIT])
+        suffix = "" if len(state["files"]) <= _ADOPT_LIST_LIMIT else f" 等 {len(state['files'])} 个文件"
+        raise _AdoptError(
+            f"本地语义库有自建内容（{shown}{suffix}）：接管会用仓库内容整体替换它们"
+            f"（原目录会备份到 workspace 下，可按提示找回）",
+            status=200, code="local_content", pristine=False,
+            local_files=state["files"], built=state["built"],
+        )
+
+    root = _workspace_root()
+    stamp = datetime.now().strftime(_ADOPT_TIME_FMT)
+    # 暂存目录放在 workspace 内（`.backups/` 这一层没有 wren_project.yml，且是隐藏
+    # 目录，克隆过程中不会被 _scan_wren_projects 当成一个语义库列出来）；同盘才能
+    # 用 rename 落地，跨盘整目录拷贝既不原子又要拷两遍。
+    staging = root / ".backups" / f".adopt-{stamp}"
+    n = 0
+    while staging.exists():
+        n += 1
+        staging = root / ".backups" / f".adopt-{stamp}-{n}"
+    clone_dir = staging / "project"
+
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+        git_repo.clone_shallow(repo_url, ref, str(clone_dir))
+    except (RuntimeError, OSError) as e:
+        _rmtree_force(staging)
+        raise _AdoptError(f"克隆失败：{e}", status=500) from e
+
+    if not (clone_dir / "wren_project.yml").is_file():
+        _rmtree_force(staging)
+        raise _AdoptError(
+            "仓库根目录缺少 wren_project.yml（语义库需按规范放在仓库根）", status=400
+        )
+
+    backup = _adopt_backup_dir(root, project.name, stamp)
+    try:
+        os.rename(project, backup)
+    except OSError as e:
+        _rmtree_force(staging)
+        raise _AdoptError(f"本地目录备份失败（{project} → {backup}）：{e}", status=500) from e
+    try:
+        os.rename(clone_dir, project)
+    except OSError as e:
+        try:
+            os.rename(backup, project)  # 回滚：本地目录回到原处
+        except OSError as e2:
+            raise _AdoptError(
+                f"接管失败且回滚失败：{e}；本地内容仍在 {backup}，请手动改回 {project.name}",
+                status=500, backup_dir=str(backup),
+            ) from e2
+        _rmtree_force(staging)
+        raise _AdoptError(f"接管失败，已回滚到接管前状态：{e}", status=500) from e
+    _rmtree_force(staging)
+
+    backup_dir = ""
+    if state["pristine"]:
+        # 空骨架内容全部可再生（yml / connection / 模板），不留没有价值的备份
+        _rmtree_force(backup)
+    else:
+        backup_dir = str(backup)
+
+    # ── 关联 + 构建 + 工具热装 ─────────────────────────────
+    dbs = list(_associated_dbs(project))
+    warnings: list[str] = []
+    if target_db:
+        get_store().set_wren_project(target_db, str(project.resolve()))
+        if target_db not in dbs:
+            dbs.append(target_db)
+    elif not dbs:
+        warnings.append(
+            "该语义库尚未关联任何数据库：内容已接管，但工具不会被任何库使用；"
+            "请到「数据库配置」把 wren_project 指向它"
+        )
+    _invalidate_detector()
+
+    build_note = ""
+    if build:
+        db_for_build = target_db or (dbs[0] if dbs else "")
+        try:
+            # 接管路径强制真构建（force_build）：接管的目标是「拿这个仓库 + 本地库配置
+            # 跑起来」，若仓库恰好带了 target/mdl.json 就跳过构建，profile 也不会注册，
+            # 子进程按仓库原作者的 profile 解析连接 → 就是 aliyun-chinook 那种
+            # 「条目在册、0 工具」。跳过构建只在「从零导入」路径保留。
+            ok_build, build_note = _build_with_profile(
+                project, db_for_build, overwrite_connection, force_build=True
+            )
+        except ValueError as e:
+            build_note = f"构建未执行：{e}"
+            warnings.append(build_note)
+        else:
+            if not ok_build:
+                warnings.append(f"构建未完成：{build_note}")
+    else:
+        build_note = "按要求跳过构建（源文件已就位，点「构建」后生效）"
+
+    # 仓库自带构建产物时提示 data_source 与关联库不一致（不改判，但要让人看见）
+    src = str(_mdl_summary(project).get("data_source", "") or "")
+    if src and dbs and "跳过构建" not in build_note:
+        mismatched: list[str] = []
+        for db in dbs:
+            try:
+                dtype = str(get_store().get(db).db_type or "")
+            except KeyError:
+                continue
+            if dtype and dtype != src:
+                mismatched.append(f"{db}({dtype})")
+        if mismatched:
+            warnings.append(
+                f"仓库自带构建产物 data_source={src}，与关联库 {'、'.join(mismatched)} 的"
+                f"类型不一致；查询报连接错误时点「构建」按本地库重建"
+            )
+
+    mcp = await _sync_mcp_tools_many(dbs) if dbs else None
+    return {
+        "ok": True,
+        "project": _project_detail(str(project.resolve())),
+        "backup_dir": backup_dir,
+        "build_note": build_note,
+        "mcp": mcp,
+        "associated_dbs": dbs,
+        "warnings": warnings,
+        "requires_restart": False,
+    }
+
+
 # ── 路由 ─────────────────────────────────────────────────
 async def list_wren_projects(request: Request):
     items = [_project_detail(p["path"]) for p in _scan_wren_projects()]
@@ -517,7 +812,13 @@ async def associate_local(request: Request):
 
 
 async def from_git(request: Request):
-    """场景 B（核心）：clone → 定位项目根 → 生成凭据 → 构建 → 关联。"""
+    """场景 B（核心）：clone → 定位项目根 → 生成凭据 → 构建 → 关联。
+
+    `replace_existing`（body，缺省 false）：目标目录已存在时，缺省回 200 +
+    `code="exists"` 让前端弹确认（不删用户任何东西）；确认后带 true 重试 → 走
+    `_adopt_git_into` 接管（备份本地 → 干净 clone → 整目录交换）。已是 Git 仓库的
+    同名目录拒绝接管（它有「更新」按钮）。
+    """
     from agent.utils import git_repo
 
     data = await parse_body(request)
@@ -544,10 +845,47 @@ async def from_git(request: Request):
     safe_name = "".join(c for c in project_name if c.isalnum() or c in "-_") or "wren_project"
     dest = _workspace_root() / safe_name
     if dest.exists():
-        return json_response(
-            {"error": f"目标目录已存在: {dest}", "project": _project_detail(str(dest))},
-            status=409,
-        )
+        # 同名目录已存在：不再直接 409 让用户先去删库（生产痛点：有人先在平台「新建」
+        # 出了库，之后才发现 git 上早就有对应语义库），改为「可接管」——复用
+        # _adopt_git_into（备份本地 + 干净 clone + 整目录交换）。未确认时回 200 +
+        # code="exists"（前端据此弹确认），确认即带 replace_existing=true 重试。
+        if not _truthy(data.get("replace_existing")):
+            state = _local_content_state(dest)
+            detail = (
+                "当前是空骨架，无自建内容" if state["pristine"]
+                else f"其中 {len(state['files'])} 个自建文件会先备份再替换"
+            )
+            return json_response({
+                "ok": False,
+                "code": "exists",
+                "adoptable": True,
+                "pristine": state["pristine"],
+                "local_files": state["files"],
+                "error": (
+                    f"已存在同名语义库「{safe_name}」（{detail}）：将用仓库内容整体替换它；"
+                    f"确认后带 replace_existing=true 重试"
+                ),
+                "project": _project_detail(str(dest)),
+            })
+        if (dest / ".git").exists():
+            # 已经是 Git 仓库 → 它有「更新」按钮，别用导入的覆盖语义把人家历史换掉
+            return json_response({
+                "error": f"「{safe_name}」已是 Git 仓库，请用卡片上的「更新」按钮",
+                "code": "is_git",
+            }, status=400)
+        try:
+            return json_response({
+                **await _adopt_git_into(
+                    dest, repo_url, ref,
+                    discard_local=True,  # 走到这里用户已在前端确认「替换」，不再二次确认
+                    target_db=target_db,
+                    build=True,
+                    overwrite_connection=overwrite_connection,
+                ),
+                "replaced_existing": True,
+            })
+        except _AdoptError as e:
+            return json_response({"ok": False, "error": str(e), **e.extra}, status=e.status)
 
     try:
         git_repo.clone_shallow(repo_url, ref, str(dest))
@@ -617,21 +955,7 @@ async def delete_project(request: Request):
     except Exception as e:  # noqa: BLE001
         _logger.warning("[wren_semantic] MCP 工具下线失败: %s", e)
     # 删除目录（Windows 上 git 文件可能只读，需要 onexc 处理）
-    def _on_rm_error(func, path, exc_info):
-        import stat
-        try:
-            os.chmod(path, stat.S_IWRITE)
-            func(path)
-        except Exception as e2:
-            _logger.warning("[delete_project] 删除失败 %s: %s", path, e2)
-
-    try:
-        shutil.rmtree(project, onexc=_on_rm_error)
-    except TypeError:
-        # Python < 3.12 用 onerror
-        shutil.rmtree(project, onerror=_on_rm_error, ignore_errors=False)
-    except Exception as e:
-        _logger.warning("[delete_project] rmtree 失败: %s", e)
+    _rmtree_force(project)
     # 验证是否删除成功
     if project.exists():
         _logger.warning("[delete_project] 目录仍存在: %s", project)
@@ -1462,7 +1786,18 @@ async def git_status(request: Request):
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
 
     if not (project / ".git").exists():
-        return json_response({"ok": True, "is_git": False, "has_updates": False})
+        # 非 Git 项目：把「接管会覆盖掉哪些本地内容」一并回给前端，「接入 Git」对话框
+        # 据此在**点按钮之前**就把要覆盖的东西摆出来（2026-09-15 的教训：别让用户点
+        # 了才吃一句拒绝）。pristine=True 时前端连确认都不用弹。
+        state = _local_content_state(project)
+        return json_response({
+            "ok": True,
+            "is_git": False,
+            "has_updates": False,
+            "adopt_local_files": state["files"],
+            "adopt_pristine": state["pristine"],
+            "adopt_built": state["built"],
+        })
 
     from agent.utils import git_repo
 
@@ -1576,6 +1911,50 @@ async def git_pull(request: Request):
     return json_response(result)
 
 
+async def git_adopt(request: Request):
+    """把**已建好的**本地语义库接上远程仓库并拉取内容（「接入 Git」入口）。
+
+    body：`{repo_url(必填), ref(可选，分支/tag), discard_local(默认 false),
+    build(默认 true), target_db(可选)}`。
+
+    与 `from_git`（从零 clone 出一个新库）的区别：这里的目录**已经存在**（通常是
+    「新建」出来的空骨架）——接管 = 备份本地 + 干净 clone + 整目录交换，之后该库就有
+    `.git` 了，走普通的「更新」（`git_pull`）。两条入口共用 `_adopt_git_into`。
+
+    护栏：只接管 workspace 内的目录（与 delete 同法）；已是 Git 仓库直接 400（它有
+    「更新」按钮，不该再走覆盖语义）；本地有自建内容时回 200 + `code="local_content"`
+    等用户确认（前端据此渲染确认勾选），**确认前不动任何文件**。
+    """
+    name = request.path_params["name"]
+    project = _find_project(name)
+    if project is None:
+        return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
+    if not _is_within(project, _workspace_root()):
+        return json_response({"error": "仅支持接管 workspace 内的语义库"}, status=403)
+    if (project / ".git").exists():
+        return json_response(
+            {"error": "该语义库已是 Git 仓库，请用卡片上的「更新」按钮"}, status=400
+        )
+
+    data = await parse_body(request)
+    repo_url = str(data.get("repo_url", "") or "").strip()
+    if not repo_url:
+        return json_response({"error": "repo_url 必填"}, status=400)
+
+    try:
+        result = await _adopt_git_into(
+            project,
+            repo_url,
+            str(data.get("ref", "") or "").strip(),
+            discard_local=_truthy(data.get("discard_local")),
+            target_db=str(data.get("target_db", "") or "").strip(),
+            build=_truthy(data.get("build", True)),
+        )
+    except _AdoptError as e:
+        return json_response({"ok": False, "error": str(e), **e.extra}, status=e.status)
+    return json_response(result)
+
+
 async def get_git_ssh_key(request: Request):
     """返回后端用于 ssh:// git 推送的 SSH 公钥。
 
@@ -1618,5 +1997,6 @@ routes: list[BaseRoute] = [
     Route("/api/wren-projects/{name}/git-status", git_status, methods=["GET"]),
     Route("/api/wren-projects/{name}/git-refs", git_refs, methods=["GET"]),
     Route("/api/wren-projects/{name}/git-pull", git_pull, methods=["POST"]),
+    Route("/api/wren-projects/{name}/git-adopt", git_adopt, methods=["POST"]),
     Route("/api/git-ssh-key", get_git_ssh_key, methods=["GET"]),
 ]
