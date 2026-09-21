@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # 首次运行自动从仓库 src/agent/{shared,workspace} 拷贝种子；为空则回退仓库内
     AGENT_DATA_ROOT: str = os.getenv("AGENT_DATA_ROOT", "")
 
+    # ── P0 鉴权配置 ──────────────────────────────────────────
+    # 1 = 跳过 token 校验（dev 环境旁路），0 = 正常校验
+    NL2SQL_AUTH_DISABLED: bool = os.getenv("NL2SQL_AUTH_DISABLED", "0") == "1"
+    # HMAC 密钥：空 = 自动从 AGENT_DATA_ROOT/auth_secret 读/生成
+    NL2SQL_AUTH_SECRET: str = os.getenv("NL2SQL_AUTH_SECRET", "")
+
     class Config:
         case_sensitive = True
         # 与模块顶部 load_dotenv 同源（prod → .env.prod，dev → .env）；绝对路径避免

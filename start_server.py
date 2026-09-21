@@ -46,6 +46,7 @@ def setup_environment():
             graphs = config.get("graphs", {})
             checkpointer_config = config.get("checkpointer")
             store_config = config.get("store")
+            auth_config = config.get("auth")
     
     # Force UTF-8 encoding for all file I/O (fixes GBK decode errors on Windows)
     os.environ["PYTHONUTF8"] = "1"
@@ -77,6 +78,10 @@ def setup_environment():
     # Custom store configuration (from graph.json)
     if store_config:
         env_updates["LANGGRAPH_STORE"] = json.dumps(store_config)
+
+    # Custom auth configuration (from graph.json)
+    if auth_config:
+        env_updates["LANGGRAPH_AUTH"] = json.dumps(auth_config)
 
     # 仅设置默认值，不覆盖 Docker / 外部已传入的环境变量
     for k, v in env_updates.items():

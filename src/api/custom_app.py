@@ -41,8 +41,10 @@ import api.trace_routes  # noqa: E402
 import api.feedback_stats  # noqa: E402
 import api.feedback_annotation  # noqa: E402
 import api.experiment  # noqa: E402
+import api.auth_routes  # noqa: E402
 
 ROUTES: list[BaseRoute] = [
+    *api.auth_routes.routes,
     *api.db_config.routes,
     *api.message_feedback.routes,
     *api.auto_title.routes,
@@ -90,6 +92,9 @@ async def _lifespan(app: "Starlette"):
 
 app = Starlette(
     routes=ROUTES,
-    middleware=[Middleware(api.langfuse_metadata.LangfuseMetadataMiddleware)],
+    middleware=[
+        Middleware(api.auth_middleware.AuthMiddleware),
+        Middleware(api.langfuse_metadata.LangfuseMetadataMiddleware),
+    ],
     lifespan=_lifespan,
 )
