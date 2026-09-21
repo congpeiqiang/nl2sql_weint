@@ -28,7 +28,7 @@ import httpx
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from api._common import json_response, parse_body
+from api._common import json_response, parse_body, require_user
 
 _logger = logging.getLogger(__name__)
 
@@ -175,6 +175,13 @@ async def decide_sql_approval(request: Request):
     main_thread_id = str(body.get("main_thread_id") or "")
     decisions = body.get("decisions")
     db_name = str(body.get("db_name") or "")
+
+    # P1 面D：db_name 参数校验
+    if db_name:
+        user = require_user(request)
+        from agent.auth.grants import can_access_db
+        if not can_access_db(user, db_name):
+            return json_response({"ok": False, "error": f"无权访问数据库: {db_name}"}, status=403)
 
     if not _UUID_RE.match(main_thread_id):
         return json_response(

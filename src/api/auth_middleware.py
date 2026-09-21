@@ -38,6 +38,24 @@ def _is_whitelisted(path: str) -> bool:
     return any(path == p or path.startswith(p) for p in _WHITELIST_PREFIXES)
 
 
+# Docker 内部网络来源 IP（容器间通信），用于子 agent 调用父 API 时放行
+_INTERNAL_PREFIXES = (
+    "172.",       # Docker bridge 默认 172.16.0.0/12
+    "10.",        # 自定义 overlay 网络
+    "127.0.0.1",  # localhost
+    "::1",        # IPv6 localhost
+)
+
+
+def _is_internal_request(scope: dict[str, Any]) -> bool:
+    """判断请求是否来自 Docker 内部网络（容器间通信）。"""
+    client = scope.get("client")
+    if not client:
+        return False
+    host = client[0]
+    return any(host.startswith(p) for p in _INTERNAL_PREFIXES)
+
+
 def _parse_headers(scope: dict[str, Any]) -> dict[str, str]:
     """把 ASGI scope 的 headers (list[tuple[bytes, bytes]]) 转成 {str: str}。"""
     result: dict[str, str] = {}
@@ -67,6 +85,18 @@ class AuthMiddleware:
 
         # 白名单放行
         if _is_whitelisted(path):
+            await self.app(scope, receive, send)
+            return
+
+        # Docker 内部网络请求放行（子 agent → 父 API 通信）
+        if _is_internal_request(scope):
+            if "state" not in scope:
+                scope["state"] = {}
+            scope["state"]["user"] = {
+                "user_id": "internal",
+                "display_name": "Internal",
+                "is_admin": False,
+            }
             await self.app(scope, receive, send)
             return
 
@@ -100,11 +130,19 @@ class AuthMiddleware:
         # 注入 user 到 scope state
         if "state" not in scope:
             scope["state"] = {}
-        scope["state"]["user"] = {
+        user_dict = {
             "user_id": user["user_id"],
             "display_name": user["display_name"],
             "is_admin": user["is_admin"],
         }
+        scope["state"]["user"] = user_dict
+
+        # P1: 自动登记用户到 grants 数据库（首次出现时幂等写入）
+        try:
+            from agent.auth.grants import register_user
+            register_user(user["user_id"], user["display_name"])
+        except Exception:  # noqa: BLE001
+            pass  # 登记失败不阻断请求
 
         await self.app(scope, receive, send)
 

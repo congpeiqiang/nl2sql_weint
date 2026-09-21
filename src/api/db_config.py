@@ -28,7 +28,7 @@ import logging
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from api._common import json_response, parse_body
+from api._common import json_response, parse_body, require_user, require_admin
 from mcp_server.db_mcp_server.db.core.db_config_store import DBConfig, get_store
 
 _logger = logging.getLogger(__name__)
@@ -137,12 +137,23 @@ def _scan_wren_projects() -> list[dict]:
 
 # ── 路由 ─────────────────────────────────────────────────
 async def list_configs(request: Request):
-    items = [_masked_with_semantic(d) for d in get_store().list_configs(masked=True)]
+    user = require_user(request)
+    from agent.auth.grants import visible_dbs
+    allowed = visible_dbs(user)
+    items = [
+        _masked_with_semantic(d)
+        for d in get_store().list_configs(masked=True)
+        if d.get("name") in allowed
+    ]
     return json_response({"databases": items})
 
 
 async def get_config(request: Request):
+    user = require_user(request)
     name = request.path_params["name"]
+    from agent.auth.grants import can_access_db
+    if not can_access_db(user, name):
+        return json_response({"error": f"无权访问数据库: {name}"}, status=403)
     try:
         cfg = get_store().get(name)
     except KeyError:
@@ -151,6 +162,7 @@ async def get_config(request: Request):
 
 
 async def upsert_config(request: Request):
+    require_admin(request)
     data = await parse_body(request)
     name = data.get("name")
     if not name:
@@ -175,6 +187,7 @@ async def upsert_config(request: Request):
 
 
 async def delete_config(request: Request):
+    require_admin(request)
     name = request.path_params["name"]
     ok = get_store().delete(name)
     if not ok:
@@ -243,6 +256,7 @@ async def reload_mcp(request: Request):
 
 
 async def test_config(request: Request):
+    require_admin(request)
     name = request.path_params["name"]
     data = await parse_body(request)
     if data:

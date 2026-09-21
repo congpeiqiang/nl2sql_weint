@@ -44,9 +44,11 @@ import api.feedback_annotation  # noqa: E402
 import api.experiment  # noqa: E402
 import api.auth_routes  # noqa: E402
 import api.auth_middleware  # noqa: E402
+import api.auth_admin  # noqa: E402
 
 ROUTES: list[BaseRoute] = [
     *api.auth_routes.routes,
+    *api.auth_admin.routes,
     *api.db_config.routes,
     *api.message_feedback.routes,
     *api.auto_title.routes,

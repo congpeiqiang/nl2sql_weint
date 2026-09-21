@@ -41,7 +41,7 @@ from agent.feedback.store import (
     get_store,
 )
 from agent.eval.bad_types import BAD_TYPES, is_valid_bad_type
-from api._common import json_response, parse_body
+from api._common import json_response, parse_body, require_user
 
 _logger = logging.getLogger(__name__)
 
@@ -442,6 +442,12 @@ async def execute_annotation(request: Request):
     if ann is None:
         return json_response({"error": "标注不存在"}, status=404)
     db_name = str(data.get("db_name", "") or "") or ann.db_name or ""
+    # P1 面D：db_name 参数校验
+    if db_name:
+        user = require_user(request)
+        from agent.auth.grants import can_access_db
+        if not can_access_db(user, db_name):
+            return json_response({"error": f"无权访问数据库: {db_name}"}, status=403)
     try:
         result = await _run_preview(db_name, sql)
     except ValueError as e:
@@ -546,6 +552,12 @@ async def preview_cube_annotation(request: Request):
         return json_response({"error": str(e)}, status=400)
 
     db_name = str(data.get("db_name", "") or "") or ann.db_name or ""
+    # P1 面D：db_name 参数校验
+    if db_name:
+        user = require_user(request)
+        from agent.auth.grants import can_access_db
+        if not can_access_db(user, db_name):
+            return json_response({"error": f"无权访问数据库: {db_name}"}, status=403)
     from agent.utils.wren_call_extract import resolve_wren_ctx_by_db, spec_readable_text
 
     project, conn = resolve_wren_ctx_by_db(db_name)
@@ -635,6 +647,12 @@ async def confirm_annotation(request: Request):
         )
 
     db_name = str(data.get("db_name", "") or "") or ann.db_name or ""
+    # P1 面D：db_name 参数校验
+    if db_name:
+        user = require_user(request)
+        from agent.auth.grants import can_access_db
+        if not can_access_db(user, db_name):
+            return json_response({"error": f"无权访问数据库: {db_name}"}, status=403)
     note = str(data.get("note", "") or "") or ann.note or ""
     annotator = str(data.get("annotator", "") or "") or ann.annotator or ""
 

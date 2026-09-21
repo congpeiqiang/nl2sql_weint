@@ -28,7 +28,7 @@ from pathlib import Path
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from api._common import json_response, parse_body
+from api._common import json_response, parse_body, require_user, require_admin
 from api.db_config import _ensure_mcp_tools, _scan_wren_projects
 from mcp_server.db_mcp_server.db.core.db_config_store import get_store
 
@@ -772,14 +772,44 @@ async def _adopt_git_into(
     }
 
 
+# ── P1 授权辅助 ──────────────────────────────────────────
+def _project_visible(project_path: Path, allowed_dbs: set[str]) -> bool:
+    """语义库是否对用户可见：至少一个关联库在用户的 visible_dbs 中。"""
+    assoc = _associated_dbs(project_path)
+    if not assoc:
+        # 未关联任何库 → 只对管理员可见（admin 的 allowed_dbs = 全量已配置库）
+        return False
+    return bool(set(assoc) & allowed_dbs)
+
+
+def _require_project_access(request: Request, project_path: Path) -> None:
+    """校验用户有权访问该语义库（至少一个关联库可见），否则 403。"""
+    user = require_user(request)
+    if user.get("is_admin"):
+        return
+    from agent.auth.grants import visible_dbs
+    allowed = visible_dbs(user)
+    if not _project_visible(project_path, allowed):
+        from starlette.exceptions import HTTPException
+        raise HTTPException(status_code=403, detail="无权访问该语义库")
+
+
 # ── 路由 ─────────────────────────────────────────────────
 async def list_wren_projects(request: Request):
-    items = [_project_detail(p["path"]) for p in _scan_wren_projects()]
+    user = require_user(request)
+    from agent.auth.grants import visible_dbs
+    allowed = visible_dbs(user)
+    items = [
+        _project_detail(p["path"])
+        for p in _scan_wren_projects()
+        if user.get("is_admin") or _project_visible(Path(p["path"]), allowed)
+    ]
     return json_response({"projects": items})
 
 
 async def associate_local(request: Request):
     """场景 A：关联本地已有目录到某条库配置。"""
+    require_admin(request)
     data = await parse_body(request)
     path = str(data.get("path", "") or "").strip()
     target_db = str(data.get("target_db", "") or "").strip()
@@ -819,6 +849,7 @@ async def from_git(request: Request):
     `_adopt_git_into` 接管（备份本地 → 干净 clone → 整目录交换）。已是 Git 仓库的
     同名目录拒绝接管（它有「更新」按钮）。
     """
+    require_admin(request)
     from agent.utils import git_repo
 
     data = await parse_body(request)
@@ -929,6 +960,7 @@ async def from_git(request: Request):
 
 async def delete_project(request: Request):
     """解绑所有关联 + 删除项目目录（不可逆，需前端二次确认）。"""
+    require_admin(request)
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -965,6 +997,7 @@ async def delete_project(request: Request):
 
 async def build_project(request: Request):
     """重新构建 MDL（context build + memory index，best-effort）。"""
+    require_admin(request)
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -989,6 +1022,7 @@ async def validate_project(request: Request):
     project = _find_project(name)
     if project is None:
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
+    _require_project_access(request, project)
     ok, out = _run_wren(project, "context", "validate")
     summary = _mdl_summary(project)
     summary["name"] = _read_project_name(project)
@@ -1001,6 +1035,7 @@ async def summary_project(request: Request):
     project = _find_project(name)
     if project is None:
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
+    _require_project_access(request, project)
     summary = _mdl_summary(project)
     summary["name"] = _read_project_name(project)
     summary["path"] = str(project.resolve())
@@ -1012,6 +1047,7 @@ async def summary_project(request: Request):
 
 async def create_project(request: Request):
     """Step 1：创建空项目骨架。"""
+    require_admin(request)
     data = await parse_body(request)
     project_name = str(data.get("project_name", "") or "").strip()
     db_name = str(data.get("db_name", "") or "").strip()
@@ -1089,6 +1125,7 @@ async def create_project(request: Request):
 
 async def introspect_project(request: Request):
     """Step 2：连接数据库提取表结构。"""
+    require_admin(request)
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1165,6 +1202,7 @@ async def introspect_project(request: Request):
 
 async def generate_models(request: Request):
     """Step 2b：按选中表生成 models/*.yml 和 relationships.yml。"""
+    require_admin(request)
     import yaml as _yaml
 
     name = request.path_params["name"]
@@ -1284,6 +1322,7 @@ async def knowledge_template(request: Request):
     project = _find_project(name)
     if project is None:
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
+    _require_project_access(request, project)
 
     from agent.utils.wren_templates import all_templates
 
@@ -1302,6 +1341,7 @@ async def save_knowledge(request: Request):
 
     返回 saved / deleted / rejected；rejected 是非法的路径（前端据此报错，不静默吞掉）。
     """
+    require_admin(request)
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1424,6 +1464,7 @@ async def open_directory(request: Request):
     project = _find_project(name)
     if project is None:
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
+    _require_project_access(request, project)
 
     import platform
     import subprocess as _sp
@@ -1445,6 +1486,7 @@ async def open_directory(request: Request):
 
 async def push_to_git(request: Request):
     """Step 5：推送语义库至 Git 远程仓库。"""
+    require_admin(request)
     from agent.utils import git_repo
 
     name = request.path_params["name"]
@@ -1601,6 +1643,7 @@ async def read_knowledge(request: Request):
     project = _find_project(name)
     if project is None:
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
+    _require_project_access(request, project)
 
     from wren.memory.markdown import parse_query_markdown
 
@@ -1664,6 +1707,7 @@ async def read_knowledge(request: Request):
 
 async def ai_generate_knowledge(request: Request):
     """AI 分析数据库结构，生成业务知识草稿。"""
+    require_admin(request)
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1784,6 +1828,7 @@ async def git_status(request: Request):
     project = _find_project(name)
     if project is None:
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
+    _require_project_access(request, project)
 
     if not (project / ".git").exists():
         # 非 Git 项目：把「接管会覆盖掉哪些本地内容」一并回给前端，「接入 Git」对话框
@@ -1849,6 +1894,7 @@ async def git_refs(request: Request):
     project = _find_project(name)
     if project is None:
         return json_response({"error": f"语义库 '{name}' 不存在"}, status=404)
+    _require_project_access(request, project)
 
     if not (project / ".git").exists():
         return json_response({
@@ -1882,6 +1928,7 @@ async def git_pull(request: Request):
     拒绝行为。生产背景：平台「保存知识」只写盘不提交（wren_semantic.save_knowledge），
     所以工作树常常是脏的，只给一句拒绝提示会让更新按钮变成死路。
     """
+    require_admin(request)
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1925,6 +1972,7 @@ async def git_adopt(request: Request):
     「更新」按钮，不该再走覆盖语义）；本地有自建内容时回 200 + `code="local_content"`
     等用户确认（前端据此渲染确认勾选），**确认前不动任何文件**。
     """
+    require_admin(request)
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
