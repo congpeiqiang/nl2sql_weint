@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from starlette.applications import Starlette  # noqa: E402
 from starlette.middleware import Middleware  # noqa: E402
+from starlette.middleware.cors import CORSMiddleware  # noqa: E402
 from starlette.routing import BaseRoute  # noqa: E402
 
 _logger = logging.getLogger(__name__)
@@ -94,6 +95,19 @@ async def _lifespan(app: "Starlette"):
 app = Starlette(
     routes=ROUTES,
     middleware=[
+        # CORS 必须最外层：跨域 cookie 需要 Allow-Credentials + 精确 Origin
+        Middleware(
+            CORSMiddleware,
+            allow_origins=[
+                "http://localhost:3000",
+                "http://localhost:8080",
+                "http://192.168.25.64:8080",
+                "http://192.168.25.34:8080",
+            ],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        ),
         Middleware(api.auth_middleware.AuthMiddleware),
         Middleware(api.langfuse_metadata.LangfuseMetadataMiddleware),
     ],
