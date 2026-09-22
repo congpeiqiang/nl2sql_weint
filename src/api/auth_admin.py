@@ -40,7 +40,7 @@ async def list_user_grants(request: Request):
 
 
 async def grant_user_db(request: Request):
-    """授权用户访问某库。body: {db_name, level?}"""
+    """授权用户访问某库。body: db_name(必填), level(可选,默认 query)"""
     require_admin(request)
     uid = request.path_params["uid"]
     data = await parse_body(request)

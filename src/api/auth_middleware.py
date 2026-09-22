@@ -89,7 +89,11 @@ class AuthMiddleware:
             return
 
         # Docker 内部网络请求放行（子 agent → 父 API 通信）
-        if _is_internal_request(scope):
+        # 关键：只有**没有 Cookie** 的内部请求才旁路（子 agent SDK 调用不带 Cookie）。
+        # nginx 转发的用户请求也来自 Docker 网络（172.x），但带着浏览器 Cookie，
+        # 必须走正常鉴权。
+        headers = _parse_headers(scope)
+        if _is_internal_request(scope) and not headers.get("cookie", ""):
             if "state" not in scope:
                 scope["state"] = {}
             scope["state"]["user"] = {
@@ -115,7 +119,6 @@ class AuthMiddleware:
         # 提取 + 校验 token
         from agent.auth.token import extract_token_from_headers, verify_token
 
-        headers = _parse_headers(scope)
         token = extract_token_from_headers(headers)
 
         if not token:

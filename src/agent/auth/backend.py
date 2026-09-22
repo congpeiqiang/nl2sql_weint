@@ -41,10 +41,10 @@ async def authenticate(headers: dict) -> dict:
     if not user:
         raise Auth.exceptions.AuthenticationError("Invalid or expired token")
 
-    # langgraph 要求返回 dict，会自动包装成 AuthCredentials + BaseUser
-    # "display_name" → user 的显示名
-    # "is_staff" → 管理员标志（langgraph 内部用）
+    # langgraph SDK 要求返回 dict，会自动包装成 BaseUser
+    # "identity" → 用户唯一标识（必填）
+    # "display_name" → 显示名（选填）
     return {
+        "identity": user["user_id"],
         "display_name": user["display_name"],
-        "is_staff": user["is_admin"],
     }

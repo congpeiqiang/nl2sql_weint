@@ -217,9 +217,9 @@ def list_user_grants(user_id: str) -> list[dict[str, str]]:
 def _all_configured_dbs() -> set[str]:
     """从 corpus/db_config.json 获取所有已配置的库名。"""
     try:
-        from agent.shared.db_config_store import get_db_config_store
-        store = get_db_config_store()
-        configs = store.list_configs()
+        from mcp_server.db_mcp_server.db.core.db_config_store import get_store
+        store = get_store()
+        configs = store.list_configs(masked=True)
         return {c.get("name", "") for c in configs if c.get("name")}
     except Exception:
         logger.warning("[auth.grants] 读取 db_config 失败，返回空集", exc_info=True)

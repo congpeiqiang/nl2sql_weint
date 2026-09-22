@@ -142,7 +142,8 @@ def extract_token_from_headers(headers: dict[str, str]) -> str | None:
         if part.startswith("nl2sql_token="):
             val = part[len("nl2sql_token="):]
             if val:
-                return val
+                # Starlette set_cookie 自动加双引号，浏览器原样回传，需剥掉
+                return val.strip('"')
 
     # 2. Authorization: Bearer <token>
     auth = headers.get("authorization", "")
