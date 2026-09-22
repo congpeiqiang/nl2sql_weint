@@ -231,9 +231,19 @@ async def thread_run_status(request: Request) -> JSONResponse:
 
     base = _base_url()
     timeout = httpx.Timeout(10.0, connect=5.0)
+    # 转发原始请求的认证头（Cookie/Authorization），供 LangGraph auth 校验
+    auth_headers: dict[str, str] = {}
+    cookie = request.headers.get("cookie")
+    if cookie:
+        auth_headers["cookie"] = cookie
+    authorization = request.headers.get("authorization")
+    if authorization:
+        auth_headers["authorization"] = authorization
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as http:
-            state_resp = await http.get(f"{base}/threads/{thread_id}/state")
+            state_resp = await http.get(
+                f"{base}/threads/{thread_id}/state", headers=auth_headers
+            )
             if state_resp.status_code == 404:
                 return json_response({"ok": False, "error": "thread not found"}, 404)
             if state_resp.status_code != 200:
@@ -244,7 +254,9 @@ async def thread_run_status(request: Request) -> JSONResponse:
             state = state_resp.json() or {}
 
             runs_resp = await http.get(
-                f"{base}/threads/{thread_id}/runs", params={"limit": _RUNS_PAGE}
+                f"{base}/threads/{thread_id}/runs",
+                params={"limit": _RUNS_PAGE},
+                headers=auth_headers,
             )
             if runs_resp.status_code != 200:
                 return json_response(

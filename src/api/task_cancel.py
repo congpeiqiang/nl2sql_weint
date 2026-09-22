@@ -47,11 +47,15 @@ def _base_url() -> str:
 
 
 async def _read_main_entry(
-    http: httpx.AsyncClient, base: str, main_thread_id: str, task_id: str
+    http: httpx.AsyncClient, base: str, main_thread_id: str, task_id: str,
+    auth_headers: dict[str, str] | None = None,
 ) -> dict | None:
     """读主线程 state 中 async_tasks[task_id] 条目。"""
     try:
-        resp = await http.get(f"{base}/threads/{main_thread_id}/state")
+        resp = await http.get(
+            f"{base}/threads/{main_thread_id}/state",
+            headers=auth_headers or {},
+        )
         if resp.status_code != 200:
             return None
         values = (resp.json() or {}).get("values") or {}
@@ -63,11 +67,16 @@ async def _read_main_entry(
 
 
 async def _get_latest_run(
-    http: httpx.AsyncClient, base: str, thread_id: str
+    http: httpx.AsyncClient, base: str, thread_id: str,
+    auth_headers: dict[str, str] | None = None,
 ) -> dict | None:
     """读子线程最新 run（含 run_id/status）。"""
     try:
-        resp = await http.get(f"{base}/threads/{thread_id}/runs", params={"limit": 1})
+        resp = await http.get(
+            f"{base}/threads/{thread_id}/runs",
+            params={"limit": 1},
+            headers=auth_headers or {},
+        )
         if resp.status_code != 200:
             return None
         runs = resp.json() or []
@@ -102,6 +111,7 @@ async def _mark_main_cancelled(
     task_id: str,
     entry: dict,
     status_override: str = "cancelled",
+    auth_headers: dict[str, str] | None = None,
 ) -> None:
     """回写主线程 async_tasks[task_id] → 终态（重试 + watcher 保活）。
 
@@ -128,6 +138,7 @@ async def _mark_main_cancelled(
                         "values": {"async_tasks": {task_id: updated}},
                         "as_node": "__start__",
                     },
+                    headers=auth_headers or {},
                 )
                 if resp.status_code == 200:
                     _logger.info(
@@ -163,11 +174,22 @@ async def cancel_task(request: Request):
     from api._common import require_thread
     require_thread(request, main_thread_id)
 
+    # 转发原始请求的认证头（Cookie/Authorization），供内部 LangGraph API 校验
+    auth_headers: dict[str, str] = {}
+    cookie = request.headers.get("cookie")
+    if cookie:
+        auth_headers["cookie"] = cookie
+    authorization = request.headers.get("authorization")
+    if authorization:
+        auth_headers["authorization"] = authorization
+
     base = _base_url()
     timeout = httpx.Timeout(60.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as http:
         # 1. 读主线程 async_tasks 条目
-        entry = await _read_main_entry(http, base, main_thread_id, task_id)
+        entry = await _read_main_entry(
+            http, base, main_thread_id, task_id, auth_headers=auth_headers
+        )
         if entry is None:
             return json_response(
                 {"ok": False, "error": "找不到该任务（可能已从会话中移除）"},
@@ -185,7 +207,9 @@ async def cancel_task(request: Request):
             )
 
         # 2. 判断子 run 是否仍可取消
-        latest = await _get_latest_run(http, base, task_id)
+        latest = await _get_latest_run(
+            http, base, task_id, auth_headers=auth_headers
+        )
         run_status = latest.get("status") if latest else None
         pending_approval = bool(entry.get("awaiting_approval"))
 
@@ -203,6 +227,7 @@ async def cancel_task(request: Request):
                     task_id,
                     entry,
                     status_override=run_status or "cancelled",
+                    auth_headers=auth_headers,
                 )
             return json_response(
                 {
@@ -221,6 +246,7 @@ async def cancel_task(request: Request):
                 resp = await http.post(
                     f"{base}/threads/{task_id}/runs/{run_id}/cancel",
                     params={"action": "interrupt"},
+                    headers=auth_headers,
                 )
                 if resp.status_code >= 400:
                     _logger.warning(
@@ -231,7 +257,9 @@ async def cancel_task(request: Request):
                 _logger.warning("[task_cancel] 取消子 run 请求失败: %s", e)
 
     # 4. 回写主线程 async_tasks → cancelled（重试 + watcher 保活）
-    await _mark_main_cancelled(base, main_thread_id, task_id, entry)
+    await _mark_main_cancelled(
+        base, main_thread_id, task_id, entry, auth_headers=auth_headers
+    )
 
     return json_response(
         {
