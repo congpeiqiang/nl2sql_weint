@@ -23,8 +23,10 @@ async def authenticate(headers: dict) -> dict:
     """从 Cookie/Bearer 提取 token → 校验 → 返回 user dict。
 
     langgraph SDK 自动把 headers dict 传进来（key 已小写）。
-    返回的 dict 会被 langgraph 转成 AuthCredentials + BaseUser，
-    其中 display_name 进 configurable["langgraph_auth_user_id"]。
+    返回的 dict 会被 langgraph 转成 AuthCredentials + BaseUser。
+    identity → 用户唯一标识；display_name → 显示名。
+    注：LangGraph auth 结果不会自动注入 configurable，
+    langfuse_metadata 中间件通过 scope["state"]["user"] 读取用户身份。
     """
     # headers 可能是 {str: str} 或 {bytes: bytes}，统一处理
     str_headers: dict[str, str] = {}
@@ -35,11 +37,15 @@ async def authenticate(headers: dict) -> dict:
 
     token = extract_token_from_headers(str_headers)
     if not token:
-        raise Auth.exceptions.AuthenticationError("Missing authentication token")
+        raise Auth.exceptions.HTTPException(
+            status_code=401, detail="Missing authentication token"
+        )
 
     user = verify_token(token)
     if not user:
-        raise Auth.exceptions.AuthenticationError("Invalid or expired token")
+        raise Auth.exceptions.HTTPException(
+            status_code=401, detail="Invalid or expired token"
+        )
 
     # langgraph SDK 要求返回 dict，会自动包装成 BaseUser
     # "identity" → 用户唯一标识（必填）
