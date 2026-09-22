@@ -154,6 +154,13 @@ class LangfuseMetadataMiddleware:
         uid = configurable.get("langgraph_auth_user_id")
         if uid and not merged.get("langfuse_user_id"):
             merged["langfuse_user_id"] = str(uid)
+        # P2：登记会话归属（幂等，首次 run 创建时写入）
+        if uid and tid:
+            try:
+                from agent.auth.grants import claim_thread
+                claim_thread(tid, str(uid))
+            except Exception:  # noqa: BLE001
+                _logger.debug("[langfuse_metadata] claim_thread 失败", exc_info=True)
 
         # ── 业务元数据（透传到 trace metadata）──
         if "workspace" not in merged:
@@ -170,6 +177,13 @@ class LangfuseMetadataMiddleware:
         db_name = configurable.get("db_name", "")
         if db_name and "db_name" not in merged:
             merged["db_name"] = db_name
+        # P2：记录会话用过的库（供 trace/报告库维度判定）
+        if db_name and tid:
+            try:
+                from agent.auth.grants import record_thread_db
+                record_thread_db(tid, db_name)
+            except Exception:  # noqa: BLE001
+                _logger.debug("[langfuse_metadata] record_thread_db 失败", exc_info=True)
         # S5 数据漂移可观测化：数据快照（时间戳 + 库名）写入 trace metadata，
         # 供跨 run 比对「是否同一数据窗口」——离线评测按快照分组，指纹/时点不同
         # 不当作模型差异比较（同题多跑归因 S5）。

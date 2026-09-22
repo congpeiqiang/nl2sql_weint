@@ -89,7 +89,7 @@ if ($LASTEXITCODE -ne 0) { throw "next.config.ts 上传失败" }
 
 Write-Host "== 5/6 服务器拼接 + 解压 + 重建镜像 + 三步重启 ==" -ForegroundColor Cyan
 # docker-compose v1 需 stop/rm/up 三步
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && rm -f ${tarFile}.part* && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend 2>&1 | tail -3 && docker-compose stop frontend && docker-compose rm -f frontend && docker-compose up -d frontend"
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && rm -f ${tarFile}.part* && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend 2>&1 | tail -3 && docker-compose stop frontend && docker-compose rm -f frontend && docker rm -f nl2sql-app_frontend_1 2>/dev/null; cd ${AppDir} && docker-compose up -d frontend"
 if ($LASTEXITCODE -ne 0) { throw "构建或重启失败" }
 
 Write-Host "== 6/6 验证 ==" -ForegroundColor Cyan

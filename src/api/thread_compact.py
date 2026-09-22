@@ -247,6 +247,10 @@ async def compact_thread(request: Request):
     if not _UUID_RE.match(thread_id):
         return Response("无效的会话 ID", status_code=400, media_type="text/plain")
 
+    # P2：校验会话归属
+    from api._common import require_thread
+    require_thread(request, thread_id)
+
     base = _base_url()
     timeout = httpx.Timeout(180.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as http:

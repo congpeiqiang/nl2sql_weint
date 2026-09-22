@@ -159,6 +159,10 @@ async def cancel_task(request: Request):
             {"ok": False, "error": "main_thread_id 缺失或非法"}, status=400
         )
 
+    # P2：校验主会话归属
+    from api._common import require_thread
+    require_thread(request, main_thread_id)
+
     base = _base_url()
     timeout = httpx.Timeout(60.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as http:

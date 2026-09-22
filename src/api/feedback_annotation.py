@@ -342,6 +342,12 @@ async def _backfill_annotation(thread_id: str, message_id: str) -> dict | None:
 
 
 async def list_annotations(request: Request):
+    from api._common import require_user
+    from agent.auth.grants import owned_thread
+
+    user = require_user(request)
+    is_admin = user.get("is_admin", False)
+
     status = request.query_params.get("status", "") or None
     try:
         limit = int(request.query_params.get("limit", 50))
@@ -351,6 +357,9 @@ async def list_annotations(request: Request):
     if status and status not in ANNOTATION_STATUSES:
         return json_response({"error": f"status 必须是 {ANNOTATION_STATUSES} 之一"}, status=400)
     records = store.list_annotations(status=status, limit=limit)
+    # P2：非 admin 只返回自己拥有的会话的反馈
+    if not is_admin:
+        records = [r for r in records if owned_thread(user, r.thread_id)]
     # 列表标题依赖 question：入队时为空，这里从本地快照快速补齐（无网络读取）
     records = [_fill_annotation_from_snapshot(r) for r in records]
     return json_response(

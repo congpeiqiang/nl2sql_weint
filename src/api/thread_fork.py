@@ -105,9 +105,15 @@ async def _find_anchor_checkpoint(
 
 
 async def fork_thread(request: Request):
+    from api._common import require_thread
+    from agent.auth.grants import claim_thread
+
     thread_id = request.path_params["thread_id"]
     if not _UUID_RE.match(thread_id):
         return json_response({"error": "无效的会话 ID"}, status=400)
+
+    # P2：校验源会话归属
+    user = require_thread(request, thread_id)
 
     data = await parse_body(request)
     message_id = str(data.get("message_id") or "").strip() or None
@@ -130,6 +136,11 @@ async def fork_thread(request: Request):
         new_tid = new_thread.get("thread_id")
         if not new_tid:
             return json_response({"error": "复制会话失败: 缺少新会话 ID"}, status=502)
+
+        # P2：登记分叉会话归属
+        user_id = user.get("user_id") if user else None
+        if user_id:
+            claim_thread(new_tid, user_id)
 
         # 2. （可选）定位锚点 checkpoint 并回退 head
         if message_id:

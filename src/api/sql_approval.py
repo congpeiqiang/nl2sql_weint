@@ -187,6 +187,11 @@ async def decide_sql_approval(request: Request):
         return json_response(
             {"ok": False, "error": "main_thread_id 缺失或非法"}, status=400
         )
+
+    # P2：校验主会话归属
+    from api._common import require_thread
+    require_thread(request, main_thread_id)
+
     err = _validate_decisions(decisions)
     if err:
         return json_response({"ok": False, "error": err}, status=400)

@@ -294,6 +294,12 @@ def _search(conn: sqlite3.Connection, q: str, limit: int) -> list[dict]:
 # ── 端点 ────────────────────────────────────────────────────────────────
 
 async def search_threads(request: Request):
+    from api._common import require_user
+    from agent.auth.grants import owned_thread
+
+    user = require_user(request)
+    is_admin = user.get("is_admin", False)
+
     q = (request.query_params.get("q") or "").strip()
     if not q:
         return json_response({"ok": False, "error": "q 必填"}, status=400)
@@ -313,6 +319,10 @@ async def search_threads(request: Request):
         results = _search(conn, q, limit)
     finally:
         conn.close()
+
+    # P2：非 admin 只返回自己拥有的会话
+    if not is_admin:
+        results = [r for r in results if owned_thread(user, r["thread_id"])]
 
     return json_response({"ok": True, "query": q, "results": results})
 

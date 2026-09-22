@@ -88,7 +88,7 @@ ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.p
 if ($LASTEXITCODE -ne 0) { throw "构建失败" }
 
 Write-Host "== 4/5 三步重启（v1 compose 需 stop/rm/up）==" -ForegroundColor Cyan
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && docker-compose stop langgraph-api && docker-compose rm -f langgraph-api && docker-compose up -d langgraph-api"
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && docker-compose stop langgraph-api && docker-compose rm -f langgraph-api && docker rm -f nl2sql-app_langgraph-api_1 2>/dev/null; cd ${AppDir} && docker-compose up -d langgraph-api"
 
 Write-Host "== 5/5 等待启动并验证 ==" -ForegroundColor Cyan
 Start-Sleep -Seconds 75

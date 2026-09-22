@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -28,6 +29,7 @@ from starlette.responses import Response
 from starlette.routing import BaseRoute, Route
 
 from agent.workspace_manager import get_workspace_manager
+from api._common import json_response, require_user
 
 _logger = logging.getLogger(__name__)
 
@@ -99,6 +101,36 @@ def _quote_filename(name: str) -> str:
     return urllib.parse.quote(name, safe="-_.~")
 
 
+async def list_reports(request: Request):
+    """列出报告目录下的所有文件（P2 简化版：不做库维度过滤）。"""
+    require_user(request)
+    report_dir = get_workspace_manager().report_dir
+    if not report_dir.is_dir():
+        return json_response({"reports": []})
+
+    reports = []
+    for p in report_dir.iterdir():
+        if not p.is_file():
+            continue
+        # 只列出常见报告/图表文件
+        if p.suffix.lower() not in (".md", ".html", ".csv", ".json"):
+            continue
+        try:
+            stat = p.stat()
+            reports.append({
+                "filename": p.name,
+                "size": stat.st_size,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            })
+        except OSError:
+            continue
+
+    # 按修改时间倒序
+    reports.sort(key=lambda r: r["mtime"], reverse=True)
+    return json_response({"reports": reports, "count": len(reports)})
+
+
 routes: list[BaseRoute] = [
+    Route("/api/reports", list_reports, methods=["GET"]),
     Route("/api/reports/{filename}", get_report_file, methods=["GET", "HEAD"]),
 ]
