@@ -37,6 +37,13 @@ async def authenticate(headers: dict) -> dict:
 
     token = extract_token_from_headers(str_headers)
     if not token:
+        # 内部请求旁路：无 token + 无 X-Forwarded-For = 来自 Docker 内部（如 sync 循环）
+        # nginx 转发的外部请求一定会带 X-Forwarded-For
+        if not str_headers.get("x-forwarded-for"):
+            return {
+                "identity": "internal",
+                "display_name": "Internal",
+            }
         raise Auth.exceptions.HTTPException(
             status_code=401, detail="Missing authentication token"
         )
