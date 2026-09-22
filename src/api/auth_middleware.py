@@ -93,7 +93,17 @@ class AuthMiddleware:
         # nginx 转发的用户请求也来自 Docker 网络（172.x），但带着浏览器 Cookie，
         # 必须走正常鉴权。
         headers = _parse_headers(scope)
-        if _is_internal_request(scope) and not headers.get("cookie", ""):
+        has_cookie = bool(headers.get("cookie", ""))
+        is_internal = _is_internal_request(scope)
+        # 调试日志：显示请求来源和 cookie 状态
+        if path.startswith("/threads/") or path.startswith("/runs"):
+            client = scope.get("client")
+            client_host = client[0] if client else "unknown"
+            logger.info(
+                "[auth] path=%s client=%s is_internal=%s has_cookie=%s",
+                path, client_host, is_internal, has_cookie
+            )
+        if is_internal and not has_cookie:
             if "state" not in scope:
                 scope["state"] = {}
             scope["state"]["user"] = {
