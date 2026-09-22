@@ -143,52 +143,52 @@ def dynamic_prompt(request: ModelRequest) -> str:
             db_name = _cfg().get("configurable", {}).get("db_name", "") if _cfg is not None else ""
         except Exception:
             db_name = ""
-        if not db_name:
-            db_name = "imdb"  # 默认库
-        modeled = get_detector().is_modeled(db_name)
+        # 未配置数据库时保持空串，不硬编码默认库；跳过路由注入
+        if db_name:
+            modeled = get_detector().is_modeled(db_name)
 
-        if modeled:
-            prefix = wrenai_server_name(db_name)
-            routing = (
-                "\n\n## 查询通道路由（重要）\n"
-                f"当前数据库: `{db_name}` —— **已在 Wren 语义层建模**。\n"
-                f"使用语义层工具链：`{prefix}_get_mdl` / `{prefix}_describe_schema` / "
-                f"`{prefix}_recall_queries` 等取 schema，最终用语义层 "
-                f"`{prefix}_run_sql(sql, limit?)` 执行。\n"
-            )
-            # ── Cube 摘要注入 ──────────────────────────────
-            # 列出可用 Cube，让 LLM 在策略选择时就知道能否走 Cube 快速通道
-            try:
-                project_path = get_detector().project_path_for(db_name)
-                if project_path:
-                    from pathlib import Path as _Path
-                    cubes_dir = _Path(project_path) / "cubes"
-                    if cubes_dir.is_dir():
-                        cube_names = sorted(
-                            d.name for d in cubes_dir.iterdir()
-                            if d.is_dir() and (d / "metadata.yml").exists()
-                        )
-                        if cube_names:
-                            routing += (
-                                f"\n可用 Cube（优先使用 Strategy C 快速通道）：{', '.join(f'`{c}`' for c in cube_names)}\n"
-                                f"调用 `{prefix}_list_cubes()` 查看详情，匹配则用 "
-                                f"`{prefix}_query_cube(cube, measures, dimensions)` 直接查询，跳过完整流水线。\n"
+            if modeled:
+                prefix = wrenai_server_name(db_name)
+                routing = (
+                    "\n\n## 查询通道路由（重要）\n"
+                    f"当前数据库: `{db_name}` —— **已在 Wren 语义层建模**。\n"
+                    f"使用语义层工具链：`{prefix}_get_mdl` / `{prefix}_describe_schema` / "
+                    f"`{prefix}_recall_queries` 等取 schema，最终用语义层 "
+                    f"`{prefix}_run_sql(sql, limit?)` 执行。\n"
+                )
+                # ── Cube 摘要注入 ──────────────────────────────
+                # 列出可用 Cube，让 LLM 在策略选择时就知道能否走 Cube 快速通道
+                try:
+                    project_path = get_detector().project_path_for(db_name)
+                    if project_path:
+                        from pathlib import Path as _Path
+                        cubes_dir = _Path(project_path) / "cubes"
+                        if cubes_dir.is_dir():
+                            cube_names = sorted(
+                                d.name for d in cubes_dir.iterdir()
+                                if d.is_dir() and (d / "metadata.yml").exists()
                             )
-            except Exception:  # noqa: BLE001
-                pass
-        else:
-            routing = (
-                "\n\n## 查询通道路由（重要）\n"
-                f"当前数据库: `{db_name}` —— **未在语义层建模**。\n"
-                "不要用 wrenai 语义层工具（get_mdl/describe_schema/run_sql 等）查询该库，"
-                "wrenai 语义层工具按库绑定专属 server，当前库没有对应 server，"
-                "会报 `table not found`/`INVALID_SQL`。\n"
-                "改用直连工具：\n"
-                f"- `dbmcp_get_db_info(db_name='{db_name}')` 获取表清单\n"
-                f"- `dbmcp_run_sql(sql=..., db_name='{db_name}')` 直接执行 SQL\n"
-                "- 若误用语义层 run_sql 且报 `not found`，立即改用 `dbmcp_run_sql`，不要进入纠错循环\n"
-            )
-        prompt += routing
+                            if cube_names:
+                                routing += (
+                                    f"\n可用 Cube（优先使用 Strategy C 快速通道）：{', '.join(f'`{c}`' for c in cube_names)}\n"
+                                    f"调用 `{prefix}_list_cubes()` 查看详情，匹配则用 "
+                                    f"`{prefix}_query_cube(cube, measures, dimensions)` 直接查询，跳过完整流水线。\n"
+                                )
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                routing = (
+                    "\n\n## 查询通道路由（重要）\n"
+                    f"当前数据库: `{db_name}` —— **未在语义层建模**。\n"
+                    "不要用 wrenai 语义层工具（get_mdl/describe_schema/run_sql 等）查询该库，"
+                    "wrenai 语义层工具按库绑定专属 server，当前库没有对应 server，"
+                    "会报 `table not found`/`INVALID_SQL`。\n"
+                    "改用直连工具：\n"
+                    f"- `dbmcp_get_db_info(db_name='{db_name}')` 获取表清单\n"
+                    f"- `dbmcp_run_sql(sql=..., db_name='{db_name}')` 直接执行 SQL\n"
+                    "- 若误用语义层 run_sql 且报 `not found`，立即改用 `dbmcp_run_sql`，不要进入纠错循环\n"
+                )
+            prompt += routing
     except Exception:  # noqa: BLE001  路由注入失败不影响正常流程
         pass
 
