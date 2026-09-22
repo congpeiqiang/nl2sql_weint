@@ -272,6 +272,7 @@ async def _async_sync_loop(
     query_header_entry = None    # 本任务 query_headers 条目（2c 写入时赋值，供 M-T5c 描述兜底）
     description_written = False  # 是否已把任务描述 merge 进 async_tasks（M-T5c，一次性）
     failure_reported_local = False  # 方案1：本 sync 线程内失败汇报是否已尝试（去重，state 标记兜底跨线程）
+    success_notified_local = False  # 子任务成功后是否已通知主 agent 续跑（去重，只触发一次）
     # ── P1-3 SQL 审批等待状态 ──
     approval_pending = False          # 子 run 正停在审批 interrupt 上
     approval_relayed = False          # awaiting_approval 已写入主线程 async_tasks
@@ -908,6 +909,18 @@ async def _async_sync_loop(
                         sub_thread_id,
                         agent_name,
                         run_status,
+                    )
+
+                # ── 成功续跑：子任务完成后通知主 agent 生成图表/报告 ──
+                if (
+                    async_tasks_written
+                    and active_queries_cleared
+                    and run_status == "success"
+                    and not success_notified_local
+                ):
+                    success_notified_local = True
+                    await _notify_main_agent_continue(
+                        client, main_thread_id, agent_name
                     )
 
                 # async_tasks + active_queries=false + 最终 steps 都落地后，进入固定宽限期再退出。
