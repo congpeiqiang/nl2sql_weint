@@ -97,6 +97,86 @@ def find_user(username: str) -> dict[str, Any] | None:
     return None
 
 
+# ── CRUD（管理员 API，写文件 + 自动清缓存）──────────────
+
+def _save_users(users: list[dict[str, Any]]) -> None:
+    """写入用户列表并清除缓存（原子写：先 tmp 再 rename）。"""
+    global _users_cache
+    path = _users_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(users, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+    _users_cache = None
+    logger.info("[auth] 用户文件已写入，共 %d 个用户", len(users))
+
+
+def add_user(
+    user_id: str,
+    password: str,
+    display_name: str = "",
+    is_admin: bool = False,
+) -> dict[str, Any]:
+    """新增用户。返回新用户 dict（不含 password_hash）。"""
+    users = load_users()
+    if any(u.get("user_id") == user_id for u in users):
+        raise ValueError(f"用户 '{user_id}' 已存在")
+    if not user_id or not user_id.strip():
+        raise ValueError("user_id 不能为空")
+    if not password or len(password) < 4:
+        raise ValueError("密码至少 4 位")
+    new_user = {
+        "user_id": user_id.strip(),
+        "password_hash": _hash_password(password),
+        "display_name": display_name.strip() or user_id.strip(),
+        "is_admin": bool(is_admin),
+    }
+    users.append(new_user)
+    _save_users(users)
+    return {k: v for k, v in new_user.items() if k != "password_hash"}
+
+
+def update_user(
+    user_id: str,
+    password: str | None = None,
+    display_name: str | None = None,
+    is_admin: bool | None = None,
+) -> dict[str, Any]:
+    """修改用户。只更新传入的字段。返回更新后的 dict（不含 password_hash）。"""
+    users = load_users()
+    target = None
+    for u in users:
+        if u.get("user_id") == user_id:
+            target = u
+            break
+    if target is None:
+        raise ValueError(f"用户 '{user_id}' 不存在")
+    if password is not None:
+        if len(password) < 4:
+            raise ValueError("密码至少 4 位")
+        target["password_hash"] = _hash_password(password)
+    if display_name is not None:
+        target["display_name"] = display_name.strip()
+    if is_admin is not None:
+        target["is_admin"] = bool(is_admin)
+    _save_users(users)
+    return {k: v for k, v in target.items() if k != "password_hash"}
+
+
+def remove_user(user_id: str) -> None:
+    """删除用户。"""
+    users = load_users()
+    new_users = [u for u in users if u.get("user_id") != user_id]
+    if len(new_users) == len(users):
+        raise ValueError(f"用户 '{user_id}' 不存在")
+    if not new_users:
+        raise ValueError("不能删除最后一个用户")
+    _save_users(new_users)
+
+
 def verify_password(username: str, password: str) -> User | None:
     """校验用户名密码 → User 或 None。"""
     user = find_user(username)
