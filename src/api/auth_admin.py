@@ -69,8 +69,17 @@ async def revoke_user_db(request: Request):
     return json_response({"ok": True, "user_id": uid, "db_name": db})
 
 
+async def reload_users(request: Request):
+    """重载 auth_users.json（管理员编辑文件后调用，免重启生效）。"""
+    require_admin(request)
+    from agent.auth.users import reload_users as _reload
+    users = _reload()
+    return json_response({"ok": True, "count": len(users)})
+
+
 routes: list[BaseRoute] = [
     Route("/api/auth/users", list_users, methods=["GET"]),
+    Route("/api/auth/users/reload", reload_users, methods=["POST"]),
     Route("/api/auth/users/{uid}/grants", list_user_grants, methods=["GET"]),
     Route("/api/auth/users/{uid}/grants", grant_user_db, methods=["POST"]),
     Route("/api/auth/users/{uid}/grants/{db}", revoke_user_db, methods=["DELETE"]),

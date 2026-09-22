@@ -54,6 +54,15 @@ def _default_users() -> list[dict[str, Any]]:
     ]
 
 
+def reload_users() -> list[dict[str, Any]]:
+    """清除缓存并重新加载用户列表（管理员编辑 JSON 后调用，免重启生效）。"""
+    global _users_cache
+    _users_cache = None
+    users = load_users()
+    logger.info("[auth] 用户列表已重载，共 %d 个用户", len(users))
+    return users
+
+
 def load_users() -> list[dict[str, Any]]:
     """加载用户列表（惰性加载，进程内缓存）。"""
     global _users_cache
