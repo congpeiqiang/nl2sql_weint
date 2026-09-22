@@ -199,6 +199,9 @@ async def list_datasets(request: Request):
     note：给前端「数据集为空」与「读取失败」以可区分原因（两者此前都返回空数组，
     前端无法判断该显示「暂无数据集」还是「加载失败」）。
     """
+    from api._common import require_admin
+    require_admin(request)
+
     from agent.trace.langfuse_client import get_client
 
     client = get_client()
@@ -236,6 +239,8 @@ async def list_datasets(request: Request):
 
 async def prompt_labels(request: Request):
     """列出参与实验的 Langfuse prompt 可用 labels（label A/B 入口）。"""
+    from api._common import require_admin
+    require_admin(request)
     name = (request.query_params.get("name") or "").strip()
     names = [name] if name else list(PROMPT_NAMES)
     from agent.trace.langfuse_client import get_client
@@ -264,6 +269,9 @@ async def skill_refs(request: Request):
     → 额外并入本地已打/已推 refs（离线可用）；生产容器代码目录无 .git → 纯远程。
     origin 取 `SKILLS_GIT_REMOTE`（未配置且无本地仓库 → 空 + note）。
     """
+    from api._common import require_admin
+    require_admin(request)
+
     from agent.utils.skills_versioning import (
         _default_skills_base,
         effective_origin,
@@ -325,6 +333,9 @@ async def semantic_refs(request: Request):
     fetch）。本地仓库 refs 并入（dev / 已 fetch 的版本）。本地目录未绑 git → 只出本地
     refs（通常为空）+ note。
     """
+    from api._common import require_admin
+    require_admin(request)
+
     db = (request.query_params.get("db") or "").strip()
     if not db:
         return json_response({"error": "db 必填（如 ?db=chinook_aliyun）"}, status=400)
@@ -386,6 +397,9 @@ async def semantic_refs(request: Request):
 
 async def create_run(request: Request):
     """提交离线实验：body {datasets, dataset_limit?, arms[], judge?, threshold?}。"""
+    from api._common import require_admin
+    require_admin(request)
+
     body = await parse_body(request)
     # 不隐式默认 badcase（此前空/缺省会偷偷回退 badcase，数据集未采集时 404 误导）。
     # 缺省或空数组一律 400，由前端显式勾选（与前端「至少选一个」校验一致）。
@@ -627,6 +641,9 @@ async def cancel_run(request: Request):
     orchestrator 返 RC_CANCELLED → _execute_run 写终态 cancelled。
     幂等：已终态 → 409；僵尸 run（status=running 但进程重启无存活 task）→ 直接收尾 cancelled。
     """
+    from api._common import require_admin
+    require_admin(request)
+
     stamp = request.path_params["stamp"]
     st = _read_status(stamp)
     if st is None:
@@ -687,6 +704,9 @@ async def cancel_run(request: Request):
 
 async def delete_run(request: Request):
     """删除历史 run：manifest / status / 明细目录。running 中的拒绝。"""
+    from api._common import require_admin
+    require_admin(request)
+
     stamp = request.path_params["stamp"]
     task = _RUN_TASKS.get(stamp)
     if task is not None and not task.done():
@@ -722,6 +742,9 @@ async def list_runs(request: Request):
     {stamp}.status.json——必须同时扫 status 文件，否则运行中的 run 会从历史
     列表消失，无法点回看进度。
     """
+    from api._common import require_admin
+    require_admin(request)
+
     d = _run_dir()
     runs: dict[str, dict] = {}
     if d.exists():
@@ -775,6 +798,9 @@ async def list_runs(request: Request):
 
 async def get_run(request: Request):
     """run 状态 + 结果（manifest / gate / 逐条明细）。"""
+    from api._common import require_admin
+    require_admin(request)
+
     stamp = request.path_params["stamp"]
     d = _run_dir()
     st = _read_status(stamp)

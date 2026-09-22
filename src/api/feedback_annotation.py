@@ -342,11 +342,8 @@ async def _backfill_annotation(thread_id: str, message_id: str) -> dict | None:
 
 
 async def list_annotations(request: Request):
-    from api._common import require_user
-    from agent.auth.grants import owned_thread
-
-    user = require_user(request)
-    is_admin = user.get("is_admin", False)
+    from api._common import require_admin
+    require_admin(request)
 
     status = request.query_params.get("status", "") or None
     try:
@@ -357,9 +354,6 @@ async def list_annotations(request: Request):
     if status and status not in ANNOTATION_STATUSES:
         return json_response({"error": f"status 必须是 {ANNOTATION_STATUSES} 之一"}, status=400)
     records = store.list_annotations(status=status, limit=limit)
-    # P2：非 admin 只返回自己拥有的会话的反馈
-    if not is_admin:
-        records = [r for r in records if owned_thread(user, r.thread_id)]
     # 列表标题依赖 question：入队时为空，这里从本地快照快速补齐（无网络读取）
     records = [_fill_annotation_from_snapshot(r) for r in records]
     return json_response(
@@ -371,6 +365,9 @@ async def list_annotations(request: Request):
 
 
 async def get_annotation_detail(request: Request):
+    from api._common import require_admin
+    require_admin(request)
+
     thread_id = request.path_params["thread_id"]
     message_id = request.path_params["message_id"]
     data = await _backfill_annotation(thread_id, message_id)
@@ -380,6 +377,8 @@ async def get_annotation_detail(request: Request):
 
 
 async def judge_annotation(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """人工判断是否有效反馈：
     is_valid=true → annotating；is_valid=false → rejected；
     is_valid=true + direct_good=true（点赞正例）→ 直接入 Good Set（跳过修正/执行，见 _confirm_good_commit）。
@@ -440,6 +439,8 @@ async def judge_annotation(request: Request):
 
 
 async def execute_annotation(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """执行人工 SQL（只读护栏 + dbmcp 引擎），返回预览；成功更新 bad_sql，失败记 exec_error。"""
     thread_id = request.path_params["thread_id"]
     message_id = request.path_params["message_id"]
@@ -534,6 +535,8 @@ def _parse_cube_spec(raw) -> dict:
 
 
 async def preview_cube_annotation(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """按**编辑后的** Cube 口径试算：定义 → 物理 SQL → 只读执行 → 结果预览。
 
     与 ``execute_annotation``（人工 SQL 的执行校验）对称，补上 Cube 通道缺的那一环：
@@ -626,6 +629,8 @@ async def preview_cube_annotation(request: Request):
 
 
 async def confirm_annotation(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """确认 → 生成 BadCase（三处写入）：
     ① Langfuse Dataset:badcase（带 gold_sql/bad_type/source=user-annotation）
     ② badcase_status.json（status=reviewed + bad_type + gold_sql，进回归集）
@@ -916,6 +921,8 @@ def maybe_auto_good(ann, sql: str, db_name: str = "") -> bool:
 
 
 async def confirm_good_annotation(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """确认 → 入 Good Set（正向样本，与 BadCase 对称）：
     ① Langfuse Dataset:goodcase（source=user-annotation，sql=模型 SQL/已验证 SQL）
     ② 本地标注状态 → good（终态）
@@ -1029,6 +1036,8 @@ def withdraw_auto_good(thread_id: str, message_id: str) -> int:
 
 
 async def revoke_good_annotation(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """POST …/{tid}/{mid}/revoke-good —— 撤回入集（人工确认与自动入集都能撤）。
 
     Langfuse 侧**真删条目**（dataset_items.delete），而不是打标记：数据集是评测基准，
@@ -1108,6 +1117,8 @@ def _deletable_error(status) -> str:
 
 
 async def delete_annotation(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """DELETE …/{thread_id}/{message_id} —— 删掉一条本地队列条目**连同它的用户反馈**。
 
     硬删（无软删除、无墓碑）：删完就是删完。用户要恢复只能重新提交反馈，那会重新
@@ -1175,6 +1186,8 @@ _BATCH_CAP = 500
 
 
 async def clear_annotations(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """POST /api/feedback/annotations/clear —— 清空某个本地状态的**全部**条目。
 
     逐行按 `expected_status` 条件删。不是多余的谨慎：「确认入 BadCase」在
@@ -1242,6 +1255,8 @@ async def clear_annotations(request: Request):
 
 
 async def list_bad_types(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     return json_response(
         {"bad_types": [{"key": k, "label": label, "desc": desc} for k, label, desc in BAD_TYPES]}
     )
@@ -1321,6 +1336,8 @@ def _dataset_item_to_row(it) -> dict:
 
 
 async def list_dataset_items(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """GET /api/feedback/datasets?name=badcase|goodcase&limit=N
 
     直读 Langfuse Dataset 条目（v4 api.dataset_items.list），返回与 Langfuse UI
@@ -1417,6 +1434,8 @@ def _dataset_stats_cached() -> dict:
 
 
 async def dataset_stats(request: Request):
+    from api._common import require_admin
+    require_admin(request)
     """GET /api/feedback/dataset-stats —— 数据集规模 + **金标缺口** + 本地队列深度。
 
     为什么需要它：`without_gold`（badcase 里没有权威金标的条目数）此前**完全不可见**。
