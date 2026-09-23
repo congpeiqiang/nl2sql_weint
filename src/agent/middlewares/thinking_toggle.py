@@ -40,9 +40,9 @@ class ThinkingToggleMiddleware(AgentMiddleware):
     """
 
     # ── 进程级模型实例缓存 ──────────────────────────────────
-    _model_cache: dict[tuple, Any] = {}      # (enable, route, model_name) → model 实例
-    _model_cache_mtime: float = 0.0          # model_config.json 最后修改时间
-    _MAX_CACHE_SIZE = 8                      # 最大缓存条目（防内存泄漏）
+    _model_cache: dict[tuple, Any] = {}      # (enable, route, model, user) → model 实例
+    _model_cache_mtime: dict[str, float] = {}  # user_id → mtime（per-user 失效检测）
+    _MAX_CACHE_SIZE = 16                     # 最大缓存条目（用户隔离后条目增多）
 
     # ── auto-continue 模型继承（per-thread）────────────────────
     _last_thread_key: dict[str, tuple] = {}  # thread_id → 最近一次显式配置的 cache_key
@@ -51,26 +51,36 @@ class ThinkingToggleMiddleware(AgentMiddleware):
     # ── 缓存管理 ──────────────────────────────────────────────
 
     @staticmethod
-    def _model_config_mtime() -> float:
+    def _model_config_mtime(user_id: str = "") -> float:
         """获取 model_config.json 的 mtime，用于缓存失效检测。"""
         try:
-            from agent.workspace_manager import get_workspace_manager
-            path = get_workspace_manager().model_config_path
+            if user_id:
+                from agent.settings.model_config_store import _user_config_path
+                path = _user_config_path(user_id)
+            else:
+                from agent.workspace_manager import get_workspace_manager
+                path = get_workspace_manager().model_config_path
             return path.stat().st_mtime if path.exists() else 0.0
         except Exception:
             return 0.0
 
     def _cache_key(
-        self, enable: Optional[bool], route: Optional[str], model_name: Optional[str]
+        self, enable: Optional[bool], route: Optional[str], model_name: Optional[str],
+        user_id: Optional[str] = None,
     ) -> tuple:
-        return (enable, route or "", model_name or "")
+        return (enable, route or "", model_name or "", user_id or "")
 
     def _cache_get(self, key: tuple) -> Any | None:
-        """命中缓存返回模型实例；配置已变更则清空缓存返回 None。"""
-        mtime = self._model_config_mtime()
-        if mtime != self._model_cache_mtime:
-            self._model_cache.clear()
-            self._model_cache_mtime = mtime
+        """命中缓存返回模型实例；该用户的配置已变更则清该用户条目返回 None。"""
+        user_id = key[3] if len(key) > 3 else ""
+        mtime = self._model_config_mtime(user_id)
+        prev_mtime = self._model_cache_mtime.get(user_id, 0.0)
+        if mtime != prev_mtime:
+            # 清除该用户的所有缓存条目
+            to_del = [k for k in self._model_cache if (k[3] if len(k) > 3 else "") == user_id]
+            for k in to_del:
+                del self._model_cache[k]
+            self._model_cache_mtime[user_id] = mtime
             return None
         return self._model_cache.get(key)
 
@@ -80,8 +90,9 @@ class ThinkingToggleMiddleware(AgentMiddleware):
             oldest = next(iter(self._model_cache))
             del self._model_cache[oldest]
         self._model_cache[key] = model
-        if self._model_cache_mtime == 0.0:
-            self._model_cache_mtime = self._model_config_mtime()
+        user_id = key[3] if len(key) > 3 else ""
+        if user_id not in self._model_cache_mtime:
+            self._model_cache_mtime[user_id] = self._model_config_mtime(user_id)
 
     # ── 工具方法 ──────────────────────────────────────────────
 
@@ -100,8 +111,8 @@ class ThinkingToggleMiddleware(AgentMiddleware):
 
     def _resolve_overrides(
         self, request: ModelRequest[ContextT]
-    ) -> tuple[Optional[bool], Optional[str], Optional[str]]:
-        """从运行时 config 读前端传入的 (enable_thinking, llm_route, llm_model)；缺失返回 None。
+    ) -> tuple[Optional[bool], Optional[str], Optional[str], Optional[str]]:
+        """从运行时 config 读前端传入的 (enable_thinking, llm_route, llm_model, user_id)；缺失返回 None。
 
         注：与 QueryKeywordsMiddleware 同路径——request.runtime.config 恒为空，
         必须走 langgraph.config.get_config()（实证 2026-08-14）。
@@ -126,7 +137,9 @@ class ThinkingToggleMiddleware(AgentMiddleware):
         route = str(route) if route else None
         model_name = configurable.get("llm_model")
         model_name = str(model_name) if model_name else None
-        return enable, route, model_name
+        user_id = configurable.get("user_id")
+        user_id = str(user_id) if user_id else None
+        return enable, route, model_name, user_id
 
     def _maybe_swap(self, request: ModelRequest[ContextT]) -> ModelRequest[ContextT]:
         """按思考开关 / 模型路由 / 指定模型重建模型并替换 request.model；都缺失时原样返回。
@@ -141,7 +154,7 @@ class ThinkingToggleMiddleware(AgentMiddleware):
         续跑）不携带 llm_route/llm_model/enable_thinking 时，复用该 thread 上次显式配置
         的模型实例。避免续跑回退到模块级默认模型（可能已欠费/不可用）。
         """
-        enable, route, model_name = self._resolve_overrides(request)
+        enable, route, model_name, user_id = self._resolve_overrides(request)
         thread_id = self._get_thread_id()
 
         if enable is None and not route and not model_name:
@@ -158,12 +171,12 @@ class ThinkingToggleMiddleware(AgentMiddleware):
                     return request.override(model=cached)
             return request
 
-        key = self._cache_key(enable, route, model_name)
+        key = self._cache_key(enable, route, model_name, user_id)
         cached = self._cache_get(key)
         if cached is not None:
             _logger.debug(
-                "[ThinkingToggle] 缓存命中 enable_thinking=%s, route=%s, model=%s",
-                enable, route, model_name,
+                "[ThinkingToggle] 缓存命中 enable_thinking=%s, route=%s, model=%s, user=%s",
+                enable, route, model_name, user_id,
             )
             # 记录该 thread 的显式配置（供后续 auto-continue 继承）
             if thread_id:
@@ -172,7 +185,7 @@ class ThinkingToggleMiddleware(AgentMiddleware):
 
         from agent.llms.model import create_model
 
-        model = create_model(enable_thinking=enable, route=route, model_name=model_name)
+        model = create_model(enable_thinking=enable, route=route, model_name=model_name, user_id=user_id)
         if model is None:
             return request
         self._cache_set(key, model)

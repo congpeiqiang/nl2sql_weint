@@ -21,7 +21,7 @@ import logging
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from api._common import json_response, parse_body
+from api._common import json_response, parse_body, require_admin
 
 _logger = logging.getLogger(__name__)
 
@@ -70,7 +70,8 @@ def _audit(action: str, request: Request, before: dict, after_overrides: dict) -
 
 
 async def eval_flags(request: Request) -> None:
-    """GET（读）/ PUT（写）/ DELETE（清空）。"""
+    """GET（读）/ PUT（写）/ DELETE（清空）。仅管理员可访问。"""
+    require_admin(request)
     from agent.eval import eval_flags_store as store
 
     method = request.method.upper()

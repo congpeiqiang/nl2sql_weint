@@ -268,7 +268,7 @@ def _first_model_id(cfg) -> str:
     return ""
 
 
-def _resolve_llm_config(route: str | None = None, model_name: str | None = None) -> tuple[str, str, str, int | None, int | None, float | None]:
+def _resolve_llm_config(route: str | None = None, model_name: str | None = None, user_id: str | None = None) -> tuple[str, str, str, int | None, int | None, float | None]:
     """解析本次调用使用的 (api_key, base_url, model, context_window_override, max_tokens_override, temperature_override)。
 
     优先读运行时模型配置 store（P1-8，model_config.json，前端可 CRUD、免重启生效）：
@@ -278,6 +278,8 @@ def _resolve_llm_config(route: str | None = None, model_name: str | None = None)
     store 无可用配置（空/缺字段/异常）时返回空串三元组（不调用 LLM）。
     不再回退 .env 的 LLM_* —— 模型配置唯一来源是前端 CRUD 的 model_config.json。
 
+    user_id: 用户标识，用于加载用户专属模型配置。为空时回退全局 store。
+
     Returns:
         (api_key, base_url, model, context_window_override, max_tokens_override, temperature_override)
         context_window_override: 模型配置中用户设置的值（None 表示未设置）
@@ -285,9 +287,14 @@ def _resolve_llm_config(route: str | None = None, model_name: str | None = None)
         temperature_override: 模型配置中用户设置的温度参数（None 表示未设置）
     """
     try:
-        from agent.settings.model_config_store import get_store
+        if user_id:
+            from agent.settings.model_config_store import get_user_store
+            store = get_user_store(user_id)
+        else:
+            from agent.settings.model_config_store import get_store
+            store = get_store()
 
-        providers = get_store().get_all_decrypted()
+        providers = store.get_all_decrypted()
         if providers:
             cfg = None
             if route:
@@ -295,7 +302,7 @@ def _resolve_llm_config(route: str | None = None, model_name: str | None = None)
                 if cfg is None:
                     logger.warning("[model] route '%s' 不存在，回退 active/默认", route)
             if cfg is None:
-                active = get_store().get_active()
+                active = store.get_active()
                 cfg = next((p for p in providers if p.name == active), None) or providers[0]
             resolved = cfg.default_model or _first_model_id(cfg)
             if model_name:
@@ -344,6 +351,7 @@ def create_model(
     enable_thinking: bool | None = None,
     route: str | None = None,
     model_name: str | None = None,
+    user_id: str | None = None,
 ):
     """按模型配置 store 自动创建对应模型实例（无有效配置时返回 None）。
 
@@ -362,8 +370,9 @@ def create_model(
             configurable.llm_route 传入）；None 用 active provider。
         model_name: 显式指定的模型 id（P1-9 逐模型选择经 configurable.llm_model
             传入），覆盖 provider 的 default_model；None 用 default_model/第一个。
+        user_id: 用户标识，加载用户专属模型配置；None 用全局 store。
     """
-    api_key, base_url, resolved_model, cw_override, mt_override, temp_override = _resolve_llm_config(route, model_name)
+    api_key, base_url, resolved_model, cw_override, mt_override, temp_override = _resolve_llm_config(route, model_name, user_id)
     if not (api_key and base_url and resolved_model):
         logger.error(
             "[model] 无可用模型配置（api_key/base_url/model 缺失），拒绝创建模型；"

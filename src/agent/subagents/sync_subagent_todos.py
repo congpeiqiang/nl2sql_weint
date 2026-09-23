@@ -1619,19 +1619,33 @@ async def _notify_main_agent_continue(
     try:
         # 1. 等待主智能体当前 run 结束（最多等 30s）
         _log.info("[sync] 等待主智能体 run 结束...")
+        last_run = None
         for i in range(15):
             runs = await client.runs.list(
                 thread_id=main_thread_id, limit=1
             )
             if not runs:
                 break
-            status = runs[0].get("status", "unknown")
+            last_run = runs[0]
+            status = last_run.get("status", "unknown")
             _log.info("[sync] 主智能体 run 状态: %s (第%d次)", status, i + 1)
             if status in ("success", "error"):
                 break
             await asyncio.sleep(2)
 
-        # 2. 将通知消息直接作为 runs.create 的输入（而非 update_state）
+        # 2. 从主智能体上一个 run 提取 user_id（续跑 run 应继承原始用户身份）
+        user_id = None
+        if last_run:
+            # 尝试从 run 的 configurable 或 metadata 读取 user_id
+            run_config = last_run.get("config") or {}
+            configurable = run_config.get("configurable") or {}
+            user_id = configurable.get("user_id")
+            if not user_id:
+                metadata = last_run.get("metadata") or {}
+                user_id = metadata.get("langfuse_user_id")
+        _log.info("[sync] 续跑继承 user_id: %s", user_id or "(none)")
+
+        # 3. 将通知消息直接作为 runs.create 的输入（而非 update_state）
         #    这样新 run 会看到这条新消息并触发 LLM 处理
         continue_content = (
             f"[系统通知] {agent_name} 子智能体已完成查询任务。"
@@ -1641,7 +1655,14 @@ async def _notify_main_agent_continue(
         )
         _log.info("[sync] 注入通知消息并创建新 run")
 
-        # 3. 启动新 run，消息作为 input 传入
+        # 4. 启动新 run，消息作为 input 传入，继承 user_id
+        #    使用 langgraph_auth_user_id 键，与 langfuse_metadata 中间件约定一致
+        run_config = {"recursion_limit": 500}
+        if user_id:
+            run_config["configurable"] = {
+                "langgraph_auth_user_id": user_id,
+                "user_id": user_id,  # 双写：供运行时其他模块读取
+            }
         run = await client.runs.create(
             thread_id=main_thread_id,
             assistant_id="chat_agent",
@@ -1650,7 +1671,7 @@ async def _notify_main_agent_continue(
                     {"role": "user", "content": continue_content}
                 ]
             },
-            config={"recursion_limit": 500},
+            config=run_config,
         )
         _log.info(
             "[sync] 已创建新 run: %s，主智能体将继续执行",

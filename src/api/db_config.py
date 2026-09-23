@@ -256,7 +256,7 @@ async def reload_mcp(request: Request):
 
 
 async def test_config(request: Request):
-    require_admin(request)
+    require_user(request)  # 测试连接是只读操作，允许所有登录用户
     name = request.path_params["name"]
     data = await parse_body(request)
     if data:

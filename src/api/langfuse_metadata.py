@@ -51,11 +51,6 @@ class LangfuseMetadataMiddleware:
             _logger.warning("[langfuse_meta] skill manifest 加载失败: %s", e)
 
     async def __call__(self, scope, receive, send):
-        # 总开关 LANGFUSE_ENABLE=false：不注入 metadata（无 trace 消费它），原样透传
-        if not langfuse_enabled():
-            await self.app(scope, receive, send)
-            return
-
         if scope.get("type") != "http" or scope.get("method") != "POST":
             await self.app(scope, receive, send)
             return
@@ -70,12 +65,23 @@ class LangfuseMetadataMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # 总开关 LANGFUSE_ENABLE=false：不注入 metadata（无 trace 消费它），
+        # **但会话归属照记**——归属是安全属性（会话可见性），不能挂在监控开关上。
+        # 这条路径不读 body（没 trace 需求），只用 AuthMiddleware 注入的 scope state。
+        if not langfuse_enabled():
+            try:
+                await self._apply_ownership(tid, _scope_uid(scope), "")
+            except Exception as e:  # noqa: BLE001
+                _logger.debug("[langfuse_meta] 归属登记失败(无 langfuse): %s", e)
+            await self.app(scope, receive, send)
+            return
+
         try:
             body = await _read_body(receive)
             if body is None:
                 await self.app(scope, receive, send)
                 return
-            new_body = self._inject(body, tid)
+            new_body = await self._inject(body, tid, scope)
             if new_body is body:
                 # 未改动：原样透传（保留原始 receive 通道）
                 await self.app(scope, receive, send)
@@ -122,7 +128,40 @@ class LangfuseMetadataMiddleware:
                 return text[:max_len]
         return ""
 
-    def _inject(self, body: dict, tid: str) -> dict:
+    async def _apply_ownership(self, tid: str, uid: str, inherited: str) -> None:
+        """登记会话归属：grants 表 + 线程 metadata.owner（幂等，可多次调用）。
+
+        归属人优先级：请求体/继承来的真实用户 > 解析出的 uid。
+        为什么不能直接用 uid：容器内部调用（子 agent / sync 循环）被标识成 internal，
+        但它们是代真实用户干活——记成 internal 会让用户自己都读不到自己的子线程。
+        """
+        from agent.auth.grants import claim_thread
+        from agent.auth.ownership import (
+            is_real_owner,
+            mark_stamped,
+            was_stamped,
+        )
+
+        owner = uid if is_real_owner(uid) else ""
+        if not owner and is_real_owner(inherited):
+            owner = inherited
+        if not owner or not tid:
+            return
+
+        try:
+            claim_thread(tid, owner)
+        except Exception:  # noqa: BLE001
+            _logger.debug("[langfuse_metadata] claim_thread 失败", exc_info=True)
+
+        # 线程 metadata 的 owner：POST /threads 建的主会话由 auth 钩子写过（进程内
+        # 集合已标记）；子 agent 线程走 /noauth 创建，钩子不执行，这里补一次 PATCH。
+        if was_stamped(tid):
+            return
+        from api._common import stamp_thread_owner
+        if await stamp_thread_owner(tid, owner):
+            mark_stamped(tid)
+
+    async def _inject(self, body: dict, tid: str, scope: dict | None = None) -> dict:
         """把 langfuse 元数据写进 body['config']['metadata']，无变化则返回原对象。"""
         if not isinstance(body, dict):
             return body
@@ -132,6 +171,7 @@ class LangfuseMetadataMiddleware:
         configurable = config.get("configurable")
         if not isinstance(configurable, dict):
             configurable = {}
+        original_configurable = dict(configurable)  # 快照：检测 configurable 变更
 
         metadata = config.get("metadata")
         if not isinstance(metadata, dict):
@@ -150,17 +190,43 @@ class LangfuseMetadataMiddleware:
         elif isinstance(merged["langfuse_tags"], list) and "nl2sql" not in merged["langfuse_tags"]:
             merged["langfuse_tags"] = [*merged["langfuse_tags"], "nl2sql"]
 
-        # 用户：本地无登录体系，auth 时 configurable 会带 langgraph_auth_user_id
-        uid = configurable.get("langgraph_auth_user_id")
+        # 用户：优先从 AuthMiddleware 注入的 scope state 读取（可靠来源），
+        # 回退到 body configurable（客户端不传此键，仅供未来 LangGraph 内部注入兼容）
+        from agent.auth.ownership import is_real_owner
+
+        uid = _scope_uid(scope)
+        uid_source = "scope_state" if uid else "none"
+        if not is_real_owner(uid):
+            # internal/dev 只说明「调用来自容器内部」，不代表没有用户身份：
+            # deepagents 子 agent、sync 循环都在 configurable 里带着父 run 的真实用户
+            # (deepagents_async_config_patch 注入)。归属必须记真实用户，否则子线程
+            # 归到 internal 名下，用户连自己的子线程都读不到。仅在 uid 非真实用户时启用。
+            #
+            # 读 `user_id` 而不是 `langgraph_auth_user_id`：子 agent 的 configurable 由
+            # `deepagents_async_config_patch._current_configurable()` 透传，其中
+            # `langgraph_` 前缀键被 `_is_internal_key` 全部剔除（只剩我们注入的 `user_id`）。
+            cand = configurable.get("user_id") or configurable.get("langgraph_auth_user_id")
+            if is_real_owner(cand):
+                uid, uid_source = cand, "configurable(内部调用带用户)"
+        if not uid:
+            uid = configurable.get("user_id") or configurable.get("langgraph_auth_user_id")
+            if uid:
+                uid_source = "configurable"
+        _logger.info(
+            "[langfuse_meta] uid=%s source=%s path=%s has_cookie=%s",
+            uid, uid_source,
+            (scope or {}).get("path", ""),
+            bool((dict((scope or {}).get("headers", [])).get(b"cookie", b""))),
+        )
         if uid and not merged.get("langfuse_user_id"):
             merged["langfuse_user_id"] = str(uid)
-        # P2：登记会话归属（幂等，首次 run 创建时写入）
-        if uid and tid:
-            try:
-                from agent.auth.grants import claim_thread
-                claim_thread(tid, str(uid))
-            except Exception:  # noqa: BLE001
-                _logger.debug("[langfuse_metadata] claim_thread 失败", exc_info=True)
+        # 注入 user_id 到 configurable，供运行时（create_model 等）读取
+        if uid and not configurable.get("user_id"):
+            configurable["user_id"] = str(uid)
+        # 登记会话归属（grants 表 + metadata.owner；幂等）
+        # inherited：子 run 的 metadata 常继承父 run 的 langfuse_user_id（真实用户），
+        # 是 uid 被判成 internal 时的兜底归属来源。
+        await self._apply_ownership(tid, str(uid or ""), str(merged.get("langfuse_user_id") or ""))
 
         # ── 业务元数据（透传到 trace metadata）──
         if "workspace" not in merged:
@@ -212,15 +278,28 @@ class LangfuseMetadataMiddleware:
         if rel and "langfuse_release" not in merged:
             merged["langfuse_release"] = rel
 
-        if merged == metadata:
+        configurable_changed = configurable != original_configurable
+        if merged == metadata and not configurable_changed:
             return body
 
         config = {**config, "metadata": merged}
+        if configurable_changed:
+            config["configurable"] = configurable
         # 顶层 metadata 一并写入，与 config.metadata 保持一致（server 也读 payload.metadata）
         return {**body, "config": config, "metadata": merged}
 
 
 # ── ASGI 辅助 ──────────────────────────────────────────────
+
+def _scope_uid(scope: dict | None) -> str:
+    """读 AuthMiddleware 注入的登录身份（scope["state"]["user"]["user_id"]）。"""
+    if not scope:
+        return ""
+    state_user = (scope.get("state") or {}).get("user")
+    if not isinstance(state_user, dict):
+        return ""
+    return str(state_user.get("user_id") or "")
+
 
 async def _read_body(receive) -> dict | None:
     """读取请求体并解析 JSON；非 JSON 返回 None。"""

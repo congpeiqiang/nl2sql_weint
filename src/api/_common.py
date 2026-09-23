@@ -7,11 +7,16 @@ P1 扩展：请求级 auth helper（require_user / require_admin / require_db / 
 """
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
+import httpx
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+_logger = logging.getLogger(__name__)
 
 
 # ── JSON 工具（原有）─────────────────────────────────────────
@@ -72,3 +77,41 @@ def require_thread(request: Request, thread_id: str) -> dict[str, Any]:
     if not owned_thread(user, thread_id):
         raise HTTPException(status_code=403, detail="无权访问该会话")
     return user
+
+
+# ── 会话归属写入（P2+ 归属隔离）──────────────────────────────
+
+def _api_base_url() -> str:
+    return (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
+
+
+async def stamp_thread_owner(thread_id: str, owner: str) -> bool:
+    """把 metadata.owner 写到线程上（内部自调用 PATCH `/threads/{tid}`）。
+
+    为什么需要：`@auth.on.threads.create` 钩子只覆盖 `POST /threads`。子 agent 线程
+    由 deepagents 走**进程内 /noauth 客户端**创建（既不过钩子、也不过 ops 授权层），
+    服务端必须自己补打归属——否则前端带 Cookie 读子线程状态（`threads.getState`）
+    会被归属过滤器拒掉，任务卡的进度/待办全空。
+
+    鉴权：自调用不带 Cookie 且来自容器网络 → AuthMiddleware 标 internal →
+    `_guard_thread_access` 对 internal 不过滤（`src/agent/auth/backend.py`）。
+
+    服务端 `Threads.patch` 对 metadata 是**浅合并**（`{**old, **new}`），所以只发
+    `{"owner": ...}` 就够，graph_id / title 不会丢。
+    """
+    from agent.auth.ownership import OWNER_KEY
+
+    url = f"{_api_base_url()}/threads/{thread_id}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            r = await http.patch(url, json={"metadata": {OWNER_KEY: owner}})
+    except Exception as e:  # noqa: BLE001  归属补打失败不阻断主流程
+        _logger.warning("[thread_owner] 补打归属失败 %s: %s", thread_id, e)
+        return False
+    if r.status_code >= 300:
+        _logger.warning(
+            "[thread_owner] 补打归属被拒 %s: HTTP %s %s",
+            thread_id, r.status_code, r.text[:200],
+        )
+        return False
+    return True

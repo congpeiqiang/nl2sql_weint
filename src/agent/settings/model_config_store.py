@@ -363,6 +363,74 @@ def get_store() -> ModelConfigStore:
     return _default_store
 
 
+# ── 用户级隔离：每用户独立 model_config.json ─────────────────
+
+_user_stores: dict[str, ModelConfigStore] = {}
+
+
+def _user_config_path(user_id: str) -> Path:
+    """解析用户配置文件路径：<data_root>/users/<user_id>/model_config.json"""
+    data_root = os.getenv("AGENT_DATA_ROOT", "")
+    if data_root:
+        base = Path(data_root) / "users" / user_id
+    else:
+        base = Path(__file__).resolve().parents[2] / "users" / user_id
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "model_config.json"
+
+
+def _shared_config_path() -> Optional[Path]:
+    """共享配置文件路径（仅用于首次迁移拷贝）。"""
+    try:
+        from agent.workspace_manager import get_workspace_manager
+        return get_workspace_manager().shared_model_config_path
+    except Exception:
+        p = _DEFAULT_PATH
+        return Path(p) if p else None
+
+
+def get_user_store(user_id: str) -> ModelConfigStore:
+    """获取用户专属的模型配置 store（进程级缓存）。
+
+    首次调用时，若用户文件不存在但共享文件有 providers，自动拷贝作为初始配置。
+    """
+    if not user_id:
+        return get_store()  # 兜底：无用户时回退全局
+
+    if user_id in _user_stores:
+        return _user_stores[user_id]
+
+    user_path = _user_config_path(user_id)
+
+    # 首次初始化：从共享配置拷贝（若共享有内容且用户文件为空）
+    if not user_path.exists() or user_path.stat().st_size == 0:
+        shared = _shared_config_path()
+        if shared and shared.exists():
+            try:
+                data = json.loads(shared.read_text(encoding="utf-8"))
+                if data.get("providers"):
+                    user_path.write_text(
+                        json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    _logger.info(
+                        "[model_config] 用户 %s 首次初始化：从共享配置拷贝 %d 个 provider",
+                        user_id, len(data["providers"]),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+
+    store = ModelConfigStore(path=str(user_path))
+    try:
+        store._ensure_consistent()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[model_config] 用户 %s 密钥一致性检查跳过: %s", user_id, e)
+
+    _user_stores[user_id] = store
+    _logger.info("[model_config] 用户 %s store 加载: %s", user_id, user_path)
+    return store
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     s = get_store()

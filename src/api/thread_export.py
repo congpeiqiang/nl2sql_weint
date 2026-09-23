@@ -139,6 +139,12 @@ async def export_thread(request: Request):
     if not _UUID_RE.match(thread_id):
         return Response("无效的会话 ID", status_code=400, media_type="text/plain")
 
+    # 归属校验（P2 会话隔离补漏）：导出会把整段消息 + SQL 落成文件，拿到 thread_id
+    # 就能导别人的会话。本函数下面的自调用取 state 走容器内 127.0.0.1（被判 internal
+    # 放行），所以校验必须发生在**入口这一层**（浏览器请求带 Cookie = 真实身份）。
+    from api._common import require_thread
+    require_thread(request, thread_id)
+
     fmt = (request.query_params.get("format") or "md").lower()
     if fmt not in ("md", "json"):
         return Response("format 仅支持 md / json", status_code=400, media_type="text/plain")

@@ -21,18 +21,22 @@ import urllib.request
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from agent.settings.model_config_store import ModelConfig, get_store
+from agent.settings.model_config_store import ModelConfig, get_store, get_user_store
 from agent.llms.model import (
     resolve_context_window,
     resolve_context_window_source,
     resolve_max_tokens,
     resolve_max_tokens_source,
 )
-from api._common import json_response, parse_body
+from api._common import json_response, parse_body, require_user
 
 _logger = logging.getLogger(__name__)
 
-store = get_store()
+
+def _get_store(request: Request):
+    """按当前登录用户获取独立 store。"""
+    user = require_user(request)
+    return get_user_store(user["user_id"])
 
 
 def _probe_models(base_url: str, api_key: str, api_protocol: str = "", timeout: float = 10.0) -> tuple[bool, str, list[str]]:
@@ -215,28 +219,31 @@ def _enrich_models_with_context_window(providers: list[dict]) -> list[dict]:
 
 
 async def list_configs(request: Request):
-    providers = store.list_configs(masked=True)
+    s = _get_store(request)
+    providers = s.list_configs(masked=True)
     providers = _enrich_models_with_context_window(providers)
     return json_response({
         "providers": providers,
-        "active": store.get_active(),
+        "active": s.get_active(),
     })
 
 
 async def get_config(request: Request):
+    s = _get_store(request)
     name = request.path_params["name"]
     try:
-        cfg = store.get(name)
+        cfg = s.get(name)
     except KeyError:
         return json_response({"error": f"模型配置 '{name}' 不存在"}, status=404)
     out = cfg.to_mapping(masked=True)
-    out["active"] = store.get_active() == name
+    out["active"] = s.get_active() == name
     # 自动填充 context_window
     out["models"] = _enrich_models_with_context_window([{"models": out.get("models", [])}])[0]["models"]
     return json_response(out)
 
 
 async def upsert_config(request: Request):
+    s = _get_store(request)
     data = await parse_body(request)
     name = data.get("name")
     if not name:
@@ -254,7 +261,7 @@ async def upsert_config(request: Request):
             display_name=str(data.get("display_name", "") or ""),
             api_protocol=str(data.get("api_protocol", "") or ""),
         )
-        store.upsert(cfg)
+        s.upsert(cfg)
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
@@ -263,23 +270,26 @@ async def upsert_config(request: Request):
 
 
 async def delete_config(request: Request):
+    s = _get_store(request)
     name = request.path_params["name"]
-    ok = store.delete(name)
+    ok = s.delete(name)
     if not ok:
         return json_response({"error": f"模型配置 '{name}' 不存在"}, status=404)
     return json_response({"ok": True, "name": name})
 
 
 async def activate_config(request: Request):
+    s = _get_store(request)
     name = request.path_params["name"]
     try:
-        store.set_active(name)
+        s.set_active(name)
     except KeyError as e:
         return json_response({"error": str(e)}, status=404)
     return json_response({"ok": True, "active": name})
 
 
 async def test_config(request: Request):
+    s = _get_store(request)
     data = await parse_body(request)
     name = str(data.get("name", "") or "")
     base_url = str(data.get("base_url", "") or "")
@@ -288,7 +298,7 @@ async def test_config(request: Request):
     if not base_url and name:
         # 用已存储配置探活
         try:
-            cfg = store.get(name)
+            cfg = s.get(name)
             base_url, api_key = cfg.base_url, cfg.api_key
             api_protocol = api_protocol or (cfg.api_protocol or "")
         except KeyError:
@@ -311,6 +321,7 @@ async def probe_capabilities(request: Request):
       `context_window_source` / `max_tokens_source`（"probe" 探活 / "static" 静态推断 / "none" 未知）。
     - 前端「刷新真实容量」用它回填模型配置；用户手动配置始终优先（探活结果只回填、不覆盖）。
     """
+    s = _get_store(request)
     data = await parse_body(request)
     name = str(data.get("name", "") or "")
     base_url = str(data.get("base_url", "") or "")
@@ -324,7 +335,7 @@ async def probe_capabilities(request: Request):
         return json_response({"error": "models 必填（要探测容量的模型 ID 列表）"}, status=400)
     if not base_url and name:
         try:
-            cfg = store.get(name)
+            cfg = s.get(name)
             base_url, api_key = cfg.base_url, cfg.api_key
             api_protocol = api_protocol or (cfg.api_protocol or "")
         except KeyError:

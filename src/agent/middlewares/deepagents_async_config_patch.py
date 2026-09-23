@@ -127,6 +127,18 @@ def _build_langfuse_metadata() -> dict:
         # 低基数稳定名（官方 best-practices：name 不含动态值）
         metadata["langfuse_trace_name"] = "nl2sql-agent"
         metadata["langfuse_tags"] = ["nl2sql"]
+    # 用户身份透传：从父 run 的 configurable 读取 user_id，注入 langfuse_user_id
+    # （与 LangfuseMetadataMiddleware 约定一致，确保子 agent trace 归属正确用户）
+    try:
+        from langgraph.config import get_config as _lg_get_config
+        cfg = _lg_get_config()
+        uid = (cfg.get("configurable") or {}).get("user_id") or (
+            cfg.get("configurable") or {}
+        ).get("langgraph_auth_user_id")
+        if uid:
+            metadata["langfuse_user_id"] = str(uid)
+    except Exception:
+        pass
     try:
         from agent.workspace_manager import get_workspace_manager
         wm = get_workspace_manager()
