@@ -1187,6 +1187,12 @@ def apply_patch():
                 if _cube:
                     result["cube_query"] = "\n".join(_cube["lines"])
                     result["sql_kind"] = "cube"
+                    # 原始定义 + 工具名透传给 build_report：报告「业务口径」两层
+                    # （LLM 摘要 + 模板结构）要靠它们查 cube 元数据里的中文描述。
+                    # 传工具名而非项目路径：保持 result 可 JSON 序列化，且报告侧
+                    # 用同一个 resolve_wren_ctx 自行解析（失败则降级，不影响出报告）。
+                    result["cube_args"] = _cube.get("args") or {}
+                    result["cube_tool"] = _cube.get("tool") or ""
                     _project, _conn = _resolve_wren_ctx(_cube["tool"])
                     _has_plan = _attach_physical_plan(
                         result,

@@ -28,28 +28,64 @@ _CHART_ERROR_MSG = "图表生成失败，请检查数据格式。"
 # ECharts 交互式 HTML 模板。
 # 图表通过 CDN 加载 echarts.min.js（jsdelivr / unpkg 双源自动 fallback），
 # 生成的 HTML 只有几 KB，避免把 1.1MB echarts 内联进工具返回值导致 LLM 上下文爆炸。
-# __ECHARTS_SRC__（CDN script 标签）与 __OPTION_JSON__ 由 _build_echarts_html 注入。
+# __OPTION_JSON__ 由 _build_echarts_html 注入。
+#
+# 2026-09-23 修复「聊天里图表全白、单独下载该 HTML 却正常显示」：
+#   原模板是 `#chart{width:100vw;height:100vh}` + `<script>` 里**同步** echarts.init。
+#   iframe 被内嵌时（聊天正文用 dangerouslySetInnerHTML 注入，且消息根节点带
+#   content-visibility:auto，离屏时子树不参与布局），文档解析那一刻 iframe 视口还是
+#   0×0 → 容器 0×0 → echarts.init 量不到尺寸，画不出任何东西；而视口之后变成真实
+#   尺寸时 iframe 的 window **不会收到 resize 事件**（headless Chrome 实测：parse 时
+#   iw/ih/w/h 全 0，t+1000 变 1227×400，resizes=[]），于是空白永久保留 —— 元素在、
+#   尺寸在、内容全白。顶层打开（下载 .html、报告预览弹窗）视口从解析起就有效，
+#   所以一直正常。修法两条：① 容器改用 100% 撑满（配 html/body height:100%），
+#   不再依赖视口单位；② **拿到非零尺寸之前不初始化**，之后再用 resize/ResizeObserver
+#   兜住后续尺寸变化。
 _ECHARTS_HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>html,body{width:100%;height:100%;overflow:hidden;}</style>
 <script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
 <script>
-// CDN 兜底：主源加载失败时回退到备用源
+// CDN 兜底：主源加载失败时回退到备用源。
+// **不能用 document.write**：主源如果是在文档解析完之后才判定失败，document.write
+// 会触发隐式 document.open() 把整个文档清空 → iframe 变全白（headless 实测过）。
+// 动态 appendChild 是异步的，所以下面的 boot() 必须容忍 echarts 暂时未定义。
 if (typeof echarts === 'undefined') {
-  document.write('<script src="https://unpkg.com/echarts@6.0.0/dist/echarts.min.js"><\\/script>');
+  var _fb = document.createElement('script');
+  _fb.src = 'https://unpkg.com/echarts@6.0.0/dist/echarts.min.js';
+  document.head.appendChild(_fb);
 }
 </script>
 </head>
 <body style="margin:0;padding:0;background:#fff;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
-<div id="chart" style="width:100vw;height:100vh;"></div>
+<div id="chart" style="width:100%;height:100%;"></div>
 <script>
 (function() {
   var option = __OPTION_JSON__;
-  var chart = echarts.init(document.getElementById('chart'), null, {renderer: 'canvas'});
-  chart.setOption(option);
-  window.addEventListener('resize', function(){ chart.resize(); });
+  var el = document.getElementById('chart');
+  var timer = null;
+  function boot() {
+    // 两件事都可能"还没到"，只要没齐就下一拍再试（轮询 150ms，成功即停表）：
+    //   ① echarts 尚未加载（CDN 主源慢、正在走兜底源，appendChild 是异步的）；
+    //   ② 容器尺寸仍为 0 —— 内嵌时本文档可能先于 iframe 布局完成就被解析
+    //      （父级 content-visibility:auto 跳过的子树尤其如此），此刻 init 会
+    //      画出永久空白（旧模板正是如此）。
+    if (typeof echarts === 'undefined') return;
+    if (el.clientWidth <= 0 || el.clientHeight <= 0) return;
+    clearInterval(timer);
+    var chart = echarts.init(el, null, {renderer: 'canvas'});
+    chart.setOption(option);
+    // 只用 window resize。**不要加 ResizeObserver**：chart.resize() 会把 canvas 拉到
+    // 容器宽，容器随即因为出现滚动条窄了 15px（滚动条宽度），RO 再次触发 → 无限
+    // resize 抖动（实测 resizeCalls 在 1212/1227 之间反复）。html/body 已 overflow:hidden
+    // 兜住这一层。
+    window.addEventListener('resize', function(){ chart.resize(); });
+  }
+  timer = setInterval(boot, 150);
+  boot();
 })();
 </script>
 </body>

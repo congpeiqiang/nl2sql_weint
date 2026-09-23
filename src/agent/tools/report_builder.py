@@ -130,6 +130,202 @@ def _wren_plan_sql_section(result_obj) -> str:
     return inline
 
 
+# ── Cube「业务口径」两层渲染 ───────────────────────────────────────────
+# 报告原来只给「查询定义（Cube 语义层）」的裸 YAML（cube: xxx / measures: [...]），
+# 业务用户看不懂。两层解释叠在它之上：
+#   Layer A：LLM 把查询翻成 2-3 句业务语言（可选，失败即跳过）
+#   Layer B：模板把 measure/dimension 的技术名换成 cube 元数据里的中文描述
+# 两层都 fail-open，最坏情况退回到只有 Layer C（原始定义）——与改动前一致。
+# 过滤器运算符 → 中文/数学符号（`genre_name:eq:Rock` → `genre_name = Rock`）
+_FILTER_OPS = {
+    "eq": "=", "ne": "≠", "gt": ">", "gte": "≥", "ge": "≥",
+    "lt": "<", "lte": "≤", "le": "≤", "in": "属于",
+    "not_in": "不属于", "contains": "包含", "not_contains": "不包含",
+}
+# 时间粒度 → 中文（cube 的 granularity 或 time_dimension 尾段）
+_GRANULARITY_CN = {
+    "day": "按日", "week": "按周", "month": "按月",
+    "quarter": "按季度", "year": "按年", "hour": "按小时",
+}
+
+
+def _filter_readable(flt, dimensions_meta: dict) -> str:
+    """过滤器表达式 → 人读文本；解析不出就原样返回（绝不猜）。"""
+    s = str(flt or "").strip()
+    if not s:
+        return ""
+    parts = s.split(":")
+    if len(parts) == 3:
+        field, op, value = parts
+        field_cn = dimensions_meta.get(field) or field
+        op_cn = _FILTER_OPS.get(op.lower(), op)
+        return f"{field_cn} {op_cn} {value}"
+    if len(parts) == 2:
+        field, value = parts
+        field_cn = dimensions_meta.get(field) or field
+        return f"{field_cn} = {value}"
+    return s
+
+
+def _field_list_readable(names, meta: dict) -> str:
+    """字段名列表 →「中文描述 · tech_name」顿号串；无描述时只给技术名。
+
+    分隔符用 ``·`` 而**不是括号**：描述本身常带括号（「工时合计（小时）」），
+    再套一层括号就成了 ``工时合计（小时）（total_hours）``——两层括注连排，
+    可读性差（生产实测反馈）。
+    """
+    out = []
+    for n in names or []:
+        name = str(n)
+        desc = (meta or {}).get(name) or ""
+        out.append(f"{desc} · {name}" if desc else name)
+    return "、".join(out)
+
+
+def _render_cube_layer_b(cube_args: dict, metadata: dict) -> str:
+    """Layer B：模板渲染查询结构（带中文描述）。失败/无内容返回空串。
+
+    输出示例::
+
+        数据模型：sales_analytics（音乐商店销售分析：收入、订单、客单价）
+        ├─ 维度：账单国家 · billing_country、音乐流派 · genre_name
+        ├─ 度量：总收入 · total_revenue、订单数 · invoice_count
+        └─ 筛选：音乐流派 = Rock
+    """
+    if not isinstance(cube_args, dict) or not cube_args:
+        return ""
+    cube_name = str(cube_args.get("cube") or "")
+    if not cube_name:
+        return ""
+    meta = metadata if isinstance(metadata, dict) else {}
+    cube_desc = str(meta.get("cube_description") or "")
+    measures_meta = meta.get("measures") or {}
+    dimensions_meta = meta.get("dimensions") or {}
+
+    lines = [f"数据模型：{cube_name}" + (f"（{cube_desc}）" if cube_desc else "")]
+
+    dims = cube_args.get("dimensions")
+    if isinstance(dims, list) and dims:
+        lines.append("├─ 维度：" + _field_list_readable(dims, dimensions_meta))
+    measures = cube_args.get("measures")
+    if isinstance(measures, list) and measures:
+        lines.append("├─ 度量：" + _field_list_readable(measures, measures_meta))
+    filters = cube_args.get("filters")
+    if isinstance(filters, list) and filters:
+        flist = [x for x in (_filter_readable(f, dimensions_meta) for f in filters) if x]
+        if flist:  # 全解析成空串时不留一个光秃秃的「筛选：」标签
+            lines.append("├─ 筛选：" + "；".join(flist))
+
+    # 时间：granularity 可能独立给，也可能并进 time_dimension（`invoice_date:month`）
+    time_dim = str(cube_args.get("time_dimension") or "")
+    granularity = str(cube_args.get("granularity") or "")
+    td_field, td_gran = time_dim, ""
+    if ":" in time_dim:
+        td_field, td_gran = time_dim.split(":", 1)
+    gran = granularity or td_gran
+    if td_field or gran:
+        seg = []
+        if td_field:
+            seg.append(_field_list_readable([td_field], dimensions_meta))
+        if gran:
+            gran_cn = _GRANULARITY_CN.get(gran.lower(), gran)
+            # 有维度时把粒度括注在后面（`work_date（按月）`），只有粒度时直接给
+            seg = [seg[0] + f"（{gran_cn}）"] if seg else [gran_cn]
+        lines.append("├─ 时间：" + "".join(seg))
+
+    segments = cube_args.get("segments")
+    if isinstance(segments, list) and segments:
+        lines.append("├─ 分段：" + "、".join(str(s) for s in segments))
+    order_by = cube_args.get("order_by")
+    if isinstance(order_by, list) and order_by:
+        lines.append("├─ 排序：" + "、".join(str(o) for o in order_by))
+
+    # 末行树形符收尾（把最后一个 ├─ 换成 └─），保持树形可读
+    if len(lines) > 1:
+        lines[-1] = lines[-1].replace("├─ ", "└─ ", 1)
+    return "\n".join(lines)
+
+
+_CUBE_LAYER_A_PROMPT = """请把下面这次数据查询用 2-3 句中文解释给业务人员听。
+
+要求：
+- 用业务语言，不要出现表名、字段名、SQL 术语
+- 说明：查了什么对象的数据、按什么口径分组、看了哪些指标
+- 若有筛选条件，说明数据范围；若有时间维度，说明周期
+- 只输出这段解释本身，不要标题、不要前后缀、不要列表符号
+
+查询信息：
+{info}"""
+
+
+async def _render_cube_layer_a(cube_args: dict, metadata: dict) -> str:
+    """Layer A：LLM 把 Cube 查询翻成 2-3 句业务语言。任何失败返回空串（跳过该层）。"""
+    if not isinstance(cube_args, dict) or not cube_args:
+        return ""
+    try:
+        from agent.llms.model import create_model
+
+        # 用户身份：模型配置已按用户隔离，必须与主 agent 用同一份配置，
+        # 否则会落到全局 store（生产上就是那份过期/不同 key 的配置）。
+        # 读法与 ThinkingToggleMiddleware._resolve_overrides 一致：request.runtime.config
+        # 恒为空，只能走 langgraph.config.get_config()。
+        user_id = None
+        try:
+            from langgraph.config import get_config as _lg_get_config
+
+            user_id = (_lg_get_config().get("configurable", {}) or {}).get("user_id")
+            user_id = str(user_id) if user_id else None
+        except Exception:  # noqa: BLE001  取不到就退回全局 store
+            pass
+
+        # 短摘要用不着思考链：关掉省时省钱（配置缺失时 create_model 返回 None）
+        model = create_model(enable_thinking=False, user_id=user_id)
+        if model is None:
+            _logger.debug("[build_report] Layer A 跳过：无可用模型配置")
+            return ""
+
+        meta = metadata if isinstance(metadata, dict) else {}
+        cube_name = str(cube_args.get("cube") or "")
+        cube_desc = str(meta.get("cube_description") or "")
+        measures_meta = meta.get("measures") or {}
+        dimensions_meta = meta.get("dimensions") or {}
+
+        info_lines = [f"数据模型：{cube_name}" + (f"（{cube_desc}）" if cube_desc else "")]
+        dims = cube_args.get("dimensions")
+        if isinstance(dims, list) and dims:
+            info_lines.append("分组维度：" + _field_list_readable(dims, dimensions_meta))
+        measures = cube_args.get("measures")
+        if isinstance(measures, list) and measures:
+            info_lines.append("统计指标：" + _field_list_readable(measures, measures_meta))
+        filters = cube_args.get("filters")
+        if isinstance(filters, list) and filters:
+            flist = [_filter_readable(f, dimensions_meta) for f in filters]
+            info_lines.append("筛选条件：" + "；".join(x for x in flist if x))
+        gran = str(cube_args.get("granularity") or "")
+        time_dim = str(cube_args.get("time_dimension") or "")
+        if gran or time_dim:
+            info_lines.append("时间维度：" + (gran or time_dim))
+        if len(info_lines) <= 1:
+            # 只有 cube 名，没别的可解释——省一次 LLM 调用
+            return ""
+
+        prompt = _CUBE_LAYER_A_PROMPT.format(info="\n".join(info_lines))
+        # model.invoke 是同步的：to_thread 避免阻塞事件循环（本函数在 async 工具里跑）
+        import asyncio
+
+        resp = await asyncio.to_thread(model.invoke, prompt)
+        content = getattr(resp, "content", None)
+        if content is None:
+            content = str(resp)
+        summary = str(content).strip()
+        if len(summary) > 500:
+            summary = summary[:500].rstrip() + "…"
+        return summary
+    except Exception as e:  # noqa: BLE001  报告不能因这一层挂掉
+        _logger.warning("[build_report] Layer A 生成失败（跳过）: %s", e)
+        return ""
+
+
 # ── 消息归一化（兼容 dict 与 LangChain BaseMessage）───────────────────
 def _msg_name(msg) -> str:
     if isinstance(msg, dict):
@@ -362,6 +558,45 @@ async def _build_report_coro(
                 md_parts += ["", f"> {plan_note}"]
             next_section += 1
         _cube_note = _obj.get("sql_note") if isinstance(_obj, dict) else ""
+
+        # ── Cube「业务口径」两层：先取 cube 元数据里的中文描述 ──
+        # 原始定义（cube_args）+ 工具名由 check_progress 透传；工具名在此重新解析
+        # 成项目路径（与 check_progress 同一个 resolve_wren_ctx，失败即降级）。
+        _cube_args = _obj.get("cube_args") if isinstance(_obj, dict) else None
+        _cube_tool = _obj.get("cube_tool") if isinstance(_obj, dict) else ""
+        _cube_meta: dict = {}
+        if isinstance(_cube_args, dict) and _cube_args and _cube_tool:
+            try:
+                from agent.utils.wren_call_extract import (
+                    load_cube_metadata,
+                    resolve_wren_ctx,
+                )
+
+                _project, _ = resolve_wren_ctx(str(_cube_tool))
+                _cube_meta = load_cube_metadata(
+                    _project, str(_cube_args.get("cube") or "")
+                )
+            except Exception as e:  # noqa: BLE001  拿不到描述就降级展示技术名
+                _logger.warning("[build_report] Cube 元数据加载失败: %s", e)
+
+        # Layer A：LLM 业务口径摘要 / Layer B：模板结构（两层各自 fail-open，
+        # 都返回空串时本节整体跳过，直接进下面的原始定义节）
+        if isinstance(_cube_args, dict) and _cube_args:
+            _layer_a = await _render_cube_layer_a(_cube_args, _cube_meta)
+            if _layer_a:
+                md_parts += [f"\n## {next_section}. 业务口径\n", _layer_a]
+                next_section += 1
+            _layer_b = _render_cube_layer_b(_cube_args, _cube_meta)
+            if _layer_b:
+                # **必须包代码围栏**：Markdown 里段落内的单个换行会被渲染成空格，
+                # 树形文本（├─/└─）会塌成一行（生产实测反馈）。与 Layer C 同款式。
+                md_parts += [
+                    f"\n## {next_section}. 查询结构\n",
+                    f"```\n{_layer_b}\n```",
+                ]
+                next_section += 1
+
+        # Layer C：原始定义（**始终保留**，两层全挂时报告与改动前一致）
         md_parts += [
             f"\n## {next_section}. 查询定义（Cube 语义层）\n",
             f"```yaml\n{cube_query}\n```",

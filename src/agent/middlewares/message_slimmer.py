@@ -16,6 +16,10 @@
    把内容替换成小占位（引用首次出现的 tool_call_id），**保留 tool_call_id / name / id**，
    LangGraph 的 tool_call 配对与前端 deriveStepsFromSubMessages 的步骤关联都不受影响。
 
+3. **图表结果免截断**：带**完整**交互式 iframe（`data:text/html;base64,`）的结果不落盘
+   —— 预览是按行截断的，图表结果基本只有一行，会被砍得 `</iframe>` 都不剩，导致
+   聊天与报告**同时静默丢图**。体积上限见 `_CHART_IFRAME_EXEMPT_MAX_CHARS`。
+
 安全设计：
 - 全程 fail-open：任何异常只记日志并返回原始结果，绝不阻断 agent 循环。
 - 不触碰 AI/Human 消息（AI 消息瘦身属 L2，暂缓）。
@@ -27,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from langchain.agents.middleware import AgentMiddleware
@@ -61,6 +66,35 @@ _DEDUP_STUB = (
     "（首次出现于 tool_call_id: {first_id}），不再重复展示。"
     "如需完整内容，请向上查阅历史中的该次结果。"
 )
+
+# ── 图表结果免截断 ──────────────────────────────────────────────
+# 交互式图表（ECharts）以整段 `<iframe src="data:text/html;base64,...">` 内嵌在
+# 工具结果里，base64 让体积膨胀 4/3：实测 200 个分类 ≈ 9.6KB、1000 个分类 ≈ 22KB，
+# 都越过 8000 阈值。而 `_create_content_preview` 是**按行**取头尾 5 行、每行截到
+# 1000 字符（deepagents `_message_eviction.py`）—— 图表结果基本只有一行，于是那行
+# 被砍断、`</iframe>` 消失：报告侧 `_RE_IFRAME` 匹配不到、前端
+# `extractInteractiveChartIframes` 也提取不到，**聊天和报告同时静默丢图**
+# （工具卡还写着「图表已渲染在消息中 ↑」，用户看不到任何东西）。
+# 因此：内容里带**完整**交互式 iframe 时不落盘 —— 宁可让它进 LLM 上下文
+# （阈值以下的小图本来就一直在上下文里，这里只是把线抬高）。60KB 之上仍走落盘
+# 兜底，避免上下文被无上限的巨型图撑爆。
+_CHART_IFRAME_EXEMPT_MAX_CHARS = int(
+    os.environ.get("CHART_IFRAME_EXEMPT_MAX_CHARS", "60000")
+)
+_INTERACTIVE_CHART_MARK = "data:text/html;base64,"
+_CHART_IFRAME_RE = re.compile(r"<iframe[^>]*>.*?</iframe>", re.IGNORECASE | re.DOTALL)
+
+
+def _carries_complete_chart_iframe(content_str: str) -> bool:
+    """内容里是否有**完整闭合**的交互式图表 iframe。
+
+    必须是完整的 `<iframe ...></iframe>`：已经被截断过的结果（只剩开头一千字符的
+    `<iframe src="data:text/html;base64,`）不算 —— 那种情况图已经丢了，落盘反而
+    能保住全文，让 read_file 还有得救。
+    """
+    if _INTERACTIVE_CHART_MARK not in content_str:
+        return False
+    return _CHART_IFRAME_RE.search(content_str) is not None
 
 
 def _text_md5(text: str) -> str:
@@ -111,6 +145,7 @@ class MessageSlimmerMiddleware(AgentMiddleware):
         *,
         backend: BackendProtocol | None = None,
         max_chars_before_truncate: int | None = _DEFAULT_MAX_CHARS_BEFORE_TRUNCATE,
+        chart_exempt_max_chars: int | None = _CHART_IFRAME_EXEMPT_MAX_CHARS,
     ) -> None:
         """初始化。
 
@@ -118,9 +153,12 @@ class MessageSlimmerMiddleware(AgentMiddleware):
             backend: 落盘超大工具结果用的后端（如 main_agent 的 composite_backend）。
                 None 时仍可去重，但超大结果不落盘（保持原样，等价只做去重）。
             max_chars_before_truncate: 触发截断的文本字符阈值；None 关闭截断（只去重）。
+            chart_exempt_max_chars: 图表结果免截断的体积上限；None 表示不设上限
+                （带完整交互式 iframe 的结果永不落盘）。见模块顶部说明。
         """
         self._backend = backend
         self._max_chars_before_truncate = max_chars_before_truncate
+        self._chart_exempt_max_chars = chart_exempt_max_chars
 
         # 超大工具结果落盘目录前缀。统一用 "/workspace/large_tool_results"：
         # 命中 CompositeBackend 的 "/workspace/" 路由 → workspace_data_backend
@@ -166,6 +204,26 @@ class MessageSlimmerMiddleware(AgentMiddleware):
             and len(content_str) > self._max_chars_before_truncate
         )
 
+    def _is_chart_exempt(self, content_str: str) -> bool:
+        """承载交互式图表的结果是否免于落盘截断（见模块顶部说明）。
+
+        超过 `chart_exempt_max_chars` 的仍落盘：那种量级不是正常图表，
+        不能让上下文无上限膨胀；此时记 warning 便于排查「图又没了」。
+        """
+        if not _carries_complete_chart_iframe(content_str):
+            return False
+        if (
+            self._chart_exempt_max_chars is not None
+            and len(content_str) > self._chart_exempt_max_chars
+        ):
+            _logger.warning(
+                "[MessageSlimmer] 图表结果 %d chars 超过免截断上限 %d，仍落盘截断",
+                len(content_str),
+                self._chart_exempt_max_chars,
+            )
+            return False
+        return True
+
     def _process_tool_message_sync(
         self, message: ToolMessage, prior_messages: list[Any]
     ) -> ToolMessage:
@@ -176,6 +234,13 @@ class MessageSlimmerMiddleware(AgentMiddleware):
 
         content_str = _extract_text_from_message(message)
         if self._backend is not None and self._should_truncate(content_str):
+            if self._is_chart_exempt(content_str):
+                _logger.info(
+                    "[MessageSlimmer] 图表结果 %d chars 免截断（保住完整 iframe，"
+                    "否则聊天与报告都会静默丢图）",
+                    len(content_str),
+                )
+                return message
             try:
                 processed = _offload_tool_message_content(
                     message, content_str, self._backend, self._large_tool_results_prefix
@@ -204,6 +269,13 @@ class MessageSlimmerMiddleware(AgentMiddleware):
 
         content_str = _extract_text_from_message(message)
         if self._backend is not None and self._should_truncate(content_str):
+            if self._is_chart_exempt(content_str):
+                _logger.info(
+                    "[MessageSlimmer] 图表结果 %d chars 免截断（保住完整 iframe，"
+                    "否则聊天与报告都会静默丢图）",
+                    len(content_str),
+                )
+                return message
             try:
                 processed = await _aoffload_tool_message_content(
                     message, content_str, self._backend, self._large_tool_results_prefix

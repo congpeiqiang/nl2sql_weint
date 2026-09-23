@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
@@ -310,6 +311,55 @@ def resolve_wren_ctx_by_db(db_name: str) -> tuple:
     except Exception as e:  # noqa: BLE001  fail-open
         _logger.warning("[wren_call_extract] wren 上下文解析失败 %r: %s", db_name, e)
         return "", {}
+
+
+# ── Cube 元数据：描述字典（报告业务口径用）───────────────────────────
+def load_cube_metadata(project_path: str, cube_name: str) -> dict:
+    """读 ``<project>/cubes/<cube>/metadata.yml`` → 描述字典；失败返回 ``{}``。
+
+    返回形如::
+
+        {
+          "cube_description": "音乐商店销售分析：收入、订单、客单价",
+          "measures": {"total_revenue": "总收入（单价 × 数量）"},
+          "dimensions": {"billing_country": "账单国家"},
+        }
+
+    报告「业务口径」两层（LLM 摘要 + 模板结构）都靠这份描述把 measure/dimension
+    的**技术名**翻成人话——用户看不懂 ``total_revenue``，但看得懂「总收入」。
+
+    **``read_text(encoding="utf-8")`` 必须带**：cube 元数据是中文，Windows 默认
+    GBK 解码会 ``UnicodeDecodeError``（同 ``wren_plan._mdl_path`` 附近记的坑）。
+
+    fail-open：项目路径/cube 名为空、文件不存在、YAML 解析失败 → 一律 ``{}``，
+    调用方按「没有描述」降级（展示原始字段名），绝不因此让报告生成失败。
+    """
+    if not project_path or not cube_name:
+        return {}
+    try:
+        import yaml  # 延迟 import：本模块顶层只留 stdlib
+
+        meta_file = Path(str(project_path)) / "cubes" / str(cube_name) / "metadata.yml"
+        if not meta_file.is_file():
+            return {}
+        doc = yaml.safe_load(meta_file.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict):
+            return {}
+        out: dict = {
+            "cube_description": str(doc.get("description") or ""),
+            "measures": {},
+            "dimensions": {},
+        }
+        for key in ("measures", "dimensions"):
+            for item in (doc.get(key) or []):
+                if isinstance(item, dict) and item.get("name"):
+                    out[key][str(item["name"])] = str(item.get("description") or "")
+        return out
+    except Exception as e:  # noqa: BLE001  fail-open
+        _logger.warning(
+            "[wren_call_extract] 读 cube 元数据失败 %s/%s: %s", project_path, cube_name, e
+        )
+        return {}
 
 
 # ── 对外：Cube 调用 → 定义 + SQL 快照 ────────────────────────────────
