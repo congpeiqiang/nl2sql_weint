@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from api._common import json_response
+from api._common import json_response, require_admin
 
 _logger = logging.getLogger(__name__)
 
@@ -70,6 +70,9 @@ def _bucket(recs: list) -> dict:
 
 
 async def feedback_stats(request: Request):
+    # P1：看板是**全站**聚合（跨所有用户的反馈量与正负比例）→ 仅管理员。
+    # 前端该页本就属标注/看板一组（/api/feedback/annotations 已是 admin），无影响。
+    require_admin(request)
     try:
         days = int(request.query_params.get("days", _DEFAULT_DAYS))
     except (TypeError, ValueError):

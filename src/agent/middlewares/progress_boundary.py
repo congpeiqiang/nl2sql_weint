@@ -50,7 +50,7 @@ _B_EXEC = 3
 
 # 工具名子串 → 桶。wrenai_<库名>_run_sql / dbmcp_run_sql 等带前缀，故用子串包含匹配。
 _EXEC_TOOL_SUB = ("run_sql", "query_cube", "dry_run", "dry_plan")
-# schema 里程碑 = merged 「理解建模」(nl2sql-understand) 的 Schema 建模起点。
+# schema 里程碑 = 取料技能 wren-retrieve 的 Schema 建模起点。
 # get_context/recall_queries/list_stored_queries 是理解建模的轻/知识检索（归 KNOW），
 # 不触发里程碑——否则 merged 第一步 get_context 就把「理解建模-清晰度与知识」误勾掉。
 _SCHEMA_TOOL_SUB = (

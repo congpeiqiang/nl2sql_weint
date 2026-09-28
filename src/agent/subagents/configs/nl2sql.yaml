@@ -52,6 +52,8 @@ tools:
   - get_all_knowledge   # 一次读取 metrics/glossary/caveats 全部知识文件
 
 # 技能路径（由主智能体 SkillsMiddleware 加载，子智能体自动继承）
+# 2026-09-25：skills/ 按组分挂——本目录 nl2sql/ 现为 wren-* 语义层 SOP 编排集（七技能），
+# 原自研八步流水线已归档 /shared/skills_bak/；主智能体另读 /shared/skills/main/。
 skills:
   - /shared/skills/nl2sql/
 

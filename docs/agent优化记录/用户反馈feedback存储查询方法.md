@@ -1,7 +1,7 @@
 # Feedback 存储查询方法
 
-反馈数据存在 SQLite 单文件 [src/agent/workspace/feedback/message_feedback.db](../../src/agent/workspace-temp/feedback/message_feedback.db)，
-（已 gitignore，不入库）。表结构：
+反馈数据存在 SQLite 单文件 `<AGENT_DATA_ROOT>/workspace/feedback/message_feedback.db`，工作区路径钉死
+（2026-09-25 起；未配 `AGENT_DATA_ROOT` 的部署回退 `src/agent/workspace/feedback/`，不入库）。表结构：
 
 ```sql
 feedback(

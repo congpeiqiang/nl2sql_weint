@@ -33,7 +33,27 @@ def check(cond: bool, label: str, detail: str = "") -> None:
 
 
 def client_of(uid: str, is_admin: bool) -> httpx.Client:
-    token = sign_token(uid, uid, is_admin)
+    """手签一枚 token 冒充某用户（**在容器内跑**，容器里就是 /app/src）。
+
+    P1-12 起 `verify_token` 会拿 token 里的 `pv` 与**该账号当前**的
+    `token_version` 比对 → 手签时必须带上当前版本号，否则：
+      · 账号不存在 → 401（新行为：记录是唯一真源）
+      · 账号改过密码（token_version ≥ 1）→ 401
+    这两种以前都能"签个 token 就进"，现在会以同一个 401 表现 ⇒ 这里显式打印原因，
+    不然排查时会误以为是"隔离逻辑坏了"。
+    """
+    version = 0
+    try:
+        from agent.auth.users import find_user, token_version_of
+
+        record = find_user(uid)
+        if record is None:
+            print(f"  ⚠️ 用户 {uid} 不在 auth_users.json 里 → 手签的 token 会被判无效（401）")
+        else:
+            version = token_version_of(record)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️ 读用户记录失败（按 token_version=0 签）: {e}")
+    token = sign_token(uid, uid, is_admin, token_version=version)
     return httpx.Client(
         base_url=BASE,
         headers={"Cookie": f"nl2sql_token={token}"},
@@ -141,6 +161,10 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-运行方式（在 nl2sql 后端容器内，用 stdin 灌进去，不需要在容器里留文件）：
-    ssh -o BatchMode=yes weint@192.168.25.64 \n      "docker exec -i nl2sql-app_langgraph-api_1 python -" < scripts/e2e_thread_isolation.py
-  （cleanup 需加 --delete / --purge-grants 才真删；E2E 自带断言、会自建自删两条会话）
+# 运行方式（脚本随发版已落在容器内 /app/scripts/，直接 exec 即可）：
+#   ssh -o BatchMode=yes weint@192.168.25.64 \
+#     "docker exec nl2sql-app_langgraph-api_1 /app/.venv/bin/python /app/scripts/e2e_thread_isolation.py"
+# 也可用 stdin 灌进去而不在容器里留文件：
+#   ssh -o BatchMode=yes weint@192.168.25.64 \
+#     "docker exec -i nl2sql-app_langgraph-api_1 /app/.venv/bin/python -" < scripts/e2e_thread_isolation.py
+# 注：cleanup 脚本需加 --delete / --purge-grants 才真删；本 E2E 自带断言、会自建自删两条会话。

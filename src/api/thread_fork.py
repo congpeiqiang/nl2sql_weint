@@ -28,6 +28,7 @@ import httpx
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
+from agent.utils.offload import offload
 from api._common import json_response, parse_body
 
 _logger = logging.getLogger(__name__)
@@ -140,7 +141,8 @@ async def fork_thread(request: Request):
         # P2：登记分叉会话归属
         user_id = user.get("user_id") if user else None
         if user_id:
-            claim_thread(new_tid, user_id)
+            # P1-14：sqlite 写（fsync）——与中间件里那条同性质，别挂在事件循环上
+            await offload(claim_thread, new_tid, user_id)
 
         # 2. （可选）定位锚点 checkpoint 并回退 head
         if message_id:

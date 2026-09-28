@@ -3,7 +3,7 @@
 
 背景：schedule_judge 旧实现每次采样 spawn 一个 fire-and-forget daemon 线程，
 进程崩溃/异常退出即丢任务、失败无重试无留痕。本模块把待评任务持久化到
-`{AGENT_DATA_ROOT}/eval_queue.sqlite`，由单例守护 worker 拉取执行：
+`{AGENT_DATA_ROOT}/eval_queue/eval_queue.sqlite`（一库一目录），由单例守护 worker 拉取执行：
 - 进程重启/崩溃后残留 pending/running 自动续跑（补评）；
 - 同任务重试上限 `_MAX_ATTEMPTS`，超限置 failed 并留 last_error（可查）；
 - 幂等去重：同一 (trace_id, kind) 同一时刻至多 1 条在途（部分唯一索引），
@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sqlite3
 import threading
 import time
@@ -37,16 +36,24 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from agent.eval.eval_flags import judge_enabled
+from agent.utils import sqlite_paths
+from agent.utils.prom_metrics import metered_rlock
+from agent.utils.sqlite_paths import resolve_store_db
 
 _logger = logging.getLogger(__name__)
 
-_LOCK = threading.RLock()
+# P2-3：带计量的可重入锁（store="eval_queue"）
+_LOCK = metered_rlock("eval_queue")
 
 _MAX_ATTEMPTS = 3          # 单任务最多尝试次数（超过置 failed 留痕）
 _CLAIM_BATCH = 5           # 每轮领取任务数
 _IDLE_SLEEP = 0.5          # 空队列轮询间隔（秒）
 _RETRY_SLEEP = 1.0         # store 初始化异常退避（秒）
 _PAUSE_SLEEP = 30.0        # 评估开关关闭时的暂停轮询间隔（秒，不领取任务）
+
+# `UPDATE … RETURNING` 需要 SQLite ≥ 3.35（2021-03）。见 claim() 的并发说明：
+# 有它才能让「领取」跨进程原子。老版本自动退回锁内两步法，不影响可用性。
+_SUPPORTS_RETURNING = sqlite3.sqlite_version_info >= (3, 35, 0)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS eval_queue (
@@ -74,6 +81,7 @@ _RUNNER: Optional[Callable] = None      # judge 执行体（evaluators 注入）
 _STOP = threading.Event()
 _WORKER: Optional[threading.Thread] = None
 _WORKER_LOCK = threading.Lock()
+_STORE_LOCK = threading.Lock()
 
 
 def _now() -> str:
@@ -81,20 +89,14 @@ def _now() -> str:
 
 
 def _db_path() -> Path:
-    """队列文件路径：AGENT_DATA_ROOT/eval_queue.sqlite（data_root = AGENT_DATA_ROOT）。
+    """队列文件路径：`<AGENT_DATA_ROOT>/eval_queue/eval_queue.sqlite`（一库一目录）。
 
-    workspace_manager 解析失败时回退 AGENT_DATA_ROOT 环境变量（再不行当前目录），
+    2026-09-25 起从数据根目录归位到同名子目录（库 + `-wal` + `-shm` 同处一目录；
+    根上的老三件套由 `agent.utils.sqlite_paths` 首次建连时接管，见该模块文件头）。
+    data_root 解析失败时回退 AGENT_DATA_ROOT 环境变量（再不行当前目录），
     保证 CLI / 缺配置场景也能落地。
     """
-    try:
-        from agent.workspace_manager import get_workspace_manager  # 惰性，防 import 环
-
-        root = Path(get_workspace_manager().data_root)
-    except Exception:  # noqa: BLE001
-        root = Path(os.getenv("AGENT_DATA_ROOT", "") or ".")
-    p = root / "eval_queue.sqlite"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return resolve_store_db(sqlite_paths.data_root(), "eval_queue")
 
 
 class EvalQueueStore:
@@ -104,10 +106,13 @@ class EvalQueueStore:
         p = path or _db_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         self._path = p
-        self._conn = sqlite3.connect(str(p), check_same_thread=False)
+        self._conn = sqlite3.connect(str(p), check_same_thread=False, timeout=15.0)
         self._conn.row_factory = sqlite3.Row
         with _LOCK:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # 跨进程写等待：守护 worker（uvicorn 进程）与 `--replay`/CLI 会同时
+            # 操作同一份 eval_queue.sqlite，默认 5s 在满队列时不够。
+            self._conn.execute("PRAGMA busy_timeout=15000")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
         _logger.info("[eval_queue] 待评队列就绪: %s", p)
@@ -147,8 +152,33 @@ class EvalQueueStore:
                 return 0
 
     def claim(self, batch: int = _CLAIM_BATCH) -> list[dict]:
-        """领取一批 pending 任务并置 running（锁内领取；执行在锁外）。"""
+        """领取一批 pending 任务并置 running（领取原子；执行在锁外）。
+
+        并发语义：`_LOCK` 只保证**本进程内**串行。同一份队列还可能被另一个进程
+        打开（CLI `--replay` / 第二个 worker / 补评脚本），所以「SELECT pending →
+        UPDATE running」这种两步写法跨进程会重复领取 —— 同一个 judge 任务被跑
+        两遍（双倍 token，且两次结果互相覆盖）。
+
+        有 `RETURNING`（SQLite ≥ 3.35，2021 起）时用**单条 UPDATE … RETURNING**
+        完成领取：取行与改状态是同一条语句、同一个写事务，跨进程也只会有一个
+        赢家（另一个的 UPDATE 子查询已看不到 pending 行）。老 SQLite 退回到
+        锁内两步法（此时至少保证进程内不重复）。
+        """
         with _LOCK:
+            if _SUPPORTS_RETURNING:
+                try:
+                    cur = self._conn.execute(
+                        "UPDATE eval_queue SET state='running', updated_at=?"
+                        " WHERE id IN (SELECT id FROM eval_queue WHERE state='pending'"
+                        "              ORDER BY id LIMIT ?)"
+                        " RETURNING id, kind, trace_id, question_thread, payload_json, attempts",
+                        (_now(), batch),
+                    )
+                    rows = [dict(r) for r in cur.fetchall()]
+                    self._conn.commit()
+                    return rows
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning("[eval_queue] claim(RETURNING) 失败，回退两步法: %s", e)
             try:
                 rows = self._conn.execute(
                     "SELECT id, kind, trace_id, question_thread, payload_json, attempts"
@@ -200,10 +230,18 @@ class EvalQueueStore:
 
 
 def _get_store() -> EvalQueueStore:
+    """进程内单例 store（并发首访只建一条连接 → 用 `_WORKER_LOCK` 之外单独一把锁）。
+
+    `_get_store()` 会被 HTTP 请求线程（enqueue）与守护 worker 线程同时调用，
+    无锁双检会各建一个实例：一条连接泄漏，且两个实例各自持有队列视图。
+    """
     global _STORE
-    if _STORE is None:
-        _STORE = EvalQueueStore()
-    return _STORE
+    if _STORE is not None:
+        return _STORE
+    with _STORE_LOCK:
+        if _STORE is None:
+            _STORE = EvalQueueStore()
+        return _STORE
 
 
 # ── 对外 API（evaluators.schedule_judge 调用）────────────

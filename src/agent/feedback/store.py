@@ -12,7 +12,8 @@ state、不打扰 LLM 上下文；后续通过导出端点回流 NL2SQL 评测�
 - SQLite 单文件（默认 `src/agent/workspace/feedback/message_feedback.db`，已 gitignore）。
 - 表 feedback(thread_id, message_id, rating, note, version, created_at, updated_at,
   context_json, question, sql)，PRIMARY KEY(thread_id, message_id)。
-- 进程内锁 `threading.RLock` 串行化读写；单连接 check_same_thread=False + WAL。
+- 进程内锁串行化读写（P2-3 起是带计量的 `metered_rlock`，见 agent/utils/prom_metrics.py）；
+  单连接 check_same_thread=False + WAL。
 - 首次启动时若旧 message_feedback.json 存在且 SQLite 无数据，做一次性迁移。
 """
 from __future__ import annotations
@@ -21,7 +22,6 @@ import json
 import logging
 import os
 import sqlite3
-import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -29,7 +29,10 @@ from typing import Optional
 
 _logger = logging.getLogger(__name__)
 
-_LOCK = threading.RLock()
+from agent.utils.prom_metrics import metered_rlock
+
+# P2-3：带计量的可重入锁（store 标签进 nl2sql_sqlite_lock_wait_seconds）
+_LOCK = metered_rlock("feedback")
 
 # 默认存储位置：优先 .env MESSAGE_FEEDBACK_PATH，否则由 WorkspaceManager 动态解析
 _DEFAULT_PATH = os.getenv("MESSAGE_FEEDBACK_PATH", "") or None
@@ -227,10 +230,12 @@ class FeedbackStore:
             from agent.workspace_manager import get_workspace_manager
             self._path = get_workspace_manager().shared_feedback_dir / "message_feedback.db"
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        self._conn = sqlite3.connect(str(self._path), check_same_thread=False, timeout=15.0)
         self._conn.row_factory = sqlite3.Row
         with _LOCK:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # 跨进程写等待：API 进程与 CLI/标注脚本可能同时访问同一份反馈库。
+            self._conn.execute("PRAGMA busy_timeout=15000")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
         self._migrate_schema()

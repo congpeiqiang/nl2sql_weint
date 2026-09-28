@@ -105,7 +105,7 @@ arm = `{name, prompt_label?, skill_ref?, semantic_ref?}`。未指定维度走默
 
 - `git_archive.py`：从 `semantic_db._git_archive_materialize` 提取为共享 `git_archive_materialize(base, ref, dest_root)`（`git archive <ref> <relpath> -o tmp.tar` → 解压；`--project` 指向物化目录即换语义库/skill 版本）。
 - `SKILLS_REF` 取值形态：`<ref>`（仓库内置目录 src/agent/shared/skills）或 `<path>@<ref>`（显式源）；未设/物化失败 → 原样返回默认 sources（磁盘 skill），生产默认行为不变。
-- 物化到 `<data_root>/offline_experiment/skill_refs/<safe_ref>/`（须在 data_root 内，否则 `vfs_root_backend` 无法解析）；`git archive` 子树带 `src/agent/shared/skills/` 前缀 → 提升后 VFS 路径 `/offline_experiment/skill_refs/<safe_ref>/{main,nl2sql}/` 直接命中。
+- 物化到 `<data_root>/offline_experiment/skill_refs/<src标签>_<safe_ref>/`（**2026-09-24 起目录名含 src 标签**：`<path>@<ref>` 与裸 `<ref>` 两个来源必须各用各的目录，否则同 ref 的后者会删掉前者正在服务的那份，详见 P2-10② 审计；须在 data_root 内，否则 `vfs_root_backend` 无法解析）；`git archive` 子树带 `src/agent/shared/skills/` 前缀 → 提升后 VFS 路径 `/offline_experiment/skill_refs/<src标签>_<safe_ref>/{main,nl2sql}/` 直接命中（**目录名两侧同源取名**，见 `skills_versioning._ref_dir_name`，它不是 CompositeBackend 挂载名而是拼出来的物理路径）。产物先在 `.stage-*` 暂存里做全再原子换入，运行中的 run 不会读到残缺技能。
 - 接线：`nl2sql_agent.py` / `main_agent.py` 的 `SkillsMiddleware` sources 用 `effective_skills_sources(default, group)`。
 
 ### 5.4b prompt 版本快照（prompt_versioning.py，2026-09-12）
@@ -114,8 +114,8 @@ arm = `{name, prompt_label?, skill_ref?, semantic_ref?}`。未指定维度走默
 
 | 维度 | 落盘位置 | 机制 |
 |---|---|---|
-| `skill_ref` | `<data_root>/offline_experiment/skill_refs/<safe_ref>/` | git archive / 远程浅克隆 + `.skills_ok` marker |
-| `semantic_ref` | `<data_root>/offline_experiment/semantic_refs/<db>/<ref>/` | git archive / origin 浅克隆 + `.nl2sql_wren_ok` marker |
+| `skill_ref` | `<data_root>/offline_experiment/skill_refs/<src标签>_<safe_ref>/` | git archive / 远程浅克隆 + `.skills_ok` marker（2026-09-24 起目录名含 src 标签） |
+| `semantic_ref` | `<data_root>/offline_experiment/semantic_refs/<db>/<src标签>_<ref>/` | git archive / origin 浅克隆 + `.nl2sql_wren_ok` marker（同上，2026-09-24 起目录名含 src 标签） |
 | `prompt_label` | `<data_root>/offline_experiment/prompt_refs/<label>@v<main>-<指纹>/` | **本模块**：按 label 拉版本号 + 正文落盘 + `.prompts_ok` marker |
 
 顶层目录约定（2026-09-12）：离线实验的**物化缓存**统一收在 `<data_root>/offline_experiment/` 下（父目录由 `workspace_manager.OFFLINE_EXPERIMENT_DIR_NAME` + `offline_experiment_dir` 属性单一提供，VFS 路径 `skills_versioning.effective_skills_sources` 同源取名）。三个维度现已同父：`skill_refs/`（skill）、`semantic_refs/`（语义库，同日由系统临时目录迁入——tmp 随容器换代清空，会导致每发一版各库版本首用重克隆）、`prompt_refs/`（prompt）。旧布局 `<data_root>/{skill_refs,prompt_refs}` 与旧 tmp 缓存 `<临时目录>/nl2sql_wren_semantic_cache/` 已废弃且**不自动迁移**——代码只认新路径，生产旧目录需运维 `mv`（保留 `.skills_ok` / `.nl2sql_wren_ok` 可免重物化）或删除（首用会重新物化一次）。实验的 **run 产物不在此目录**，仍在 `<active_workspace>/eval/experiment_runs/`（它按工作区隔离，见 §2）。

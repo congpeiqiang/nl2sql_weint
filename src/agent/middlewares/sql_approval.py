@@ -54,7 +54,7 @@ _STRING_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
 # Wren 的 run_sql 在服务端**无条件**追加 ``LIMIT {limit+1}``（_query_with_limit_probe
 # 多取一行探测是否截断），SQL 若自带尾部 LIMIT 会变成 ``…LIMIT n\nLIMIT n+1``
 # → MySQL 1064（如 `near 'LIMIT 1001' at line 2`）。
-# 子 agent 各 skill 仍残留直连时代「始终加 LIMIT」旧指令（sql-of-thought 性能节、
+# 子 agent 各 skill 仍残留直连时代「始终加 LIMIT」旧指令（wren-perf-optimize 性能节、
 # performance-optimization 规则 2、sql-validate 自动补 LIMIT），模型常自带 LIMIT。
 # 故在工具边界做防御：剥掉**最外层尾部**整数 LIMIT 并折算进 limit 参数——
 # 与 run_sql 的 `limit` 参数契约对齐（SQL 不带 LIMIT、由服务端追加）。

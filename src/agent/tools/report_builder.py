@@ -18,7 +18,9 @@ token），且极易在途中漏掉/改写 iframe 导致报告不可交互。
 """
 import json
 import logging
+import os
 import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -26,6 +28,18 @@ from typing import Annotated
 from langchain.tools import ToolRuntime
 from langchain_core.tools import InjectedToolArg, StructuredTool
 from pydantic import BaseModel, Field
+
+# 业务口径的解析 / 逐字核验与子 agent 侧 `CaliberGateMiddleware` **共用同一份实现**
+# （本文件下方以 `_` 前缀再导出同名符号，既有脚本的 import 断言不变）。
+from agent.utils.caliber_evidence import (
+    CALIBER_MAX_ITEMS as _CALIBER_MAX_ITEMS,
+    CaliberVerdict,
+    load_knowledge_corpus,
+    parse_caliber_block as _parse_caliber_block,
+    split_caliber_item as _split_caliber_item,
+    strip_caliber_block,
+    verify_caliber_entries,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -180,6 +194,274 @@ def _field_list_readable(names, meta: dict) -> str:
         desc = (meta or {}).get(name) or ""
         out.append(f"{desc} · {name}" if desc else name)
     return "、".join(out)
+
+
+# ── 业务口径（报告的「## N. 业务口径」节）────────────────────────────
+# 合约：一行一条，三字段用 `|` 分隔 —— `口径项 | 内容 | 出处`。用 `|` 而非嵌套对象
+# 与仓内其他工具同形（measures/filters 都是 list[str]），模型出参成本最低；解析不出
+# 三段时**降级为单条列表项**，绝不因格式问题丢内容。
+#
+# 解析（`_parse_caliber_block`）与逐字核验（`_split_caliber_item` /
+# `verify_caliber_entries` / `load_knowledge_corpus`）都是顶部从
+# `agent.utils.caliber_evidence` 再导出的**同一份实现** —— 子 agent 侧
+# `CaliberGateMiddleware` 用它们决定打回重写，本文件用它们决定报告怎么标注。
+# 两处共用一份 ⇒ 不会出现「闸门说合规、报告说未核验」的两套账。
+# 兜底通道（默认关）：>0 时把语义库 `knowledge/rules/*.md` 原文附到报告末尾。
+# 生产实测（2026-09-25 16:34 日志）口径原文本就进了子 agent 上下文——MessageSlimmer
+# 知识类免截断对 `get_instructions` 生效（「20049 chars 免截断」），故默认走「模型
+# 选条 + 出处标注」；本开关是「宁可啰嗦也不漏」的最后一道保险。
+_CALIBER_APPENDIX_MAX_CHARS = int(
+    os.environ.get("REPORT_CALIBER_APPENDIX_MAX_CHARS", "0") or "0"
+)
+
+
+def _cell(s) -> str:
+    """Markdown 表格单元格：转义竖线、折叠换行（否则整张表被撑散）。"""
+    return str(s or "").replace("|", "\\|").replace("\n", " ").strip()
+
+
+# SQL 生成来源（`result["sql_origin"]`）→ 报告里那行 blockquote 的措辞。
+# 判决本身只由 `agent.utils.process_audit.judge_sql_origin` 产生（确定性、零模型
+# 往返），报告侧**只负责翻译**，不参与判断 —— 报告不允许自己编一个来源。
+_SQL_ORIGIN_TEXT = {
+    # 由 Cube 语义层的具名指标直接编译下发（未经模型手写 SQL）
+    "cube_metric": "由 Cube 语义层的具名指标直接编译下发（未经模型手写 SQL）",
+    # Cube 出指标主体 + 模型包外层 —— 用户最想区分的那一态
+    "cube_metric+llm_outer": "Cube 语义层出指标主体，模型手写外层（混合路径）",
+    "llm_from_schema": "模型依据语义库 schema 手写（未使用 Cube 具名指标）",
+}
+_SQL_ORIGIN_MIXED_TITLE = "执行 SQL（Cube 指标主体 + 模型手写外层，实际下发）"
+
+
+def _sql_origin_line(result_obj) -> str:
+    """一行「SQL 生成来源」（blockquote 单行，`_cell` 保证不撑散排版）。
+
+    **`unknown` / 字段缺席 → 返回空串**：老 check 结果没有这个字段，此时报告与改动
+    前逐字一致（不给读不出来源的报告硬安一个来源）。四态里只有三态有文案，第四态
+    「说不出来」的正确表达就是不说话。
+    """
+    if not isinstance(result_obj, dict):
+        return ""
+    text = _SQL_ORIGIN_TEXT.get(str(result_obj.get("sql_origin") or ""))
+    return f"> SQL 生成来源：{_cell(text)}" if text else ""
+
+
+def _render_business_caliber(entries, verdicts=None) -> str:
+    """口径条目 → Markdown 表「口径项 / 内容 / 出处」。
+
+    某条解析不出三段（无 `|` 或字段缺）时降级为列表项，**不丢内容**。返回空串表示
+    无可用口径 → 调用方整节跳过（不留空标题）。
+
+    `verdicts`（`utils.caliber_evidence.CaliberVerdict` 列表，与 `entries` 按下标对齐）
+    **只在报告侧产生**，决定脚注说什么、不通过的行去哪。缺省 `None` = 没做核验
+    （读不到语料 / 该节来自主 agent 传参而非子 agent 块）⇒ 脚注只能声明「未核验」。
+
+    ⚠️ 旧实现此处**无条件**写「口径取自语义库知识库原文…未做推断」。生产 trace
+    `9c81d3181f2a72f27cf9d092d7185fab` 的表里 `出处` 全是 `workhour_analysis（Cube）`/
+    `v_workhour`/`语义库字段字典`，**一个知识库文件都没有** —— 那句脚注与表内容无关，
+    等于报告在撒谎。本函数现在按核验结论分态，且**任何一态都不再出现那句话**。
+    """
+    # 条目 → 核验结论：用「归一后的条目字符串」做键而不是下标 —— `split_caliber_item`
+    # 为 None 的条目（loose）不参与核验，下标会对不上。归一化必须与下面取 `s` 的那步
+    # **完全一致**（含 `.strip("|")`），否则 `| a | b | c |` 这种带外框的写法会取不到
+    # 结论而被当成「通过」（静默放过，比误杀危险得多）。
+    by_item: dict[str, CaliberVerdict] = {}
+    for v in verdicts or []:
+        by_item.setdefault(str(v.item).strip().strip("|").strip(), v)
+
+    ok_rows: list[tuple[str, str, str]] = []
+    bad_rows: list[tuple[str, str, str, str]] = []
+    loose: list[str] = []
+    for it in entries or []:
+        s = str(it or "").strip().strip("|").strip()
+        if not s:
+            continue
+        cells = _split_caliber_item(s)
+        if cells is None:
+            # 降级成列表项：整行是纯文本（不在表格里）⇒ **不转义竖线**，只折空白。
+            # 转义只对表格单元格必要，对列表项反而把它读成 `\|`。
+            loose.append(" ".join(s.split()))
+            continue
+        a, b, c = (_cell(cells[0]), _cell(cells[1]), _cell(cells[2]))
+        v = by_item.get(s)
+        if v is None or v.ok:
+            ok_rows.append((a, b, c))
+        else:
+            bad_rows.append((a, b, c, _cell(_verdict_label(v))))
+    if not ok_rows and not bad_rows and not loose:
+        return ""
+
+    n_all = len(ok_rows) + len(bad_rows)
+    out: list[str] = []
+    if ok_rows:
+        out += ["| 口径项 | 内容 | 出处 |", "|---|---|---|"]
+        out += [f"| {a} | {b} | {c} |" for a, b, c in ok_rows]
+    # 不通过的行**不删**（内容是模型原话，用户需要看到它错在哪），但搬进第二张表并
+    # 标出结论 —— 留在原表里加 ⚠️ 会被误读成「这条只是可疑」，单列一表才读得出
+    # 「这些不是知识库原文」。
+    if bad_rows:
+        if out:
+            out.append("")
+        out += [
+            f"**未通过核验的口径（{len(bad_rows)} 条）** —— 以下条目**不是**知识库原文，"
+            "请勿据此对外解释口径：",
+            "",
+            "| 口径项 | 内容（模型自述） | 出处（不成立） | 核验结论 |",
+            "|---|---|---|---|",
+        ]
+        out += [f"| {a} | {b} | {c} | {d} |" for a, b, c, d in bad_rows]
+    # 脚注：**只声明代码能证的事**。没有任何一态会替模型夸口「取自知识库原文」。
+    note = _caliber_note(n_all, len(ok_rows), len(bad_rows), bool(verdicts))
+    if note:
+        out += ["", note]
+    if loose:
+        if out:
+            out.append("")
+        out += [f"- {x}" for x in loose]
+    return "\n".join(out)
+
+
+# 核验结论 → 表格里的短标签（长文案留在日志与纠正消息里，表宽有限）。
+_VERDICT_LABEL = {
+    "source_not_kb_file": "出处不是知识库文件名",
+    "content_not_verbatim": "内容非原文（被改写/概括）",
+    "ellipsis_fragment_too_short": "省略号片段过短",
+    "ellipsis_too_many": "省略号过多",
+    "ellipsis_too_much_hidden": "省略过多",
+    "segments_not_found": "省略号各段未按序命中",
+    "content_empty": "内容为空",
+    "item_not_three_fields": "条目格式不足三段",
+    "corpus_empty": "读不到语料，无法核验",
+}
+
+
+def _verdict_label(v: CaliberVerdict) -> str:
+    """核验结论短标签；出处错但内容确在某个文件里时补上「其实在哪个文件」。"""
+    label = _VERDICT_LABEL.get(v.reason or "", v.reason or "未通过")
+    if v.reason == "source_not_kb_file" and v.closest:
+        label += f"（原文见 {v.closest}）"
+    return label
+
+
+def _caliber_note(n_all: int, n_ok: int, n_bad: int, verified: bool) -> str:
+    """本节脚注 —— 四态，措辞严格限定在「代码确实证过的范围」内。
+
+    `verified=False`（未做核验：读不到语料 / 块来自主 agent 传参）时**绝不大意**：
+    只能说「出处形如文件名」，不能说「已核验」。
+    """
+    if not verified:
+        if n_all == 0:
+            return ""
+        return (
+            "> ⚠️ 本次**未对口径内容做原文逐字核验**（读不到该库的知识库文件，"
+            "或本节口径非子 agent 检索所得）；上表出处为模型自述，仅供参考。"
+        )
+    if n_bad == 0:
+        if n_all == 0:
+            return ""
+        return (
+            f"> ✅ 上表 {n_all} 条口径的`出处`均为知识库真实文件名，"
+            "且`内容`与该文件原文**逐字一致**（程序化核验，可 `…` 省略中段）。"
+        )
+    if n_ok == 0:
+        # 这一态没有主表，只有上面那张「未通过核验的口径」表 ⇒ 指向要说清，别写「见上表」。
+        return (
+            f"> ⚠️ 本节 {n_bad} 条口径**全部未通过**原文核验，"
+            "均非知识库原文（见上方「未通过核验的口径」表），**不要据此判断答案口径**。"
+        )
+    return (
+        f"> ⚠️ 本节共 {n_all} 条口径：{n_ok} 条经原文逐字核验通过（见上表），"
+        f"{n_bad} 条**未通过**（见下方「未通过核验的口径」表）—— "
+        "未通过的条目是模型转述或出处不明，**不是知识库原文**。"
+    )
+
+
+
+
+def _current_db_name() -> str:
+    """当前库名（configurable.db_name）。取不到 → 会话账本兜底 → 仍取不到返回空串。
+
+    ⚠️ 兜底那一段是 2026-09-26 生产实证倒逼的（trace `eaf1c8b2…`）：报告**永远**由
+    同步循环建出来的**续跑 run** 落盘（子 agent 完成后 `runs.create` 触发主 agent
+    继续跑），而那条 run 的 `configurable` 是手拼的、只有 user_id（见
+    `agent/subagents/sync_subagent_todos.py::_notify_main_agent_to_continue`，已修）
+    ⇒ `db_name` 读成空 ⇒ `load_knowledge_corpus("")` 直接 `[]` ⇒ 报告侧**逐字核验
+    永远降级**成「未核验」，而同一 run 的子 agent 侧闸门（db_name 由父 run 透传）却有
+    语料 —— 就是「闸门说 9/11、报告说未核验」的两套账。
+
+    兜底取 `thread_db` 账本（每个建 run 的请求都会记「本会话用过哪个库」，且写的是
+    **钳制之后**的值）：只在**恰好记着一个库**时采用。多库＝拿不准，宁可标「未核验」
+    也不能拿错库的语料去判模型不合规——那是比不核验更坏的谎报方向。
+    """
+    try:
+        from langgraph.config import get_config
+
+        cfg = get_config() or {}
+        db = str((cfg.get("configurable") or {}).get("db_name", "") or "")
+        if db:
+            return db
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _, tid = _current_identity()
+        if not tid:
+            return ""
+        from agent.auth.grants import dbs_for_thread
+
+        cands = [d for d in dbs_for_thread(tid) if d]
+        if len(cands) == 1:
+            _logger.info("[build_report] configurable 无 db_name，回退会话账本：库 %s", cands[0])
+            return cands[0]
+        _logger.info(
+            "[build_report] configurable 无 db_name，会话账本记着 %d 个库 → 不猜（标未核验）",
+            len(cands),
+        )
+    except Exception as e:  # noqa: BLE001  兜底失败 = 维持原行为（标未核验）
+        _logger.debug("[build_report] 会话账本兜底失败: %s", e)
+    return ""
+
+
+def _caliber_appendix(result_obj) -> str:
+    """兜底通道：语义库 `knowledge/rules/*.md` 原文（由 env 开关开启时）。
+
+    唯一不依赖模型自觉的「报告必含业务口径」通道：按当前 db_name 解析 wren 项目目录，
+    直接读规则原文附在报告末尾。任何一步失败返回空串（fail-open，报告照出）。
+    """
+    if _CALIBER_APPENDIX_MAX_CHARS <= 0:
+        return ""
+    try:
+        from agent.utils.wren_call_extract import resolve_wren_ctx_by_db
+
+        db = _current_db_name()
+        if not db:
+            return ""
+        project, _ = resolve_wren_ctx_by_db(db)
+        if not project:
+            return ""
+        rules_dir = Path(str(project)) / "knowledge" / "rules"
+        if not rules_dir.is_dir():
+            return ""
+        budget = _CALIBER_APPENDIX_MAX_CHARS
+        parts: list[str] = []
+        for f in sorted(rules_dir.glob("*.md")):
+            try:
+                text = f.read_text(encoding="utf-8").strip()
+            except Exception:  # noqa: BLE001  单文件读失败不影响其余
+                continue
+            if not text:
+                continue
+            if len(text) > budget:
+                text = text[:budget].rstrip() + f"\n…（{f.name} 余下省略）"
+            parts.append(f"### {f.name}\n\n{text}")
+            budget -= len(text)
+            if budget <= 0:
+                break
+        if not parts:
+            return ""
+        return "\n\n".join(parts)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[build_report] 口径附录读取失败（跳过）: %s", e)
+        return ""
 
 
 def _render_cube_layer_b(cube_args: dict, metadata: dict) -> str:
@@ -448,6 +730,33 @@ def _turn_chart_iframes(messages) -> list[str]:
     return _find_all_iframes(tool_msgs)
 
 
+def _current_identity() -> tuple[str, str]:
+    """当前 run 的 (user_id, thread_id)。
+
+    身份取自 `langgraph.config.get_config()` 的 configurable —— 外部 run 请求里的
+    这两个键已由 `LangfuseMetadataMiddleware` 按登录身份钳制（P1-2），不会被客户端
+    伪造；离线脚本/直调场景读不到就返回空串，由调用方兜底。
+    """
+    try:
+        from langgraph.config import get_config
+
+        cfg = get_config().get("configurable", {}) or {}
+        return str(cfg.get("user_id") or ""), str(cfg.get("thread_id") or "")
+    except Exception:  # noqa: BLE001
+        return "", ""
+
+
+def _thread_tag() -> str:
+    """文件名里的会话短标识（同名同秒去重用）。
+
+    读不到会话时用随机 8 hex 兜底 —— **不能返回空串**：空串会让「两个用户同秒出
+    同名报告」又回到互相覆盖，而那正是本函数要防的场景。
+    """
+    _, tid = _current_identity()
+    tag = re.sub(r"[^0-9a-zA-Z]", "", tid)[:8]
+    return tag or uuid.uuid4().hex[:8]
+
+
 class BuildReportSchema(BaseModel):
     """build_report 输入。"""
 
@@ -456,6 +765,19 @@ class BuildReportSchema(BaseModel):
     )
     analysis: str = Field(
         description="对查询结果的分析解读，Markdown 文本（可用 **加粗**、- 列表、### 小节等）。"
+    )
+    business_caliber: list[str] = Field(
+        default_factory=list,
+        description=(
+            "（可选）本次结论依据的业务口径，每条一行、三字段用 | 分隔："
+            "`口径项 | 内容 | 出处`，如 "
+            "`已审核工时 | if_approve = 1 的 work_hour 之和 | rules/报工与工时.md R3`。"
+            "**内容必须逐字取自知识库原文**（可 `…` 省略中段，不可改写/概括），"
+            "出处必须是知识库里真实存在的文件名（有条目号就一并写），没取到就留空、"
+            "**不要编**（表名、视图名 v_*、Cube 名、字段字典都**不是**出处）。"
+            "本工具会**逐条做出处 + 内容逐字核验**，未通过的条目在报告里单列并标注。"
+            "不传时自动从子任务结果的「业务口径」块提取。"
+        ),
     )
     task_id: str = Field(
         default="",
@@ -468,6 +790,7 @@ async def _build_report_coro(
     analysis: str,
     task_id: str,
     runtime: Annotated[ToolRuntime, InjectedToolArg()],
+    business_caliber: list[str] | None = None,
 ) -> str:
     try:
         state = runtime.state or {}
@@ -494,13 +817,62 @@ async def _build_report_coro(
     cube_query = _obj.get("cube_query", "") if isinstance(_obj, dict) else ""
     cube_query = cube_query.strip() if isinstance(cube_query, str) else ""
 
+    # ── 业务口径：① 主 agent 显式传参 → ② 从子任务结果抽「业务口径」块 → ③ 都无则整节跳过 ──
+    # ② 是主路径：口径原文（knowledge/rules/*.md）是**子 agent** 拿到的（MessageSlimmer
+    # 知识类免截断保证它进上下文，生产日志实证），主 agent 只看到摘要过的结果 ⇒ 不能只
+    # 依赖主 agent 转述。子 agent 最终回复末尾带「## 业务口径」块（契约见系统提示词）。
+    _caliber: list[str] = [str(x) for x in (business_caliber or []) if str(x or "").strip()]
+    if not _caliber:
+        _caliber = _parse_caliber_block(result_text)
+    # 逐字核验：**判决只在本处产生**（子 agent 侧 `CaliberGateMiddleware` 只负责打回重写，
+    # 不写任何结论行），用的是**同一份磁盘语料**（`utils.caliber_evidence`）⇒ 不会出现
+    # 「闸门放过、报告说未核验」的两套账。读不到语料 ⇒ `verdicts=None`，脚注降级为
+    # 「未核验」（fail-open，报告照出）。
+    #
+    # ⚠️ 刻意**不**摘取子 agent 块里的 `> …核验…` 行：中间件不写结论行，能摘到的只可能
+    # 是**模型自己写的**自评（「本表口径均已逐字核验」），把它印进报告就是「报告撒谎」
+    # 换了个人称。核验结论必须由代码产生、且只由代码产生。
+    _verdicts = None
+    if _caliber:
+        _db = _current_db_name()
+        try:
+            _corpus = load_knowledge_corpus(_db)
+            if _corpus:
+                _verdicts = verify_caliber_entries(_caliber, _corpus)
+                _bad = sum(1 for v in _verdicts if not v.ok)
+                _logger.info(
+                    "[build_report] 口径核验：%d/%d 条通过（库 %s）%s",
+                    len(_verdicts) - _bad, len(_verdicts), _db or "?",
+                    "" if _bad == 0 else "；未通过条目已在报告中单列",
+                )
+            else:
+                _logger.info("[build_report] 读不到知识库语料，口径节标「未核验」（fail-open）")
+        except Exception as e:  # noqa: BLE001  核验失败不影响报告产出，降级为未核验
+            _logger.warning("[build_report] 口径核验异常（降级为未核验）: %s", e)
+            _verdicts = None
+    _caliber_md = _render_business_caliber(_caliber, _verdicts)
+
     # 只收「当前问题」轮次的图表（_turn_chart_iframes：轮次锚定 + 仅 tool 结果），
     # 历史问题生成的 iframe 不进本报告（用户明确要求：报告只保存当前 trace 的图）
     iframes = _turn_chart_iframes(messages)
 
     now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     safe_name = _SAFE_FNAME.sub("_", report_name).strip(" ._") or "report"
-    fname = f"{safe_name}_{now}.md"
+    # P1-3：文件名原先只到**秒级**且无任何用户/会话维度，两个用户同秒对同名主题
+    # 出报告 = 后写的**静默覆盖**前一份（报告目录是全站共享的）。加会话短标识 +
+    # 存在性避让，保证「同名同秒」也不互相覆盖。
+    _tag = _thread_tag()
+    fname = f"{safe_name}_{now}_{_tag}.md"
+    try:
+        from agent.workspace_manager import get_workspace_manager as _gwm
+
+        _report_dir = _gwm().report_dir
+        _n = 2
+        while (_report_dir / fname).exists():
+            fname = f"{safe_name}_{now}_{_tag}_{_n}.md"
+            _n += 1
+    except Exception:  # noqa: BLE001  目录不可用时交给下面的写盘分支报错
+        pass
 
     md_parts = [
         f"# {report_name}\n",
@@ -508,13 +880,21 @@ async def _build_report_coro(
         f"> 数据来源：NL2SQL 查询结果",
         f"> 数据截至：{now}（活库数据，可能随时间变动）\n",
         "## 1. 数据结果\n",
-        str(result_text),
+        # §1 内联的是子 agent 的**完整答复**，而契约要求该答复末尾就带「业务口径」块 ⇒
+        # 不摘掉的话 §2 渲染器会把同一张表再排一遍（2026-09-26 生产实证：同一 11 行出现
+        # 两次）。抽块仍从 result_text 原文抽，两者只是渲染分工不同。
+        strip_caliber_block(result_text),
     ]
     next_section = 2
     # 大结果全量表内嵌（QueryResultOffload 落盘文件，代码读盘 0 token；无则跳过）
     full_table = _full_table_section(_obj)
     if full_table:
         md_parts += [f"\n## {next_section}. 完整数据表\n", full_table]
+        next_section += 1
+    # 「业务口径」放在数据与 SQL 之前：先说清口径，再看数。Cube 通道的 Layer A 摘要与本
+    # 节同义，故下面在已有本节时不再重复生成（见 Cube 分支的条件）。
+    if _caliber_md:
+        md_parts += [f"\n## {next_section}. 业务口径\n", _caliber_md]
         next_section += 1
     # 模型最终回复若已含同一条 SQL（原文或围栏块归一化相等）则不重复成节。
     # 注记（sql_note：wren 通道方言提示 / 明细口径注）在跳节时也照样渲染——
@@ -526,12 +906,20 @@ async def _build_report_coro(
     plan_note = _obj.get("physical_sql_note") if isinstance(_obj, dict) else ""
     if sql:
         _sql_note = _obj.get("sql_note") if isinstance(_obj, dict) else ""
+        # 混合路径（Cube 出主体 + 模型包外层）时标题如实演进；其余三态标题一字不动
+        # （老结果的标题必须与改动前逐字相同）
+        _sql_title = (
+            _SQL_ORIGIN_MIXED_TITLE
+            if isinstance(_obj, dict)
+            and str(_obj.get("sql_origin") or "") == "cube_metric+llm_outer"
+            else "执行 SQL"
+        )
         if _result_already_contains_sql(str(result_text), sql):
             _logger.info("[build_report] 数据结果已含同 SQL（原文/围栏归一化），跳过追加「执行 SQL」节")
             if _sql_note:
                 md_parts += ["", f"> {_sql_note}"]
         else:
-            md_parts += [f"\n## {next_section}. 执行 SQL\n", f"```sql\n{sql}\n```"]
+            md_parts += [f"\n## {next_section}. {_sql_title}\n", f"```sql\n{sql}\n```"]
             if _sql_note:
                 md_parts += ["", f"> {_sql_note}"]
             next_section += 1
@@ -545,6 +933,11 @@ async def _build_report_coro(
             if plan_note:
                 md_parts += ["", f"> {plan_note}"]
             next_section += 1
+        # 来源行放在**分支末尾**：跳节路径（结果里已内嵌 SQL）与正常路径都要有 ——
+        # 前者正是「用户看到的那条 SQL 在正文里」的情形，更需要标来源。
+        _origin_line = _sql_origin_line(_obj)
+        if _origin_line:
+            md_parts += ["", _origin_line]
     elif cube_query:
         # Cube 通道：物理 SQL 在前（用户要的是可粘贴执行的那条），语义层查询定义
         # 在后作为「来源」注解。取不到物理 SQL 时只出定义节，标题**不叫「执行 SQL」**
@@ -580,12 +973,19 @@ async def _build_report_coro(
                 _logger.warning("[build_report] Cube 元数据加载失败: %s", e)
 
         # Layer A：LLM 业务口径摘要 / Layer B：模板结构（两层各自 fail-open，
-        # 都返回空串时本节整体跳过，直接进下面的原始定义节）
-        if isinstance(_cube_args, dict) and _cube_args:
+        # 都返回空串时本节整体跳过，直接进下面的原始定义节）。
+        # 模型已给结构化口径（_caliber_md）时**跳过 Layer A**：否则同一份报告出现两节
+        # 「业务口径」，且 Layer A 是 LLM 摘要（有幻觉面）而结构化口径带出处 —— 顺带省
+        # 一次 LLM 调用。
+        if isinstance(_cube_args, dict) and _cube_args and not _caliber_md:
             _layer_a = await _render_cube_layer_a(_cube_args, _cube_meta)
             if _layer_a:
                 md_parts += [f"\n## {next_section}. 业务口径\n", _layer_a]
                 next_section += 1
+        # Layer B 与口径**无关**（查询结构 = 维度/过滤树，取自 cube 元数据，无 LLM 调用）
+        # ⇒ 不能挂在 Layer A 的开关上：挂了就出现「子 agent 给了结构化口径 ⇒ 报告同时
+        # 丢掉查询结构」这种静默缺口。
+        if isinstance(_cube_args, dict) and _cube_args:
             _layer_b = _render_cube_layer_b(_cube_args, _cube_meta)
             if _layer_b:
                 # **必须包代码围栏**：Markdown 里段落内的单个换行会被渲染成空格，
@@ -604,6 +1004,10 @@ async def _build_report_coro(
         if _cube_note:
             md_parts += ["", f"> {_cube_note}"]
         next_section += 1
+        # 纯 Cube 通道也要标来源：这条 SQL 不是模型手写的，报告必须说得出区别
+        _origin_line = _sql_origin_line(_obj)
+        if _origin_line:
+            md_parts += ["", _origin_line]
     md_parts += [f"\n## {next_section}. 分析解读\n", str(analysis).strip()]
     next_section += 1
     if iframes:
@@ -618,6 +1022,12 @@ async def _build_report_coro(
         md_parts += ["\n> 💡 可交互图表：鼠标悬停查看数值、可缩放。"]
     else:
         md_parts.append(f"\n## {next_section}. 附录\n\n（本次任务未生成交互式图表）")
+    next_section += 1
+    # 兜底通道（env 开关，默认关）：语义库 `knowledge/rules/*.md` 原文。模型侧没给出
+    # 口径时的最后一道保险，放最末尾以免打断正文阅读。
+    _caliber_raw = _caliber_appendix(_obj)
+    if _caliber_raw:
+        md_parts += [f"\n## {next_section}. 附录：语义库口径原文\n", _caliber_raw]
 
     md = "\n".join(md_parts)
 
@@ -629,6 +1039,16 @@ async def _build_report_coro(
         report_dir.mkdir(parents=True, exist_ok=True)
         dest = report_dir / fname
         dest.write_text(md, encoding="utf-8")
+        # P1-3：登记归属（文件名 → 用户/会话）。读接口 /api/reports/{filename} 靠它
+        # 判定「这份报告是不是你的」；不登记就只能对所有人放行。
+        try:
+            from agent.auth.grants import record_report_owner
+
+            _uid, _tid = _current_identity()
+            if _uid:
+                record_report_owner(fname, _uid, _tid)
+        except Exception:  # noqa: BLE001  归属登记失败不影响报告本身
+            _logger.debug("[build_report] 归属登记失败", exc_info=True)
     except Exception as e:  # noqa: BLE001
         _logger.warning("[build_report] 写盘失败: %s", e)
         return (
@@ -642,7 +1062,11 @@ async def _build_report_coro(
         f"报告已生成：{vfs_path}\n"
         f"- 标题：{report_name}\n"
         f"- 生成时间：{now}\n"
-        f"- 内容：数据结果、分析解读" + (f"、内嵌交互式图表×{len(iframes)}" if iframes else "") + "\n"
+        f"- 内容：数据结果"
+        + ("、业务口径" if _caliber_md else "")
+        + "、分析解读"
+        + (f"、内嵌交互式图表×{len(iframes)}" if iframes else "")
+        + "\n"
         "请在最终回复中告知用户报告文件路径。"
     )
 
@@ -656,6 +1080,12 @@ build_report_tool = StructuredTool.from_function(
         "wren 语义层通道另附「真正下发物理库执行」的 SQL，可直接粘贴执行）与"
         " generate_echarts 生成的交互式图表（内嵌 iframe，可交互渲染）。"
         "调用前请确保已用 check_async_task 确认子任务完成、并用 generate_echarts 渲染图表。"
+        "业务口径默认自动从子任务结果的「业务口径」块提取（子 agent 手里才有 knowledge/rules/*.md "
+        "原文）；若你已知口径而子任务结果里没有，用 business_caliber 显式传入，"
+        "每条 `口径项 | 内容 | 出处`，内容逐字取原文、出处写知识库真实文件名"
+        "（表名/视图名 v_*/Cube 名/字段字典都不是出处）。"
+        "本工具对每条口径做出处 + 内容逐字核验，未通过的条目在报告里单列并标注，"
+        "不会谎称「取自知识库原文」。"
         "报告文件名自动包含精确到时分秒的时间戳，无需再用 shell 取时间。"
     ),
     args_schema=BuildReportSchema,

@@ -53,20 +53,24 @@ python /shared/skills/main/chart-saver/scripts/save_chart.py \
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `--content` | 是 | 图表内容（SVG 字符串 / base64 iframe / 文件路径） |
-| `--name` | 是 | 目标文件名（不含扩展名），如 `IMDb_Movie_Genres_chart` |
+| `--name` | 是 | **文件基名**（不含扩展名、不含时间戳），如 `IMDb_Movie_Genres_chart` |
 | `--format` | 否 | 输出格式：`svg`（默认）/ `png`。自动检测时可不填 |
 | `--dir` | 否 | 保存目录，默认 `/workspace/report/` |
 
 ### Step 3: 确认保存结果
 
-脚本会返回保存的文件路径。确认文件已保存到 `/workspace/report/` 目录。
+脚本输出 `✅ 图表已保存: <宿主绝对路径>`。**以该输出里的文件名为准**——脚本会在基名后
+自动追加 `_{时间戳}_{4位随机}` 保证唯一（report/ 是全站共享目录，两个用户对同名主题出图
+必须各存各的，不能互相覆盖）。**不要自己用基名拼文件名**。
 
 ### Step 4: 在报告中引用
 
-在 Markdown 报告中使用**相对路径**引用图表（仅限 SVG / PNG 静态图）：
+在 Markdown 报告中使用**相对路径**引用图表（仅限 SVG / PNG 静态图），文件名取 Step 3
+输出里的**真实文件名**：
 
 ```markdown
-![图表说明](./IMDb_Movie_Genres_chart.svg)
+<!-- 假设脚本返回 …/report/Sales_Trend_20260923_101530_a3f1.svg -->
+![销售趋势](./Sales_Trend_20260923_101530_a3f1.svg)
 ```
 
 > ⚠️ **交互式 echarts 图表（generate_echarts + `outputType=option`）不要**用本 skill 保存或在本 skill 中用相对路径引用——`generate_echarts` 已自动保存 `.html` 并在返回结果中给出可交互 iframe，报告附录由 **report-export** 技能内嵌该 iframe（`<iframe src="data:text/html;base64,...">`），不要写 `![...](.html)`。
@@ -79,13 +83,20 @@ python /shared/skills/main/chart-saver/scripts/save_chart.py \
 2. **base64 HTML iframe**：解码 base64 → 提取 `<svg>...</svg>` → 保存
 3. **PNG 文件路径**：复制文件到工作区报告目录
 4. **自动检测格式**：根据内容自动判断是 SVG / base64 / 文件路径
+5. **唯一文件名**：基名后追加时间戳 + 随机后缀并**独占创建**，并发下也不会互相覆盖
 
 ## 文件命名规则
 
+文件名由脚本生成，调用方只提供基名：
+
 | 文件类型 | 命名格式 | 示例 |
 |---------|---------|------|
-| 图表 SVG | `{name}.svg` | `IMDb_Movie_Genres_chart.svg` |
-| 图表 PNG | `{name}.png` | `IMDb_Movie_Genres_chart.png` |
+| 图表 SVG | `{基名}_{YYYYMMDD_HHMMSS}_{4位随机}.svg` | `IMDb_Movie_Genres_chart_20260923_101530_a3f1.svg` |
+| 图表 PNG | `{基名}_{YYYYMMDD_HHMMSS}_{4位随机}.png` | `IMDb_Movie_Genres_chart_20260923_101530_a3f1.png` |
+
+后缀不是装饰：`report/` 是**全站共享目录**，同名主题（"销售趋势"）在不同用户/会话里
+天然同名——不带后缀就是后写的人静默覆盖前一个人的图。引用图表时一律用脚本输出里的
+真实文件名。
 
 ## 错误处理
 

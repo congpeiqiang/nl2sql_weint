@@ -33,10 +33,12 @@ from agent.feedback.store import (
     MAX_NOTE_BYTES,
     MAX_SNAPSHOT_SQL,
     VALID_RATINGS,
+    FeedbackRecord,
     VersionConflictError,
     get_store,
 )
-from api._common import json_response, parse_body
+from agent.utils.offload import offload, offload_long
+from api._common import json_response, parse_body, require_admin, require_thread
 
 _logger = logging.getLogger(__name__)
 
@@ -114,7 +116,8 @@ async def _extract_sql_with_cube(messages: list) -> tuple[str, dict]:
         _logger.warning("[feedback] Cube 快照模块加载失败: %s", e)
         return "", {}
     try:
-        snap = await asyncio.to_thread(cube_snapshot, messages)
+        # 走长任务池：冷启要建 wren 引擎（~0.9s，见 docstring），不是「每请求的短调用」
+        snap = await offload_long(cube_snapshot, messages)
     except Exception as e:  # noqa: BLE001
         _logger.warning("[feedback] Cube 快照复算失败: %s", e)
         return "", {}
@@ -233,13 +236,16 @@ def _schedule_snapshot_backfill(thread_id: str, message_id: str) -> None:
         try:
             # spec 传 {} 而非 None：走到这里说明确实读过 state、确认过通道，空就是
             # 「这条不是 Cube 通道」，与「本次没算」（None → 不覆盖）是两回事。
-            snapshot_ok = store.update_snapshot(thread_id, message_id, question, sql,
-                                                cube_spec=spec or {})
+            # P1-14：这条是**写**（见下方注释：每一次 store 调用都进线程），别漏了它
+            snapshot_ok = await offload(store.update_snapshot, thread_id, message_id,
+                                        question, sql, cube_spec=spec or {})
             # 标注记录同步回填：入队时 question/sql 为空串（见 put_feedback），
             # 这里一并补齐，让待标注队列列表页标题有值（否则恒显示「无问题摘要」，
             # 直到详情端惰性补齐才持久化）。
             if snapshot_ok:
-                ann = store.get_annotation(thread_id, message_id)
+                # P1-14：这段跑在**后台任务**里，但后台任务和请求共用同一个事件循环
+                # ——同步 sqlite 读照样卡住所有人，所以每一次 store 调用都进线程。
+                ann = await offload(store.get_annotation, thread_id, message_id)
                 if ann is not None:
                     fields = {}
                     if not ann.question and question:
@@ -249,16 +255,20 @@ def _schedule_snapshot_backfill(thread_id: str, message_id: str) -> None:
                     if not ann.cube_spec and spec:
                         fields["cube_spec"] = spec
                     if fields:
-                        store.update_annotation(thread_id, message_id, **fields)
+                        await offload(
+                            store.update_annotation, thread_id, message_id, **fields
+                        )
                     # 点赞自动入 Good Set：快照刚落地，正是 SQL 可用的第一时刻。
                     # 门槛与写入全在 maybe_auto_good（含 fail-open），这里只负责把它
                     # 挪到线程里——内部是阻塞调用（trace 解析带 sleep + 同步 Langfuse
-                    # SDK），在事件循环里跑会卡住别的请求。
-                    ann2 = store.get_annotation(thread_id, message_id)
+                    # SDK，可能重试），在事件循环里跑会卡住别的请求。
+                    ann2 = await offload(store.get_annotation, thread_id, message_id)
                     if ann2 is not None:
                         from api.feedback_annotation import maybe_auto_good
 
-                        await asyncio.to_thread(
+                        # 走**长任务池**：它内部会重试/等 trace 落库，不属于「每请求的
+                        # 短调用」，不该占默认池的线程（见 utils/offload docstring）
+                        await offload_long(
                             maybe_auto_good, ann2, sql, ann2.db_name
                         )
         except Exception as e:  # noqa: BLE001
@@ -487,6 +497,9 @@ def _schedule_langfuse_revoke_many(
 async def put_feedback(request: Request):
     thread_id = request.path_params["thread_id"]
     message_id = request.path_params["message_id"]
+    # P1：反馈是会话级数据，按归属校验（原先任何登录用户可对任意会话写/撤反馈，
+    # 会把别人的会话拖进 Good Set / Bad Case）。
+    require_thread(request, thread_id)
     data = await parse_body(request)
     try:
         rating, note = _validate(data)
@@ -496,18 +509,28 @@ async def put_feedback(request: Request):
     # question/sql 只在首次写入时后台补齐（见 _schedule_snapshot_backfill 说明）。
     # 这里先以空串落库，保证反馈写入 <几十毫秒 返回，前端批注交互不再被卡住。
     is_first_write = if_version is None
-    try:
-        prev = store.get(thread_id, message_id)
-        rec = store.upsert(
-            thread_id,
-            message_id,
-            rating,
-            note=note,
-            context=dict(data.get("context", {}) or {}),
-            question="",
-            sql="",
-            if_version=if_version,
+
+    # P1-14：反馈写入是「读旧值 + 写新值 + 两次可能的附带写」，每次都是 sqlite
+    # `commit`（fsync）。原先 4~5 段同步 I/O 直接挂在事件循环上——前端批注是
+    # 连点操作，多用户同时点点赞会互相拖慢（§3.3「反馈 I/O」）。
+    # 读+写合成一次线程切换（顺序不变，仍受 store 自己的 RLock 保护）。
+    def _write() -> tuple[FeedbackRecord | None, FeedbackRecord]:
+        return (
+            store.get(thread_id, message_id),
+            store.upsert(
+                thread_id,
+                message_id,
+                rating,
+                note=note,
+                context=dict(data.get("context", {}) or {}),
+                question="",
+                sql="",
+                if_version=if_version,
+            ),
         )
+
+    try:
+        prev, rec = await offload(_write)
     except VersionConflictError as e:
         return json_response({"error": str(e)}, status=409)
     except Exception as e:  # noqa: BLE001
@@ -517,12 +540,13 @@ async def put_feedback(request: Request):
         _schedule_snapshot_backfill(thread_id, message_id)
     # 优化① 快路径：SQL 快照非空 → 直接标 query（零成本，慢路径由打分线程兜底）
     if rec.sql and rec.sql.strip():
-        store.set_feedback_type(thread_id, message_id, "query")
+        await offload(store.set_feedback_type, thread_id, message_id, "query")
     # 优化③ 入队：所有评分都进待标注队列（幂等）。纯点赞人工可「有效→直接入
     # Good Set」，差评走标注流程。question/sql 在快照补齐前可能为空，标注详情
     # 端会惰性补齐（见 api/feedback_annotation.py）。
     if rating:
-        store.enqueue_annotation(
+        await offload(
+            store.enqueue_annotation,
             thread_id, message_id,
             rating=rating, note=note,
             question=rec.question, sql=rec.sql,
@@ -610,6 +634,7 @@ def purge_feedback(
 async def delete_feedback(request: Request):
     thread_id = request.path_params["thread_id"]
     message_id = request.path_params["message_id"]
+    require_thread(request, thread_id)  # P1：同上，撤回也要归属校验
     data = await parse_body(request)
     try:
         if_version = _if_version(data)
@@ -628,13 +653,18 @@ async def delete_feedback(request: Request):
 
 async def list_thread_feedback(request: Request):
     thread_id = request.path_params["thread_id"]
-    records = store.list_thread(thread_id)
+    require_thread(request, thread_id)  # P1：会话内反馈列表同样按归属
+    records = await offload(store.list_thread, thread_id)  # P1-14：同步 sqlite 读
     return json_response({"feedback": [r.to_mapping() for r in records]})
 
 
 async def export_feedback(request: Request):
     """全量导出（bad case 评测集回流用；含 👍 正例）。"""
-    records = store.export_all()
+    # P1：全站所有用户的反馈（含 question/SQL 快照）→ 仅管理员。
+    # 前端标注页走 /api/feedback/annotations（本就 admin），不受影响。
+    require_admin(request)
+    # P1-14：全表读 + 反序列化（导出量随反馈累积增长），进线程
+    records = await offload(store.export_all)
     return json_response(
         {
             "count": len(records),

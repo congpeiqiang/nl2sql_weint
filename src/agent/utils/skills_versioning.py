@@ -22,13 +22,16 @@ tag 命名硬约定（下拉只认这些）：`skills/` 或 `skills-` 前缀—�
 `v1.0.0~v7.0.0` 等非 skill tag。commit + 打前缀 tag + 推送后，下拉自动出现。
 
 未设置 SKILLS_REF → 原样返回默认 sources（当前磁盘 skill），生产与普通实验默认行为
-不变。物化目录放 <data_root>/offline_experiment/skill_refs/<safe_ref>/（须在 data_root
-内，否则 vfs_root_backend root=data_root 无法解析）。物化成功写 `.skills_ok` marker
-（记录 `src@ref`）——同 ref 二次物化（如 API 预检后各 worker 子进程）直接复用目录，
-零网络。物化失败 → None：API 层在 run 预检显式报错，不再静默退化跑默认 skill。
+不变。物化目录放 <data_root>/offline_experiment/skill_refs/<src标签>_<safe_ref>/（**目录名
+含 src**，否则同 ref 的两个来源会互删对方正在服务的目录；见 `_ref_dir_name`）——须在
+data_root 内，否则 vfs_root_backend root=data_root 无法解析。物化成功写 `.skills_ok`
+marker（记录 `src@ref`）——同 ref 二次物化（如 API 预检后各 worker 子进程）直接复用目录，
+零网络。产物先落暂存目录、装完再原子换入（照 `semantic_db`：读者永不看到半成品）。
+物化失败 → None：API 层在 run 预检显式报错，不再静默退化跑默认 skill。
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -79,6 +82,30 @@ def tag_like_skill(name: str) -> bool:
 def _safe_ref(ref: str) -> str:
     """ref（tag/commit/branch）转目录名安全片段（与 semantic_db 同语义）。"""
     return re.sub(r"[^A-Za-z0-9_.\-]", "_", ref)[:64] or "ref"
+
+
+def _src_tag(src: str) -> str:
+    """物化源标签（与 `semantic_db._source_tag` 同语义，刻意重复：两处 `_safe_ref` 也各一份）。"""
+    if not src:
+        return "base"
+    digest = hashlib.sha1(str(Path(src).resolve()).encode("utf-8")).hexdigest()[:8]
+    return f"{_safe_ref(Path(src).name)[:24]}-{digest}"
+
+
+def _ref_dir_name(ref: str, src: str = "") -> str:
+    """物化目录名：`<src标签>_<safe_ref(ref)>`。**键含 src，目录名也必须含 src**。
+
+    为什么（2026-09-24 审计）：缓存键是 `f"{src}@{ref}"`、`_key_lock(key)` 与 marker 都用
+    它，而旧目录名只有 `_safe_ref(ref)` ⇒ 同一个 ref 的两个来源（生产 env 的
+    `SKILLS_REF=<path>@<ref>` 与 `api/experiment.py` 的 `materialize_skills_ref(ref)`，
+    后者 src=""）**各拿一把锁、却共用同一个目录** ⇒ 后者 `rmtree` 掉前者正在服务的那份
+    再覆写（= 正在跑的 run 技能目录凭空换内容）。加上 src 标签后两边各用各的目录。
+
+    ⚠️ **改这个名字必须同步 `effective_skills_sources` 里拼的 VFS 路径** —— 它不是
+    CompositeBackend 的挂载名，而是**按目录名拼出来的物理路径**（`.../skill_refs/<目录名>/<组>/`），
+    两处必须用同一个函数，不然技能会「物化成功但读不到」。两侧都由此函数生成。
+    """
+    return f"{_src_tag(src)}_{_safe_ref(ref)}"
 
 
 def _group_has_skills(root: Path, group: str) -> bool:
@@ -235,6 +262,70 @@ def _marker_fresh(dest_root: Path) -> bool:
         return False
 
 
+# 换入的重试参数：Windows 上目标被打开时 rename 报 WinError 5（Linux 不会）——
+# 见 semantic_db 同款注释。8 次、线性退避 20ms → 最坏 ~0.7s。
+_RENAME_RETRIES = 8
+_RENAME_RETRY_SLEEP = 0.02
+
+
+def _rename_retry(src: Path, dst: Path) -> None:
+    """目录换名（同盘原子），Windows 瞬时 `WinError 5` 退避重试。"""
+    last: OSError | None = None
+    for attempt in range(_RENAME_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:  # Windows：目标被打开（AV/DLP/读者持句柄）
+            last = e
+            time.sleep(_RENAME_RETRY_SLEEP * (attempt + 1))
+    raise OSError(f"换名 {src.name} → {dst.name} 失败（重试 {_RENAME_RETRIES} 次）：{last}") from last
+
+
+def _new_stage_dir(dest_root: Path) -> Path:
+    """物化暂存目录（与 dest_root 同盘、名字唯一）。
+
+    用 mkdir 当占位符而非 mkdtemp：名字可预测（便于 .stage- 前缀清理），且同名并发时
+    自动退到 `-2`、`-3`，不会两家写同一个暂存目录。
+    """
+    dest_root.parent.mkdir(parents=True, exist_ok=True)
+    for n in range(1, 1000):
+        name = f".stage-{dest_root.name}" + ("" if n == 1 else f"-{n}")
+        cand = dest_root.parent / name
+        try:
+            cand.mkdir()
+            return cand
+        except FileExistsError:
+            continue
+    raise OSError(f"暂存目录创建失败：{dest_root.parent}/.stage-{dest_root.name}*")
+
+
+def _install_staged(stage: Path, dest_root: Path) -> None:
+    """把物化好的 stage 换入 dest_root（读者永不看到半成品）。
+
+    两次同盘 rename：dest → trash、stage → dest；第二步失败则把 trash 换回来。
+    换入窗口内 dest_root 短暂不存在（实测 Windows ~5ms），但**不会有半写内容**——
+    旧实现是「rmtree 掉活目录再原地重建」，窗口更长且读者会读到残缺技能。
+    """
+    trash = dest_root.parent / f".trash-{dest_root.name}-{os.getpid()}"
+    if trash.exists():
+        shutil.rmtree(trash, ignore_errors=True)
+    moved = False
+    if dest_root.exists():
+        _rename_retry(dest_root, trash)
+        moved = True
+    try:
+        _rename_retry(stage, dest_root)
+    except Exception:  # noqa: BLE001
+        if moved:
+            try:
+                _rename_retry(trash, dest_root)  # 回滚：旧目录还在，线上可用
+            except Exception as e:  # noqa: BLE001
+                _logger.error("[skills_versioning] 回滚 %s 失败: %s", dest_root, e)
+        raise
+    if moved:
+        shutil.rmtree(trash, ignore_errors=True)
+
+
 def _materialize_local(base: Path, ref: str, dest_root: Path, key: str) -> Optional[Path]:
     """从 base 所在 git 仓库 `git archive` 物化（dev 本地检出路径，离线可用）。"""
     if dest_root.exists():
@@ -293,12 +384,26 @@ def _materialize_remote(ref: str, dest_root: Path, origin: str, key: str) -> Opt
         shutil.rmtree(work, ignore_errors=True)
 
 
+def reset_skills_cache() -> int:
+    """清 skill 版本物化缓存（切工作区用，P1-11）。返回清掉的条数。
+
+    只清 `_skills_cache`（值 = 工作区内 `offline_experiment/skill_refs/...` 的绝对
+    路径）。`_remote_cache`（origin → tags/branches）**不清** —— 它按 git 远端地址
+    缓存，与工作区无关，清了只会白打一次网络。
+    """
+    with _skills_lock:
+        n = len(_skills_cache)
+        _skills_cache.clear()
+    return n
+
+
 def materialize_skills_ref(ref: str, src: str = "") -> Optional[Path]:
-    """按 git ref 物化 skill 目录到 <data_root>/offline_experiment/skill_refs/<safe_ref>/，进程级缓存。
+    """按 git ref 物化 skill 目录到 <data_root>/offline_experiment/skill_refs/<src标签>_<safe_ref>/。
 
     顺序（src="" 默认源）：本地仓库 archive（dev / 离线）→ 远程浅克隆（GitLab 真源）；
     已物化目录 marker 匹配时直接复用（跨进程零网络）。src 非空 = <path>@<ref> 显式
-    其他仓库，走 legacy archive。
+    其他仓库，走 legacy archive。产物先在 `.stage-*` 暂存里做全、`_install_staged`
+    原子换入 —— 已在跑的 run 读技能目录时不会读到半成品。
 
     Returns:
         物化后的 skill 根目录（含 main/ 与 nl2sql/ 两组）；失败 → None（调用方决定
@@ -318,7 +423,10 @@ def materialize_skills_ref(ref: str, src: str = "") -> Optional[Path]:
 
         from agent.workspace_manager import get_workspace_manager
 
-        dest_root = get_workspace_manager().offline_experiment_dir / "skill_refs" / _safe_ref(ref)
+        dest_root = (
+            get_workspace_manager().offline_experiment_dir
+            / "skill_refs" / _ref_dir_name(ref, src)
+        )
 
         # 快路径：物化目录已合法且 marker 匹配 → 复用。tag 不可变故永久复用；可变 ref
         # （branch）需 marker 新鲜（<1h，覆盖 API 预检后 worker 子进程窗口）。
@@ -329,18 +437,31 @@ def materialize_skills_ref(ref: str, src: str = "") -> Optional[Path]:
                 _skills_cache[key] = dest_root
             return dest_root
 
+        stage = _new_stage_dir(dest_root)
         result: Optional[Path] = None
-        if not src:
-            base = _default_skills_base()
-            repo_rel = enclosing_repo(base)
-            result = _materialize_local(base, ref, dest_root, key)
-            if result is None:
-                origin = effective_origin(repo_rel[0] if repo_rel else None)
-                result = _materialize_remote(ref, dest_root, origin, key)
-        else:
-            # 显式源：legacy archive（路径须在 git 仓库内，否则 git_archive 返回 None）
-            base = Path(src).resolve()
-            result = _materialize_local(base, ref, dest_root, key)
+        try:
+            if not src:
+                base = _default_skills_base()
+                repo_rel = enclosing_repo(base)
+                result = _materialize_local(base, ref, stage, key)
+                if result is None:
+                    origin = effective_origin(repo_rel[0] if repo_rel else None)
+                    result = _materialize_remote(ref, stage, origin, key)
+            else:
+                # 显式源：legacy archive（路径须在 git 仓库内，否则 git_archive 返回 None）
+                base = Path(src).resolve()
+                result = _materialize_local(base, ref, stage, key)
+
+            if result is not None:
+                _install_staged(stage, dest_root)  # 原子换入；失败则旧目录仍在
+                result = dest_root
+        except OSError as e:
+            # 换入失败 → 按「物化失败」返回 None（API 预检会显式报错），
+            # 注意不能把已被清掉的 stage 路径当结果返回。
+            _logger.error("[skills_versioning] 物化安装失败 ref=%s src=%r: %s", ref, src, e)
+            result = None
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)  # 换入成功后 stage 已不存在（no-op）
 
         with _skills_lock:
             _skills_cache[key] = result
@@ -366,7 +487,10 @@ def effective_skills_sources(default: list[str], group: str) -> list[str]:
         return default
     # 这个串不是 CompositeBackend 挂载名——SkillsMiddleware 用 backend=vfs_root_backend
     # （root_dir=data_root）解析，所以它必须是相对 data_root 的物理路径，跟 dest_root
-    # 同源取名（父目录常量来自 workspace_manager，避免两处字面量漂移）。
+    # 同源取名（父目录常量来自 workspace_manager，避免两处字面量漂移；目录名一律走
+    # `_ref_dir_name`，避免「物化了但读不到」）。
     from agent.workspace_manager import OFFLINE_EXPERIMENT_DIR_NAME
 
-    return [f"/{OFFLINE_EXPERIMENT_DIR_NAME}/skill_refs/{_safe_ref(ref)}/{group}/"]
+    return [
+        f"/{OFFLINE_EXPERIMENT_DIR_NAME}/skill_refs/{_ref_dir_name(ref, src)}/{group}/"
+    ]

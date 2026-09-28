@@ -4,6 +4,7 @@ from typing import Optional
 import pandas as pd
 
 from mcp_server.db_mcp_server.db.sql_runner import SqlRunner, RunSqlToolArgs, ToolContext
+from mcp_server.db_mcp_server.db.limits import statement_timeout_sql
 # fmt: off  MC80OmFIVnBZMlhrdUp2bG43bmx2TG82ZVVkR05nPT06ZmIwMDhiMmE=
 
 
@@ -87,13 +88,20 @@ class PostgresRunner(SqlRunner):
 # noqa  Mi80OmFIVnBZMlhrdUp2bG43bmx2TG82ZVVkR05nPT06ZmIwMDhiMmE=
 
         try:
+            # 会话级 statement timeout（P2-8）：让**数据库**先把跑飞的查询中止掉，
+            # 而不是本仓的工具超时（300s）先放弃、把一条还在烧资源的查询留在服务端。
+            _timeout_sql = statement_timeout_sql("postgres")
+            if _timeout_sql:
+                cursor.execute(_timeout_sql)
+
             # Execute the query
             cursor.execute(args.sql)
 
-            # Determine if this is a SELECT query or modification query
-            query_type = args.sql.strip().upper().split()[0]
-
-            if query_type == "SELECT":
+            # 有没有结果集，**以驱动给的 description 为准**，不要拿 SQL 首词猜：
+            # 旧写法 `query_type == "SELECT"` 会把 `WITH ... SELECT` 判成非查询，
+            # 于是 CTE 查询走 commit 分支、返回 rows_affected，**查询结果整份丢掉**；
+            # 而 `WITH ... INSERT` 这类又会被反过来误判。description 两者都对。
+            if cursor.description is not None:
                 # Fetch results for SELECT queries
                 rows = cursor.fetchall()
                 if not rows:

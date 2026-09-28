@@ -187,6 +187,12 @@ class ThinkingToggleMiddleware(AgentMiddleware):
 
         model = create_model(enable_thinking=enable, route=route, model_name=model_name, user_id=user_id)
         if model is None:
+            # ⚠️ 这里 `return request` = **保留图节点自带的模型**（模块级 `deepseek_model`，
+            # 那是 `create_model()` 不带 user_id 建的 ⇒ 读全局/共享 store = 别账号的 key）。
+            # 2026-09-28 隔离后，**有登录身份且该账号没配模型**的情形已被最外层的
+            # `ModelRequiredMiddleware` 拦在前面（连 handler 都不调），走不到这行；
+            # 能到这行的只有「无登录身份」（AUTH_DISABLED 本地开发、离线实验等），
+            # 那条路径回落到共享配置是既定行为。改这里之前先看 model_required.py。
             return request
         self._cache_set(key, model)
         # 记录该 thread 的显式配置（供后续 auto-continue 继承）

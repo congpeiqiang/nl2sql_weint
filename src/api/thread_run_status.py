@@ -31,6 +31,13 @@ state 停在 `next=['model']`、没有活跃 run；前端只拿到 messages 与 
 此时最后一条消息是完整答复（01a09ed5-1208，07:37:22 success + 2723 字答复），
 只看 next+runs 会误报。
 
+其中**最常见**的一类是「幽灵 next」（P2-12）：sync 的
+`update_state(as_node="__start__")` 状态补丁（`_sync_update_state`）会把 head checkpoint
+的 `next` 写成图入口节点，而它只可能在主 run 终态之后落地（LangGraph 的 update_state
+硬闸）⇒ 补丁后图头挂着一个没有任何机制推进的节点。它**不是丢步**（答复已终稿），
+判据 4 正是把它判成「不算未完成」的那一条。机制与判据回归见
+`scripts/verify_phantom_next.py`；**切勿**把「next 非空」单独当作未完成的证据。
+
 **判据 5（turn_failed）**：最后一轮 run 是终态失败（error/timeout）时不报「已中断」，
 改报 `turn_failed` + `last_error`。生产 01a0a394（2026-09-15）：新建会话第一轮就被
 provider 400 打回（`The supported API model names are deepseek-flash, deepseek-v4-pro,
@@ -228,6 +235,11 @@ async def thread_run_status(request: Request) -> JSONResponse:
     thread_id = str(request.path_params.get("thread_id") or "")
     if not _UUID_RE.match(thread_id):
         return json_response({"ok": False, "error": "invalid thread_id"}, 400)
+
+    # P1：显式归属校验（原先只靠下游 ops 层兜底）。放在最前，fail-fast，
+    # 不把「有没有这个会话」暴露给非 owner（403 与 404 的区别另见 E2E 约定）。
+    from api._common import require_thread
+    require_thread(request, thread_id)
 
     base = _base_url()
     timeout = httpx.Timeout(10.0, connect=5.0)

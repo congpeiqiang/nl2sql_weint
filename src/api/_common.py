@@ -16,6 +16,8 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from api.request_log import rid_headers
+
 _logger = logging.getLogger(__name__)
 
 
@@ -98,13 +100,18 @@ async def stamp_thread_owner(thread_id: str, owner: str) -> bool:
 
     服务端 `Threads.patch` 对 metadata 是**浅合并**（`{**old, **new}`），所以只发
     `{"owner": ...}` 就够，graph_id / title 不会丢。
+
+    P2-2：带上调用方的 rid（`X-Request-ID`）—— 这条自调用在后端自己的 access 日志里
+    应该与触发它的那次用户请求**同一枚 id**，否则一次操作在日志里断成两截。
     """
     from agent.auth.ownership import OWNER_KEY
 
     url = f"{_api_base_url()}/threads/{thread_id}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
-            r = await http.patch(url, json={"metadata": {OWNER_KEY: owner}})
+            r = await http.patch(
+                url, json={"metadata": {OWNER_KEY: owner}}, headers=rid_headers() or None,
+            )
     except Exception as e:  # noqa: BLE001  归属补打失败不阻断主流程
         _logger.warning("[thread_owner] 补打归属失败 %s: %s", thread_id, e)
         return False

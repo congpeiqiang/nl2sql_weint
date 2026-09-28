@@ -88,11 +88,12 @@ class Settings(BaseSettings):
     CHECKPOINT_DB_URI: str = os.getenv("CHECKPOINT_DB_URI", "")
 
     # ── 工作区配置 ──────────────────────────────────────────
-    WORKSPACE_REGISTRY_PATH: str = os.getenv("WORKSPACE_REGISTRY_PATH", "")
-    WORKSPACE_PATH: str = os.getenv("WORKSPACE_PATH", "")
+    # 工作区已钉死为单份 <AGENT_DATA_ROOT>/workspace（2026-09-25，多工作区机件删除）
+    # ⇒ `WORKSPACE_PATH` / `WORKSPACE_REGISTRY_PATH` 两个覆盖开关一并作废，
+    # 盘上残留的 workspaces.json 与这两个 env 都不再被读取（别再加回来）。
     # 共享资源目录（memory/、skills/ 的父目录），默认由 WorkspaceManager 推导
     SHARED_RESOURCES_PATH: str = os.getenv("SHARED_RESOURCES_PATH", "")
-    # 外部基础目录（项目外）：shared + 默认工作区统一放这里（代码根退出 VFS），
+    # 外部基础目录（项目外）：shared 与工作区统一放这里（代码根退出 VFS），
     # 首次运行自动从仓库 src/agent/{shared,workspace} 拷贝种子；为空则回退仓库内
     AGENT_DATA_ROOT: str = os.getenv("AGENT_DATA_ROOT", "")
 

@@ -1,11 +1,20 @@
-"""QueryGateMiddleware — nl2sql 子 agent 查询执行前的确定性兜底（双规则）。
+"""QueryGateMiddleware — nl2sql 子 agent 查询执行前的确定性兜底（三规则）。
 
 背景（方案 A2 前段三合一，2026-09-04；通道硬闸 2026-09-05）：
 nl2sql 子 agent 有两条查询通道：``wrenai_<库名>_*``（Wren 语义层）与 ``dbmcp_*``
 （db_mcp_server 直连，绕过语义层）。生产 trace（bbb0eda0）实证：WIT 这类**已建模**库
 上模型仍直连 ``dbmcp_run_sql`` ×21 次——``dynamic_prompt`` 的「查询通道路由」只是文本
 指引，模型不遵守；QueryGate 原「先获取后执行」软闸被 ``dbmcp_get_db_info`` 满足后即全
-放行。故本中间件升级为**通道 + 顺序**双规则：
+放行。故本中间件升级为**授权 + 通道 + 顺序**三规则：
+
+规则零（库授权，每次必拦，非 once，P1-16）：
+  调用者对该库**没有授权**时，两条通道的执行侧一律拒绝，返回 ``status="error"`` 并
+  列出可用库。补的是 P1-2 的残留口——`tool_filter` 只裁**出站 payload**（看不见 ≠
+  调不到）：``dbmcp_*`` 的目标库是**工具参数**（出站前不知道会填哪个库），
+  ``wrenai_<slug>_*`` 的库名编码在**工具名**里而执行侧注册表只按名字取实例、不看身份
+  （模型幻觉出的名字、历史消息里授权撤销前存的旧名字，照样执行）。身份取自
+  ``langgraph.config.get_config()``（P1-2 已保证对客户端伪造免疫），口径与 `tool_filter`
+  共用 `auth.runtime`。内部调用 / dev 旁路不判。
 
 规则一（通道硬闸，每次必拦，非 once）：
   当前查询的数据库**已在 Wren 语义层建模**时，``dbmcp_*``（run_sql 与 get_db_info
@@ -16,7 +25,7 @@ nl2sql 子 agent 有两条查询通道：``wrenai_<库名>_*``（Wren 语义层�
 
 规则二（顺序软提醒，沿用原逻辑）：
   run_sql/dry_run/dry_plan 执行前若本轮从未出现过任何「获取工具」，提醒先按
-  nl2sql-understand 完成清晰度裁决 + 知识 + Schema 再查（每线程至多一次）。
+  wren-retrieve 完成清晰度裁决 + 知识 + Schema 再查（每线程至多一次）。
 
 软 / 防打扰设计：
 - **每线程至多提醒一次**（``_REMINDED`` set）：规则二首次拦下给指导，此后该线程放行——
@@ -66,7 +75,7 @@ _REMINDED_LOCK = threading.Lock()
 _REMINDED_CAP = 4000
 
 _HINT = (
-    "Error: 检测到尚未完成「理解建模」就直接发起 {tool}。请先按 nl2sql-understand "
+    "Error: 检测到尚未完成「四路取料」就直接发起 {tool}。请先按 wren-retrieve "
     "skill 的顺序：先 get_context + get_instructions 做清晰度裁决与知识加载"
     "（问题不清晰时应先以 [需要澄清] 向用户追问，不要继续），确认 clear 后再获取 "
     "Schema（describe_schema / get_mdl / describe_model），最后重新发起 {tool}。"
@@ -84,9 +93,20 @@ _CHANNEL_HINT = (
 # 直连通道工具（db_server.py 暴露 run_sql/get_db_info，工具名带 dbmcp_ 前缀）
 _DBMCP_PREFIX = "dbmcp_"
 
-# state 系统提示里 dynamic_prompt 注入的路由标记（与 nl2sql_agent.dynamic_prompt 同源）
+# 无权访问目标库（P1-16）：执行侧判权，与「看不见」（tool_filter 裁剪）构成纵深。
+_UNAUTH_DB_HINT = (
+    "Error: 无权访问数据库「{db}」—— 本次调用**未执行**。当前登录账号未被授权该库"
+    "（可用库：{allowed}）。请改用已授权的库；不要重试这个库，也不要换一个工具名"
+    "去查它。"
+)
+
+# state 系统提示里 dynamic_prompt 注入的路由标记（与 nl2sql_agent.dynamic_prompt 同源）。
+# ⚠️ `\*{0,2}` 不能去掉：真实注入文本是 `—— **已在 Wren 语义层建模**。`（带 Markdown
+# 加粗，nl2sql_agent.py:154/182），早先的正则要求 `——` 后紧跟文字 → **一条都匹配不上**，
+# 这条 state 兜底其实是死代码（2026-09-23 P1-16 顺带修）。加粗可选，两种形态都认。
 _ACTIVE_DB_RE = re.compile(
-    r"当前数据库:\s*`([^`]+)`\s*——\s*(已在\s*Wren\s*语义层建模|未在\s*语义层建模)"
+    r"当前数据库:\s*`([^`]+)`\s*——\s*\*{0,2}"
+    r"(已在\s*Wren\s*语义层建模|未在\s*语义层建模)"
 )
 
 
@@ -151,6 +171,39 @@ def _active_db(request: ToolCallRequest) -> tuple[str, bool]:
 
 def _is_late(name: str) -> bool:
     return name in _LATE_EXACT or name.endswith("_run_sql")
+
+
+def _target_db(request: ToolCallRequest, name: str) -> str:
+    """这次调用要查哪个库（判权用）。取不到返回 ""。
+
+    两条通道的库名来源不同：
+      · `dbmcp_*` —— 目标库是**工具参数**（`db_name`），参数缺省时退到 state 的
+        「当前数据库」标记。参数有值就以参数为准（那才是真正会被执行的那个库）。
+      · `wrenai_<slug>_*` —— 库名编码在**工具名**里，靠 `semantic_db` 反查。
+    """
+    if _is_dbmcp(name):
+        dn = str(_tool_args(request).get("db_name") or "").strip()
+        if dn:
+            return dn
+        # 参数缺省：db_mcp_server 的 run_sql/get_db_info 会走 `_get_runner("")` →
+        # 直接抛「db_name 不能为空」，**查不到任何数据**。所以这里取不到库名不是
+        # 绕过口；仍按 state 标记给出目标库，让"前端选了 A 库、模型不传参数"这种
+        # 调用也受判权约束（前端未选库时标记缺失 → "" → 放行给工具自己报错）。
+        return _active_db(request)[0]
+    if name.startswith("wrenai_"):
+        from agent.utils.semantic_db import db_name_from_wrenai_tool  # noqa: E402
+        return db_name_from_wrenai_tool(name)
+    return ""
+
+
+def _is_query_tool(name: str) -> bool:
+    """会不会真的读到数据 / 元数据（只有这些才需要判权）。
+
+    放行其余工具（`*_get_context` / `*_list_knowledge` 等语义层知识与描述类工具）
+    会留口子——它们同样按库返回业务元数据；统一判权更简单也更安全，反而省掉一份
+    "哪些工具算查询"的清单要跟上游同步。
+    """
+    return _is_dbmcp(name) or name.startswith("wrenai_")
 
 
 def _is_fetch_tool(name: str) -> bool:
@@ -256,12 +309,74 @@ class QueryGateMiddleware(AgentMiddleware):
             status="error",
         )
 
+    def _unauth_db_deny(
+        self, request: ToolCallRequest, name: str, db: str, user: dict
+    ) -> ToolMessage:
+        """库授权拒绝（P1-16）：给出**可用库清单**，让模型能自己换库重试。"""
+        allowed = "（无，请联系管理员开通）"
+        try:
+            from agent.auth.grants import visible_dbs  # noqa: E402
+            dbs = sorted(visible_dbs(user))
+            if dbs:
+                allowed = "、".join(dbs)
+        except Exception:  # noqa: BLE001
+            pass  # 只是提示文案，取不到就给出保守文案
+        tool_call_id = (
+            getattr(getattr(request, "runtime", None), "tool_call_id", None) or ""
+        )
+        _logger.warning(
+            "[query_gate] 库授权拒绝：%s 想访问未授权库 %s（身份 %s）",
+            name, db, (user or {}).get("user_id"),
+        )
+        return ToolMessage(
+            content=_UNAUTH_DB_HINT.format(db=db, allowed=allowed),
+            name=name,
+            tool_call_id=tool_call_id,
+            status="error",
+        )
+
+    def _db_authorized(
+        self, request: ToolCallRequest, name: str
+    ) -> ToolMessage | None:
+        """执行侧库授权（P1-16）：返回 None = 放行，否则返回拒绝用的 ToolMessage。
+
+        为什么需要（P1-2 的残留口）：`tool_filter` 只裁**出站 payload**——看不见不
+        等于调不到。①`dbmcp_*` 把目标库当**参数**传，出站前根本不知道参数里会填哪个
+        库（`dbmcp_run_sql(db_name="<无授权的库>")` 一路可达）；②`wrenai_<slug>_*` 的
+        库名编码在工具名里，执行侧注册表（`mcp_tool.lookup_sub_tool`）**只按名字取实例、
+        不看身份**，所以模型幻觉出的工具名、以及历史消息里存的旧工具名（授权被撤销后
+        仍在会话里）照样执行。这里补的是"拦得住"那一半。
+
+        判定口径与 `tool_filter` 一致（同一份 `auth.runtime`）：内部调用 / dev 旁路
+        不判（`resolve_caller` 返回 None）；身份真实但账号已删 → 可见库为空 → 拒；
+        读授权本身失败 → 放行 + warning。取不到目标库名（参数/标记/反查都空）→ 放行，
+        由工具自己报"db_name 不能为空"。
+        """
+        if not _is_query_tool(name):
+            return None
+        from agent.auth import runtime as _rt  # noqa: E402
+
+        user = _rt.resolve_caller("query_gate")
+        if user is None:
+            return None  # 内部调用 / dev / 读身份失败 → 不启用
+        db = _target_db(request, name)
+        if not db:
+            return None  # 判不出目标库（接口会自己报参数缺失），不误伤
+        if _rt.caller_can_access_db(user, db, "query_gate"):
+            return None
+        return self._unauth_db_deny(request, name, db, user)
+
     def _gate(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage],
     ) -> ToolMessage:
         name = _tool_name(request)
+        # 库授权（规则零，必须先于通道硬闸）：无权库上一律不执行 —— 通道硬闸只覆盖
+        # "已建模库上的 dbmcp"，管不到"未授权库上的任何通道"。
+        denied = self._db_authorized(request, name)
+        if denied is not None:
+            return denied
         # 通道硬闸（规则一）：当前库已建模 → dbmcp_*（run_sql/get_db_info 皆拦，每次）
         if _is_dbmcp(name):
             db, modeled = _active_db(request)

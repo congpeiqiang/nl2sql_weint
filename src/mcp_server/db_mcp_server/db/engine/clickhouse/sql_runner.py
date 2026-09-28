@@ -3,6 +3,7 @@
 import pandas as pd
 
 from mcp_server.db_mcp_server.db.sql_runner import SqlRunner, RunSqlToolArgs, ToolContext
+from mcp_server.db_mcp_server.db.limits import clickhouse_settings
 # type: ignore  MC80OmFIVnBZMlhrdUp2bG43bmx2TG82VjJWTlNnPT06YTBhZGJkZjA=
 
 
@@ -59,6 +60,16 @@ class ClickHouseRunner(SqlRunner):
         Raises:
             Exception: If query execution fails
         """
+        # statement timeout 走 client settings（P2-8）；用户 extra_config 里显式配的
+        # settings 优先，我们只补默认键，不覆盖人家的选择。
+        settings = dict(clickhouse_settings())
+        user_settings = self.kwargs.get("settings")
+        if isinstance(user_settings, dict):
+            settings.update(user_settings)
+        call_kwargs = {k: v for k, v in self.kwargs.items() if k != "settings"}
+        if settings:
+            call_kwargs["settings"] = settings
+
         # Connect to the database
         client = self.clickhouse_connect.get_client(
             host=self.host,
@@ -66,7 +77,7 @@ class ClickHouseRunner(SqlRunner):
             username=self.user,
             password=self.password,
             database=self.database,
-            **self.kwargs,
+            **call_kwargs,
         )
 # pylint: disable  Mi80OmFIVnBZMlhrdUp2bG43bmx2TG82VjJWTlNnPT06YTBhZGJkZjA=
 

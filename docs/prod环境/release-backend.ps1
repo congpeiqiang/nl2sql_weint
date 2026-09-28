@@ -34,12 +34,14 @@ tar -czf $tar `
   --exclude=docker --exclude="*.bin" --exclude="*.log" `
   --exclude=.env --exclude=.env.prod --exclude=src/agent/workspace `
   --exclude=src/agent/workspace-temp `
-  --exclude=src/agent/workspace_manager/workspaces.json `
   --exclude=src/agent/shared/model_config.json `
   -C $LocalRoot .
-# ↑ workspaces.json 是运行时注册表（dev 机条目），随 tar 上生产会覆盖服务器
-#   注册表（2026-09-08 ee/cpq 工作区消失事故）；治本后注册表住数据卷，此排除
-#   为双保险（服务器 backend/ 里的旧残留仍会进镜像，但新代码不再读它）。
+# ↑ workspace / workspace-temp：运行时残留，容器读 AGENT_DATA_ROOT，不读这两份。
+#   2026-09-25：两个目录都已从仓库删除 ⇒ 这两条排除项是空转兜底（留着的理由是
+#   删了要在两台机器上重验 tar 行为，不值当）。
+# ↑ workspaces.json 的排除项**已删除**（2026-09-25）：工作区注册表机制不复存在
+#   （路径钉死为 AGENT_DATA_ROOT/workspace）⇒ 没有注册表可被覆盖，09-08「dev 机
+#   条目覆盖生产」那条事故路径已经不存在了。
 # ↑ model_config.json 同理：gitignore 的运行时模型配置，容器读 AGENT_DATA_ROOT
 #   （/app/data/shared）那份；本机 src 里这份是 AGENT_DATA_ROOT 外置前的旧种子，
 #   带上生产只会铺到 /app/src/agent/shared/ 下当隐患（AGENT_DATA_ROOT 一失效就

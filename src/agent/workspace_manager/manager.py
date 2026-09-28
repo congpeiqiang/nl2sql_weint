@@ -1,18 +1,26 @@
 """WorkspaceManager — 统一工作区路径解析，替换所有 `Path(__file__).resolve().parents[N]` 硬编码。
 
-设计：
-- 每个工作区是一个独立目录，包含 checkpoint/feedback/db_config/语义库/报告/中间数据。
-- memory/、skills/、model_config.json 全局共享，位于共享资源根（`_SHARED_RESOURCES_DIR`）。
-- **外部基础目录（2026-08-28）**：`.env` 配置 `AGENT_DATA_ROOT`（项目外目录）后，
-  shared 与默认工作区统一放到 `<AGENT_DATA_ROOT>/{shared,workspace}`，代码根 src/agent/
-  彻底退出 VFS（main_agent/nl2sql_agent 的 `/` 兜底路由改为指向 data_root）。
-  首次运行若外部目录缺失，自动从仓库内置 `src/agent/{shared,workspace}` 原子拷贝种子。
-  未配置时回退仓库内 `src/agent/{shared,workspace}`（兼容现有部署）。
-- 注册表 `workspaces.json` 记录所有工作区及当前活跃工作区。
-- 活跃工作区切换即时生效（DynamicFilesystemBackend 每次操作前重新解析 root_dir）。
+设计（2026-09-25 起：**单工作区**）：
+- **只有一份工作区**，路径钉死在 `<AGENT_DATA_ROOT>/workspace`（未配 AGENT_DATA_ROOT
+  的部署回退仓库内 `src/agent/workspace`）。
+- 此前「多工作区 + `workspaces.json` 注册表 + 切换」的整套机件已删除：「工作区」是
+  **部署级单值**（切一次全部署生效），**不提供任何用户隔离**（用户隔离靠
+  `grants(db_name)` + `thread_owner` + `report_owner` 账本），却带来两个真问题 ——
+  ① 切换时在跑的 run 后续每次路径解析都落到新目录而 run 自己不知道；② 前端入口对
+  普通用户 403。多项目诉求由 `db_config.json`（一个文件装 N 个库）与语义库根
+  （Wren 项目直接放工作区下）天然满足，不需要多工作区。
+- 工作区目录含 db_config/语义库/报告/中间数据；memory/、skills/、model_config.json
+  全局共享，位于共享资源根（`_SHARED_RESOURCES_DIR`）。
+- **外部基础目录**：`.env` 配置 `AGENT_DATA_ROOT`（项目外目录）后，shared 与工作区
+  统一放到 `<AGENT_DATA_ROOT>/{shared,workspace}`，代码根 src/agent/ 彻底退出 VFS
+  （main_agent/nl2sql_agent 的 `/` 兜底路由改为指向 data_root）。
+  首次运行若外部目录缺失，自动从仓库内置 `src/agent/{shared,workspace}` 原子拷贝种子
+  （注意：`src/agent/workspace` 已被发版 tar 排除且仓库内通常不存在，所以工作区的
+  初次落盘实际靠 `_init_workspace_dirs` 的启动初始化）。未配置时回退仓库内
+  `src/agent/{shared,workspace}`（兼容现有部署）。
 
 隔离矩阵：
-    按工作区隔离：db_config.json, semantic/, report/, tmp/,
+    工作区内：    db_config.json, semantic/, report/, tmp/,
                   nl2sql_process_data/, large_tool_results/
     全局共享：    memory/, skills/, model_config.json, checkpoint/,
                   trace/, feedback/, fts.sqlite
@@ -21,8 +29,8 @@
     from agent.workspace_manager import get_workspace_manager
 
     wm = get_workspace_manager()
-    print(wm.active_workspace)       # 活跃工作区目录
-    print(wm.checkpoint_dir)         # 该工作区的 checkpoint 目录
+    print(wm.active_workspace)       # 工作区目录（= <AGENT_DATA_ROOT>/workspace）
+    print(wm.checkpoint_dir)         # 该工作区的 checkpoint 目录（仅供展示）
     print(wm.shared_memory_dir)      # 共享 memory 目录（固定）
 """
 from __future__ import annotations
@@ -31,7 +39,6 @@ import json
 import logging
 import os
 import shutil
-import threading
 from pathlib import Path
 from typing import Optional
 
@@ -44,30 +51,17 @@ load_dotenv()
 
 _logger = logging.getLogger(__name__)
 
-_LOCK = threading.RLock()
-
 # 仓库内置种子目录锚点（随 git 分发）：manager.py 在 workspace_manager/ 子目录，
 # 上两层到 src/agent/。shared 与 workspace 的仓库种子从这里拷贝到外部基础目录。
 _REPO_AGENT_DIR = Path(__file__).resolve().parent.parent
 
-# 外部基础目录（项目外，.env AGENT_DATA_ROOT 配置）——shared 与默认工作区都放在这里。
-# 配置后：shared → <AGENT_DATA_ROOT>/shared，默认工作区 → <AGENT_DATA_ROOT>/workspace。
+# 外部基础目录（项目外，.env AGENT_DATA_ROOT 配置）——shared 与工作区都放在这里。
+# 配置后：shared → <AGENT_DATA_ROOT>/shared，工作区 → <AGENT_DATA_ROOT>/workspace。
 # 为空 = 未配置，回退仓库内 src/agent/（旧行为，兼容现有部署）。
 _DATA_ROOT = os.getenv("AGENT_DATA_ROOT", "").strip()
 
-# 注册表旧位置（代码树内）。生产 = 镜像内路径，且该文件被 git 跟踪、带 dev 机
-# 条目——每次发版 tar 都把本地 dev 注册表覆盖上生产（2026-09-08 事故：服务器
-# 用户建的 ee/cpq 工作区从前端消失，active 被指向不存在的 Windows 路径）。
-_LEGACY_REGISTRY_PATH = Path(__file__).resolve().parent / "workspaces.json"
-
-# 默认注册表路径优先级：WORKSPACE_REGISTRY_PATH env → <AGENT_DATA_ROOT>/workspaces.json
-# （数据卷，随容器 recreate/发版存活）→ 代码树旧位置（dev 未配 data root 时回退）。
-_DEFAULT_REGISTRY_PATH = os.getenv("WORKSPACE_REGISTRY_PATH", "").strip() or (
-    str(Path(_DATA_ROOT) / "workspaces.json") if _DATA_ROOT
-    else str(_LEGACY_REGISTRY_PATH)
-)
-
-# 默认工作区目录：AGENT_DATA_ROOT/workspace（配置时）→ src/agent/workspace（回退）
+# 工作区目录（唯一）：AGENT_DATA_ROOT/workspace（配置时）→ src/agent/workspace（回退）。
+# 双分支刻意保留：生产/开发都配了 AGENT_DATA_ROOT，而未配的老部署不需要迁移数据。
 _DEFAULT_WORKSPACE_DIR = (
     Path(_DATA_ROOT) / "workspace" if _DATA_ROOT else _REPO_AGENT_DIR / "workspace"
 )
@@ -89,78 +83,13 @@ class WorkspaceManager:
     """统一工作区路径解析器。
 
     所有组件通过 `get_workspace_manager()` 获取单例，按需解析路径。
-    活跃工作区切换后，checkpoint/feedback/store 等路径即时反映变化。
+    路径是**常量**（`active_workspace` 每次返回同一个目录），所以不存在"切换后
+    各处路径不一致"的问题 —— 这也是删掉多工作区机件的主要收益。
     """
 
-    def __init__(self, registry_path: Optional[str] = None) -> None:
-        self._registry_path = Path(registry_path or _DEFAULT_REGISTRY_PATH)
-        self._cache: Optional[dict] = None
-        self._cache_valid = False
-        self._migrate_registry_once()  # 注册表从代码树迁往数据卷（一次性）
+    def __init__(self) -> None:
         self._seed_data_root_once()  # 首次运行：外部基础目录缺失时从仓库种子初始化
-
-    def _migrate_registry_once(self) -> None:
-        """注册表一次性迁移：新位置（数据卷）缺失且代码树旧位置存在时原样拷贝。
-
-        2026-09-08：注册表默认位置从代码树（生产=镜像内，发版即被 tar 带来的
-        dev 版覆盖）迁到 <AGENT_DATA_ROOT>/workspaces.json（数据卷，随容器
-        recreate 存活）。首次以新路径启动时搬运旧文件保留既有条目；此后旧文件
-        不再被读取。新位置已存在（如运维预置）则不动。
-        """
-        try:
-            if self._registry_path == _LEGACY_REGISTRY_PATH:
-                return  # 未配 data root / env：仍在旧位置，无迁移语义
-            if self._registry_path.exists() or not _LEGACY_REGISTRY_PATH.exists():
-                return
-            self._registry_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(_LEGACY_REGISTRY_PATH, self._registry_path)
-            _logger.info(
-                "[workspace] 注册表已迁移: %s → %s（旧文件不再读取）",
-                _LEGACY_REGISTRY_PATH, self._registry_path,
-            )
-        except OSError as e:
-            _logger.warning("[workspace] 注册表迁移失败（按空注册表继续）: %s", e)
-
-    # ── 注册表读写 ──────────────────────────────────────────
-
-    def _read_registry(self) -> dict:
-        """读取工作区注册表 JSON。文件不存在时返回空注册表。"""
-        if not self._registry_path.exists():
-            return {"version": 1, "active": "", "workspaces": {}}
-        try:
-            return json.loads(self._registry_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            _logger.warning("[workspace] 读取注册表 %s 失败: %s，按空处理", self._registry_path, e)
-            return {"version": 1, "active": "", "workspaces": {}}
-
-    def _write_registry(self, data: dict) -> None:
-        """原子写入注册表。"""
-        import tempfile
-
-        self._registry_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self._registry_path.parent, suffix=".json.tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self._registry_path)
-        finally:
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
-
-    def _refresh_cache(self) -> None:
-        """刷新内存缓存。"""
-        with _LOCK:
-            reg = self._read_registry()
-            self._cache = reg
-            self._cache_valid = True
-
-    def invalidate(self) -> None:
-        with _LOCK:
-            self._cache_valid = False
-            self._cache = None
+        self._init_workspace_dirs(_DEFAULT_WORKSPACE_DIR)  # 缺什么补什么（幂等）
 
     # ── 首次运行种子初始化 ───────────────────────────────────
 
@@ -174,8 +103,6 @@ class WorkspaceManager:
         原子性：先拷到同名 `.seed_tmp`，成功后 `os.replace` 改名，避免拷贝中断留下
         半成品目录导致后续运行误判「已存在」。
         """
-        import shutil
-
         if not _DATA_ROOT:
             return  # 未配置外部基础目录，沿用仓库内目录，无需种子
         for target, seed in (
@@ -196,81 +123,30 @@ class WorkspaceManager:
                     "[workspace] 种子初始化 %s 失败: %s（继续使用仓库内目录）", target, e
                 )
 
-    # ── 活跃工作区 ──────────────────────────────────────────
-
-    def _resolve_active_path(self) -> Path:
-        """解析当前活跃工作区的实际目录。
-
-        顺序：注册表 active 指向的路径 → 环境变量 WORKSPACE_PATH → 默认工作区。
-        前两级都校验目录存在，不存在则回退下一级（并打 warning 便于排障）。
-        这是活跃工作区的**唯一**路径来源；`active_name` 按它反查名称，
-        保证「显示的名称」与「实际生效的目录」永远一致。
-        """
-        with _LOCK:
-            if not self._cache_valid:
-                self._refresh_cache()
-            assert self._cache is not None
-
-            active_name = self._cache.get("active", "") or ""
-            if active_name:
-                ws = self._cache.get("workspaces", {}).get(active_name)
-                if ws and ws.get("path"):
-                    p = Path(ws["path"])
-                    if p.is_dir():
-                        return p.resolve()
-                    _logger.warning(
-                        "[workspace] 活跃工作区 '%s' 目录不存在: %s，回退默认/环境变量",
-                        active_name, ws["path"],
-                    )
-
-            # 环境变量覆盖
-            env_path = os.getenv("WORKSPACE_PATH", "")
-            if env_path:
-                p = Path(env_path)
-                if p.is_dir():
-                    return p.resolve()
-
-            # 默认工作区
-            return _DEFAULT_WORKSPACE_DIR.resolve()
+    # ── 工作区（唯一）───────────────────────────────────────
 
     @property
     def active_workspace(self) -> Path:
-        """当前活跃工作区的根目录。
+        """工作区根目录 —— 常量，不再有任何解析优先级。
 
-        解析顺序（见 _resolve_active_path）：
-        1. 注册表 `workspaces.json` 中 `active` 字段指向的工作区路径
-        2. 环境变量 `WORKSPACE_PATH` 覆盖
-        3. 默认工作区 `src/agent/workspace/`（零配置回退）
+        历史：曾按「注册表 active → `WORKSPACE_PATH` env → 默认目录」三档解析。
+        2026-09-25 起只保留默认工作区：`AGENT_DATA_ROOT/workspace`（未配 data root
+        时 `src/agent/workspace`）。盘上残留的 `workspaces.json` 与 `WORKSPACE_PATH`
+        env 一律**不再被读取**（见 `scripts/verify_workspace_pinned.py` 的负对照）。
         """
-        return self._resolve_active_path()
+        return _DEFAULT_WORKSPACE_DIR.resolve()
 
     @property
     def active_name(self) -> str:
-        """当前活跃工作区名称，与 `active_workspace` 实际解析到的目录严格一致。
+        """工作区名称。单工作区后恒为 `"default"`。
 
-        按实际目录反查注册表名称；查不到（目录缺失回退默认、或 WORKSPACE_PATH
-        指向未注册目录）时返回 'default'——不再返回「注册表里但目录已不存在」的悬空名。
+        保留这个属性是因为有读者把它写进 run 的 configurable / Langfuse metadata
+        （`middlewares/deepagents_async_config_patch.py`、`api/langfuse_metadata.py`），
+        它们只把它当"这本 run 属于哪个工作区"的标签用。
         """
-        try:
-            actual = self._resolve_active_path()
-            with _LOCK:
-                if not self._cache_valid:
-                    self._refresh_cache()
-                assert self._cache is not None
-                workspaces = self._cache.get("workspaces") or {}
-            for k, v in workspaces.items():
-                if not v.get("path"):
-                    continue
-                try:
-                    if Path(v["path"]).resolve() == actual:
-                        return k
-                except OSError:
-                    continue
-            return "default"
-        except Exception:
-            return "default"
+        return "default"
 
-    # ── 共享资源路径（固定，不随工作区切换）──────────────────
+    # ── 共享资源路径（固定，不随工作区变化）──────────────────
 
     @property
     def data_root(self) -> Path:
@@ -286,28 +162,23 @@ class WorkspaceManager:
 
     @property
     def shared_memory_dir(self) -> Path:
-        """共享 memory 目录（所有工作区共用）。"""
+        """共享 memory 目录（唯一工作区也会变，但 memory 始终共享）。"""
         return _SHARED_RESOURCES_DIR / "memory"
 
     @property
     def shared_skills_dir(self) -> Path:
-        """共享 skills 目录（所有工作区共用）。"""
+        """共享 skills 目录。"""
         return _SHARED_RESOURCES_DIR / "skills"
 
     @property
     def shared_model_config_path(self) -> Path:
-        """共享 model_config.json（默认路径，可被工作区覆盖）。"""
+        """共享 model_config.json（默认路径，可被工作区内的同名文件覆盖）。"""
         return _SHARED_RESOURCES_DIR / "model_config.json"
 
-    # ── 全局共享数据路径（不随工作区切换）────────────────────
-    # 2026-08-27 决策：checkpoint/trace/fts/feedback 全局共享，切换工作区不丢会话。
-    # 数据锚点 = src/agent/shared/（_SHARED_RESOURCES_DIR，可被 .env
-    # SHARED_RESOURCES_PATH 覆盖）。workspace/ 本身是默认工作区目录，不能作为
-    # 共享锚点。隔离矩阵更新为：
-    #   按工作区隔离：db_config.json, semantic/, report/, tmp/,
-    #                 nl2sql_process_data/, large_tool_results/
-    #   全局共享：    memory/, skills/, model_config.json, checkpoint/,
-    #                 trace/, feedback/, fts.sqlite
+    # ── 全局共享数据路径 ─────────────────────────────────────
+    # 2026-08-27 决策：checkpoint/trace/fts/feedback 全局共享（不按工作区切）。
+    # 数据锚点 = _SHARED_RESOURCES_DIR（可被 .env SHARED_RESOURCES_PATH 覆盖）。
+    # 注意不能拿工作区目录当共享锚点：它可能被 retention 清理。
 
     @property
     def offline_experiment_dir(self) -> Path:
@@ -320,50 +191,50 @@ class WorkspaceManager:
         execute 都摸不到（与 `eval_runs/` 同一封堵思路）。
 
         注意：实验的 run 产物（manifest/status/out/arms.json）**不在这里**，仍在
-        `<active_workspace>/eval/experiment_runs/`——它按工作区隔离。
+        `<active_workspace>/eval/experiment_runs/`。
         """
         return self.data_root / OFFLINE_EXPERIMENT_DIR_NAME
 
     @property
     def shared_data_root(self) -> Path:
-        """全局共享数据根目录（所有工作区共用，锚定 _SHARED_RESOURCES_DIR）。"""
+        """全局共享数据根目录（锚定 _SHARED_RESOURCES_DIR）。"""
         return _SHARED_RESOURCES_DIR
 
     @property
     def shared_checkpoint_dir(self) -> Path:
-        """全局共享 checkpoint 目录（所有工作区共用）。"""
+        """全局共享 checkpoint 目录。"""
         return _SHARED_RESOURCES_DIR / "checkpoint"
 
     @property
     def shared_trace_db(self) -> Path:
-        """全局共享 trace 库路径（所有工作区共用，独立子目录存放 .sqlite/-shm/-wal）。"""
+        """全局共享 trace 库路径（独立子目录存放 .sqlite/-shm/-wal）。"""
         return _SHARED_RESOURCES_DIR / "trace" / "traces.sqlite"
 
     @property
     def shared_feedback_dir(self) -> Path:
-        """全局共享 feedback 目录（所有工作区共用）。"""
+        """全局共享 feedback 目录。"""
         return _SHARED_RESOURCES_DIR / "feedback"
 
-    # ── 工作区级路径（随活跃工作区变化）──────────────────────
+    # ── 工作区级路径 ─────────────────────────────────────────
 
     @property
     def checkpoint_dir(self) -> Path:
-        """当前工作区的 checkpoint 目录（仅供展示，实际存储走 shared_checkpoint_dir）。"""
+        """工作区的 checkpoint 目录（仅供展示，实际存储走 shared_checkpoint_dir）。"""
         return self.active_workspace / "checkpoint"
 
     @property
     def feedback_dir(self) -> Path:
-        """当前工作区的 feedback 目录（仅供展示，实际存储走 shared_feedback_dir）。"""
+        """工作区的 feedback 目录（仅供展示，实际存储走 shared_feedback_dir）。"""
         return self.active_workspace / "feedback"
 
     @property
     def db_config_path(self) -> Path:
-        """当前工作区的 db_config.json 路径。"""
+        """工作区的 db_config.json 路径（一个文件装 N 个库）。"""
         return self.active_workspace / "db_config.json"
 
     @property
     def model_config_path(self) -> Path:
-        """当前工作区的 model_config.json 路径（优先工作区非空配置，回退共享）。"""
+        """工作区的 model_config.json 路径（优先工作区非空配置，回退共享）。"""
         local = self.active_workspace / "model_config.json"
         if local.exists():
             try:
@@ -376,232 +247,36 @@ class WorkspaceManager:
 
     @property
     def report_dir(self) -> Path:
-        """当前工作区的 report 目录。"""
+        """工作区的 report 目录。"""
         return self.active_workspace / "report"
 
     @property
     def tmp_dir(self) -> Path:
-        """当前工作区的 tmp 目录。"""
+        """工作区的 tmp 目录。"""
         return self.active_workspace / "tmp"
 
     @property
     def process_data_dir(self) -> Path:
-        """当前工作区的 nl2sql_process_data 目录。"""
+        """工作区的 nl2sql_process_data 目录。"""
         return self.active_workspace / "nl2sql_process_data"
 
     @property
     def large_tool_results_dir(self) -> Path:
-        """当前工作区的 large_tool_results 目录。"""
+        """工作区的 large_tool_results 目录。"""
         return self.active_workspace / "large_tool_results"
 
     @property
     def semantic_dir(self) -> Path:
-        """当前工作区的语义库根目录（即工作区根，Wren 项目直接放这里）。"""
+        """语义库根目录（即工作区根，Wren 项目直接放这里）。"""
         return self.active_workspace
 
-    # ── 工作区管理（CRUD）───────────────────────────────────
-
-    def list_workspaces(self) -> list[dict]:
-        """列出所有已注册工作区（含默认工作区）。"""
-        with _LOCK:
-            if not self._cache_valid:
-                self._refresh_cache()
-            assert self._cache is not None
-            workspaces = dict(self._cache.get("workspaces", {}))
-            # 确保默认工作区出现在列表中
-            if "default" not in workspaces:
-                workspaces["default"] = {
-                    "path": str(_DEFAULT_WORKSPACE_DIR.resolve()),
-                    "name": "默认工作区",
-                    "created_at": "",
-                }
-            active = self.active_name
-            return [
-                {**v, "name_key": k, "active": k == active}
-                for k, v in workspaces.items()
-            ]
-
-    def register_workspace(self, name: str, path: str, display_name: str = "") -> dict:
-        """注册一个新工作区。
-
-        - 路径不存在时自动创建（含父目录链）并初始化子目录结构
-        - 路径已存在且非空，不覆盖已有文件，只初始化缺失的子目录
-        - 路径已存在但是文件 → 拒绝（无法作为工作区目录）
-        - name 用于注册表唯一标识（如 "project-a"）
-        """
-        p = Path(path).resolve()
-
-        if p.exists() and not p.is_dir():
-            raise ValueError(f"路径已存在但不是目录: {path}")
-
-        if not p.is_dir():
-            try:
-                p.mkdir(parents=True, exist_ok=True)
-                _logger.info("[workspace] 注册工作区时自动创建目录: %s", p)
-            except OSError as e:
-                raise ValueError(f"无法创建目录 {path}: {e}") from e
-
-        # 初始化工作区子目录结构
-        self._init_workspace_dirs(p)
-
-        with _LOCK:
-            reg = self._read_registry()
-            workspaces = reg.get("workspaces", {})
-
-            if name in workspaces:
-                raise ValueError(f"工作区 '{name}' 已存在")
-
-            from datetime import datetime, timezone
-
-            workspaces[name] = {
-                "path": str(p),
-                "name": display_name or name,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-
-            # 如果这是第一个非默认工作区，自动设为活跃
-            non_default = [k for k in workspaces if k != "default"]
-            if not reg.get("active") and len(non_default) == 1:
-                reg["active"] = name
-
-            reg["version"] = reg.get("version", 1)
-            reg["workspaces"] = workspaces
-            self._write_registry(reg)
-            self._cache = reg
-            self._cache_valid = True
-
-            _logger.info("[workspace] 注册工作区 '%s' → %s", name, p)
-            return {**workspaces[name], "name_key": name, "active": reg.get("active") == name}
-
-    def activate_workspace(self, name: str) -> dict:
-        """切换活跃工作区。即时生效，无需重启。"""
-        with _LOCK:
-            reg = self._read_registry()
-            workspaces = reg.get("workspaces", {})
-
-            if name != "default" and name not in workspaces:
-                raise KeyError(f"工作区 '{name}' 不存在")
-            if name == "default" and "default" not in workspaces:
-                # 确保默认工作区存在
-                workspaces["default"] = {
-                    "path": str(_DEFAULT_WORKSPACE_DIR.resolve()),
-                    "name": "默认工作区",
-                    "created_at": "",
-                }
-                reg["workspaces"] = workspaces
-
-            # 切换前校验目录存在，避免「激活成功但运行时回退默认目录」的悬空态
-            if name != "default":
-                p = Path(workspaces[name]["path"])
-                if not p.is_dir():
-                    raise ValueError(f"工作区 '{name}' 目录不存在: {p}")
-
-            reg["active"] = name
-            self._write_registry(reg)
-            self._cache = reg
-            self._cache_valid = True
-
-            _logger.info("[workspace] 激活工作区 '%s'", name)
-            return {
-                "ok": True,
-                "active": name,
-                "workspace": workspaces.get(name) or {
-                    "path": str(_DEFAULT_WORKSPACE_DIR.resolve()),
-                    "name": "默认工作区",
-                },
-            }
-
-    def unregister_workspace(self, name: str) -> bool:
-        """取消注册工作区（不删除文件）。"""
-        if name == "default":
-            raise ValueError("不能删除默认工作区")
-
-        with _LOCK:
-            reg = self._read_registry()
-            workspaces = reg.get("workspaces", {})
-
-            if name not in workspaces:
-                return False
-
-            del workspaces[name]
-            if reg.get("active") == name:
-                reg["active"] = "default"  # 回退到默认工作区
-
-            reg["workspaces"] = workspaces
-            self._write_registry(reg)
-            self._cache = reg
-            self._cache_valid = True
-
-            _logger.info("[workspace] 取消注册工作区 '%s'", name)
-            return True
-
-    def delete_workspace(self, name: str) -> dict:
-        """彻底删除工作区：取消注册 + 删除该工作区目录（含语义库/报告/中间数据，不可恢复）。
-
-        2026-09-08 新增：此前只有「取消注册（不删文件）」一个档位，废弃的空壳工作区
-        （如前端误建）只能手动上服务器 rm。删除走安全护栏，防误删共享数据：
-          - 拒绝删除 default 工作区；
-          - 拒绝删除**当前活跃**工作区（须先切换到其它工作区再删，避免删掉正在用的目录）；
-          - 只允许删除 data_root **之内**的已注册目录，且目录 ≠ data_root 本身、
-            ≠ 默认工作区目录、≠ 共享资源目录（shared）——注册表里路径若被改写指向
-            这些禁区，删除在此被拦下，防路径穿越误伤；
-          - 目录在 data_root 之外（dev 里手动注册任意路径）→ 拒绝删文件，仅提示
-            「取消注册 + 手动删除」，不越界碰文件；
-          - 目录已不存在 → 退化为仅移除注册条目。
-        成功返回 {"ok": True, "removed_dir": str|None}；失败抛 ValueError / KeyError。
-        """
-        if name == "default":
-            raise ValueError("不能删除默认工作区")
-        with _LOCK:
-            reg = self._read_registry()
-            workspaces = reg.get("workspaces", {})
-            ws = workspaces.get(name)
-            if not ws or not ws.get("path"):
-                raise KeyError(name)
-            if reg.get("active") == name:
-                raise ValueError(
-                    f"工作区 '{name}' 是当前活跃工作区，请先切换到其它工作区再删除"
-                )
-
-            p = Path(ws["path"]).resolve()
-            root = self.data_root.resolve()
-            default_dir = _DEFAULT_WORKSPACE_DIR.resolve()
-            shared_dir = _SHARED_RESOURCES_DIR.resolve()
-
-            # 路径护栏：必须是 data_root 的严格后代（p.relative_to 成功且 p != root）
-            try:
-                p.relative_to(root)
-            except ValueError:
-                raise ValueError(
-                    f"工作区 '{name}' 目录不在数据根目录（{root}）内，"
-                    f"出于安全仅支持取消注册，请手动删除文件: {p}"
-                ) from None
-            if p == root or p == default_dir or p == shared_dir:
-                raise ValueError(f"工作区 '{name}' 目录是保留目录（{p}），拒绝删除")
-
-            if not p.exists():
-                # 目录已不存在：退化为仅取消注册
-                del workspaces[name]
-                reg["workspaces"] = workspaces
-                self._write_registry(reg)
-                self._cache = reg
-                self._cache_valid = True
-                _logger.info("[workspace] 彻底删除工作区 '%s'：目录不存在，仅移除注册", name)
-                return {"ok": True, "removed_dir": None}
-            if not p.is_dir():
-                raise ValueError(f"工作区 '{name}' 路径不是目录: {p}")
-
-            shutil.rmtree(p)
-            del workspaces[name]
-            reg["workspaces"] = workspaces
-            self._write_registry(reg)
-            self._cache = reg
-            self._cache_valid = True
-            _logger.info("[workspace] 彻底删除工作区 '%s' 及其目录: %s", name, p)
-            return {"ok": True, "removed_dir": str(p)}
-
     def _init_workspace_dirs(self, root: Path) -> None:
-        """初始化工作区子目录结构（如不存在则创建）。"""
+        """初始化工作区子目录结构（缺什么补什么，幂等；不覆盖已有文件）。
+
+        启动时由 `__init__` 调用 —— 单工作区后这是工作区落盘的**唯一**初始化点
+        （老代码里只被 `register_workspace` 调用，而 CRUD 已删）。全新部署首启就靠它
+        建出目录结构与空 `db_config.json`。
+        """
         dirs = [
             "checkpoint",
             "feedback",
@@ -610,8 +285,12 @@ class WorkspaceManager:
             "nl2sql_process_data",
             "large_tool_results",
         ]
+        created: list[str] = []
         for d in dirs:
-            (root / d).mkdir(parents=True, exist_ok=True)
+            p = root / d
+            if not p.is_dir():
+                p.mkdir(parents=True, exist_ok=True)
+                created.append(d)
 
         # 初始化空 db_config.json（如不存在）
         db_config = root / "db_config.json"
@@ -620,6 +299,7 @@ class WorkspaceManager:
                 json.dumps({"version": 1, "databases": []}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            created.append("db_config.json")
 
         # 初始化空 model_config.json（如不存在，可选覆盖全局配置）
         model_config = root / "model_config.json"
@@ -628,8 +308,10 @@ class WorkspaceManager:
                 json.dumps({"version": 1, "active": "", "providers": []}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            created.append("model_config.json")
 
-        _logger.info("[workspace] 初始化工作区目录结构: %s", root)
+        if created:
+            _logger.info("[workspace] 初始化工作区目录结构 %s（新建: %s）", root, created)
 
 
 # 单例

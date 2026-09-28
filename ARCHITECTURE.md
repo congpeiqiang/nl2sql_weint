@@ -89,7 +89,7 @@ nl2sql/
     │   ├── prompt/                    MAIN_AGENT_PROMPT.md / NL2SQL_SYSTEM_PROMPT.md
     │   │                              （线上由 Langfuse prompt 版本管理接管，本地是兜底基线）
     │   ├── settings/                  env_loader / file_permissions / model_config_store
-    │   ├── workspace_manager/         多工作区管理（AGENT_DATA_ROOT 外置）
+    │   ├── workspace_manager/         工作区路径解析（单份，AGENT_DATA_ROOT 外置）
     │   ├── checkpoint/                checkpointer_factory（PG/SQLite）
     │   ├── llms/                      create_model 模型工厂（deepseek/glm/kimi/qwen）
     │   ├── backends/                  DynamicFilesystemBackend 等
@@ -173,7 +173,7 @@ nl2sql/
 
     支撑系统（横切）：
     ├─ Langfuse（trace/五维评分/prompt 版本/Dataset:badcase）—— 监控评估迭代闭环
-    ├─ WorkspaceManager + AGENT_DATA_ROOT —— 多工作区数据隔离
+    ├─ WorkspaceManager + AGENT_DATA_ROOT —— 工作区数据外置（单份，路径钉死）
     ├─ 本地事件日志 traces.sqlite（event_store）—— trace_routes API 数据源
     └─ 每日 cron：collect_badcase → feedback_gate → badcase_status
 ```
@@ -250,7 +250,7 @@ nl2sql/
   ```
   /shared/memory/  → shared_memory_backend    （共享 memory，AGENTS/ORCHESTRATOR）
   /shared/skills/  → shared_skills_backend    （共享 skills）
-  /workspace/      → workspace_data_backend   （当前工作区：report/tmp/…，DynamicFilesystemBackend 切换即时生效）
+  /workspace/      → workspace_data_backend   （工作区：report/tmp/…，DynamicFilesystemBackend 按 callable 解析）
   /                → vfs_root_backend         （AGENT_DATA_ROOT，代码根退出 VFS）
   ```
   `artifacts_root="/workspace/"` 让自动压缩 offload（conversation_history/large_tool_results）落当前工作区。
@@ -347,14 +347,23 @@ nl2sql/
 
 ### 3.7 数据与工作区
 
+**只有一份工作区**（2026-09-25 起；此前是「多工作区 + `workspaces.json` 注册表 + 管理员切换」）—— 旧形态是**部署级单值**（切一次全部署生效）、**不提供用户隔离**（用户隔离靠 `grants`/`thread_owner`/`report_owner` 账本，见 §3.8），却让在跑的 run 在切换后路径漂移、并给前端留了一个对普通用户 403 的入口。多项目诉求（一个部署里放多个库/多个语义库项目）由 `db_config.json` 与语义库根天然满足。
+
 **[workspace_manager/manager.py](src/agent/workspace_manager/manager.py)** — `WorkspaceManager` 单例（`get_workspace_manager()`）：
 
-- **AGENT_DATA_ROOT 外置**（L61-73）：配置后 `shared` → `<AGENT_DATA_ROOT>/shared`、默认工作区 → `<AGENT_DATA_ROOT>/workspace`，**代码根 `src/agent/` 彻底退出 VFS**；未配置回退仓库内 `src/agent/{shared,workspace}`；首次运行自动从仓库种子原子拷贝。
-- **workspaces.json 注册表**：`{version, active, workspaces:{name:{path,...}}}`，原子读写。
-- **隔离矩阵**（L267-350）：
-  - 按工作区隔离：`db_config.json / semantic/ / report/ / tmp/ / nl2sql_process_data/ / large_tool_results/`
+- **工作区路径钉死**：`<AGENT_DATA_ROOT>/workspace`（未配 `AGENT_DATA_ROOT` 的部署回退仓库内 `src/agent/workspace`）。`active_workspace` 每次返回同一个目录；盘上残留的 `workspaces.json` 与 `WORKSPACE_PATH` env **都不再被读取**（验收 `scripts/verify_workspace_pinned.py` 有负对照）。
+- **AGENT_DATA_ROOT 外置**：配置后 `shared` → `<AGENT_DATA_ROOT>/shared`、工作区 → `<AGENT_DATA_ROOT>/workspace`，**代码根 `src/agent/` 彻底退出 VFS**；未配置回退仓库内 `src/agent/`；首次运行自动从仓库种子原子拷贝，随后由 `__init__` 的 `_init_workspace_dirs()` 补齐工作区骨架（`report/ tmp/ nl2sql_process_data/ large_tool_results/ checkpoint/ feedback/` + 空 `db_config.json`）—— **全新部署的首启就靠它**（仓库内没有 `src/agent/workspace` 种子）。
+- **隔离矩阵**：
+  - 工作区内：`db_config.json / semantic/（语义库根=工作区根）/ report/ / tmp/ / nl2sql_process_data/ / large_tool_results/`
   - 全局共享：`memory/ / skills/ / model_config.json / checkpoint/ / trace/ / feedback/`
-- **切换即时生效**：[backends/dynamic_workspace.py](src/agent/backends/dynamic_workspace.py) `DynamicFilesystemBackend` 每次文件操作前从 callable 重解析 root_dir，切工作区免重启。
+- **`active_name` 恒为 `"default"`**（仍被写进 run 的 configurable / Langfuse metadata 当标签）。
+- **运行时状态库 = 一库一目录**（2026-09-25 起）：`<AGENT_DATA_ROOT>/{eval_queue,trace_bind,pending_terminal}/<同名>.sqlite`
+  —— 库与 `-wal`/`-shm` 三件套同处一层，数据根目录上不再散落 `.sqlite*`（对齐
+  `auth/auth.sqlite`、`<shared>/checkpoint/`、`<shared>/trace/` 的既有约定）。落点与
+  **老文件接管**（升级首启把根上的旧三件套 `os.replace` 过去；目标已存在绝不覆盖）都在
+  [utils/sqlite_paths.py](src/agent/utils/sqlite_paths.py)，接线在 `custom_app._lifespan` 最前面
+  （必须早于 `start_reaper`/`start_maintenance` —— 它俩会建连）。验收 `scripts/verify_store_layout.py`。
+- **缓存失效**：不再有"切换时清一遍"的钩子；`semantic_db.invalidate_db_discovery_caches()`（detector + db_name 归一化 + 语义库版本物化）由 db_config / 语义库的**写路径**调用，`dynamic_workspace.py` 的 `DynamicFilesystemBackend` 仍按 callable 解析 root_dir。
 
 **持久化**：
 - checkpoint：`checkpointer_factory.py`（§3.1），全局共享、不随工作区。
@@ -418,11 +427,10 @@ resolve_prompt_label() -> str   # 显式 LANGFUSE_PROMPT_LABEL > canary 掷骰 >
 
 ### 3.11 API 层（[src/api/](src/api/)）
 
-组合根 [custom_app.py](src/api/custom_app.py) 注册 ~57 条自定义路由（与 langgraph 原生路由同进程同端口）：
+组合根 [custom_app.py](src/api/custom_app.py) 注册 97 条自定义路由（2026-09-25 实测；含 P1/P2 系列新增）与 langgraph 原生路由同进程同端口：
 
 | 模块 | 路径 | 用途 |
 |---|---|---|
-| workspace | `/api/workspaces*` | 工作区列表/注册/切换/激活 |
 | db_config | `/api/db-configs*`、`/healthz` | 数据库配置 CRUD + 连通测试 |
 | model_config | `/api/model-configs*` | 模型 provider CRUD + 探活 |
 | message_feedback | `PUT/DELETE /api/threads/{tid}/messages/{mid}/feedback`、`/api/threads/{tid}/feedback`、`/api/feedback/export` | 用户反馈写库(CAS)+后台 Langfuse 打分 / 撤销(哨兵分) / 导出 |

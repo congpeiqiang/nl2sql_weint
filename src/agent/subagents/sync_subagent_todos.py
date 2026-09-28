@@ -84,7 +84,9 @@ _AWAIT_APPROVAL_TIMEOUT = 7200  # 等待审批上限 2h（超了按 timeout 强�
 POST_COMPLETE_MAX_CYCLES = 20      # 完成后继续监控 10s (20 × 0.5s) 让耗时稳定
 STALE_RUN_TIMEOUT = 600            # 子 run 运行时长上限 10min（P1-7，对齐 guards timeout-policy）：超过视为卡死，强制结束（兜底）
 INTERRUPTED_STUCK_TIMEOUT = 120    # 子 run 停在 interrupted 的上限 2min（summarization 瞬时暂停远短于此）：超过视为卡死，强制结束
-COMPLETE_WRITE_MAX_SECONDS = 300   # 完成态写入重试上限：主线程持续 in-flight 时放弃（防僵尸线程）
+COMPLETE_WRITE_MAX_SECONDS = 300   # 完成态写入重试上限：主线程持续 in-flight 时放手（防僵尸线程）
+# P2-4：这个上限现在只决定「watcher 什么时候放手」，不再是「什么时候不写了」——
+# 超限时会登记一行待补写（见 pending_terminal），由补写器在主线程空下来后补上。
 # ── P3 主 run 陈旧快照回退守护（trace 72e222c0 / a6f86bbd）──────────
 # 主线程的 auto-continue run 若从「子任务刚启动」的旧 checkpoint 分叉，会在每个节点
 # 边界重写整份 state 快照，把 watcher 刚写好的终态打回（卡片「跑完又回到执行中」）。
@@ -189,6 +191,16 @@ def _sync_update_state(thread_id: str, values: dict):
 
     说明：本函数在 asyncio.to_thread 的线程池线程中运行，内部用同步 HTTP client
     在锁内调用（持锁期间不 await，避免阻塞事件循环/死锁）。
+
+    ⚠️ **已知副作用（P2-12，别当成「丢步」）**：`as_node="__start__"` 的状态补丁会把
+    主线程 head checkpoint 的 `next` 写成**图入口节点**（本图是
+    `PatchToolCallsMiddleware.before_agent`）。若这次补丁落在**主 run 已终态之后**
+    （409 硬闸只允许此时写入），而该轮的续跑早已通知过（`success_notified_local`
+    已置位 → 不会再起新 run），就会留下一个**没有任何机制去推进的幽灵 `next`**。
+    它**不是丢步**：答复已终稿（`last_message_is_final=True`）、run=success、下一次
+    用户消息会把它顺带消费掉。`api.thread_run_status.classify()` 的判据 4 已按此
+    判定（生产 trace 01a09ed5）。机制与判据回归见 `scripts/verify_phantom_next.py`；
+    **读 `state.next` 的新代码必须同时看 `last_message_is_final`**。
     """
     import os as _os
     from langgraph_sdk import get_client as _get_async_client
@@ -240,12 +252,15 @@ async def _async_sync_loop(
     # ── 初始化 EventStore（追踪集成） ──
     _trace_store = None
     try:
-        from agent.trace.event_store import EventStore
+        from agent.trace.event_store import get_event_store
         from agent.trace.event_log import EventType
         wm = _get_workspace_manager()
         _trace_db = str(wm.shared_trace_db)
-        _trace_store = EventStore(_trace_db)
-        _trace_store.open()
+        # 共享实例：本函数每个子任务都会跑一次（一个查询 = 多个子任务 = 多个并存
+        # 的 sync 循环）。旧写法每次 new 一条连接且**从不 close** → 并发查询下
+        # fd 与 WAL -shm 映射无界增长；各实例独立的 seq 计数器还会让同一子线程
+        # 出现重复 seq。
+        _trace_store = get_event_store(_trace_db)
         # 记录子智能体启动事件
         _trace_store.insert_event_sync(
             thread_id=sub_thread_id,
@@ -751,24 +766,12 @@ async def _async_sync_loop(
                             "[sync] 快照最终步骤: %d 项",
                             len(final_sub_todos) if final_sub_todos else 0,
                         )
-                        task_prefix = sub_thread_id[:8]
                         # P1-7：按终态展示（已取消/超时终止/执行失败…），不再一律「已完成」
-                        done_label = _DONE_LABELS.get(run_status, "已完成")
                         if final_sub_todos:
-                            final_steps_cache = [
-                                {
-                                    "id": f"__subagent_header_{task_prefix}__",
-                                    "content": f"{_SUBAGENT_MARKER} {agent_name} 执行进度 ({done_label})",
-                                    "status": "completed",
-                                }
-                            ] + [
-                                {
-                                    "id": f"__subagent_{task_prefix}_{i}__",
-                                    "content": f"{_SUBAGENT_PREFIX}{t['content']}",
-                                    "status": "completed",
-                                }
-                                for i, t in enumerate(final_sub_todos)
-                            ]
+                            # 渲染与补写器共用（render_final_steps）：两处逻辑不许漂移
+                            final_steps_cache = render_final_steps(
+                                final_sub_todos, agent_name, sub_thread_id, run_status
+                            )
                     if final_steps_cache:
                         try:
                             await asyncio.to_thread(
@@ -1008,6 +1011,11 @@ async def _async_sync_loop(
                             REGRESSION_GUARD_MAX_SECONDS,
                             sub_thread_id[:8],
                         )
+                        # P2-4：放弃前把终态登记出去，别让 active_queries 永久 true
+                        await _handoff_terminal_write(
+                            main_thread_id, sub_thread_id, agent_name,
+                            run_status, watched_run_id, final_steps_cache, task,
+                        )
                         break
                     if post_complete_cycles >= POST_COMPLETE_MAX_CYCLES:
                         _logger.info(
@@ -1017,14 +1025,23 @@ async def _async_sync_loop(
                 elif (
                     time.monotonic() - completion_started_at
                 ) > COMPLETE_WRITE_MAX_SECONDS and not regression_rewrites:
-                    # 兜底：主线程长时间 in-flight（如长查询）时放弃重试，避免僵尸线程。
-                    # 前端会因 active_queries 仍 true 持续轮询，但 async_tasks 缺失时仍不自动续跑；
-                    # 这是极端场景的降级（至少不占线程）。
+                    # 兜底：主线程长时间 in-flight（如长查询/并发挤满 run 槽）时
+                    # 本线程放手（不占线程、不刷 API）。
+                    # ⚠️ P2-4：放手 ≠ 不写了。主线程忙时 update_state 是硬 409，
+                    # 当场怎么写都写不进去，所以把终态**登记**成待补写行，交给
+                    # pending_terminal 的补写器 —— 否则 active_queries 永久 true
+                    # （卡片永久「执行中」）且 async_tasks 终态缺失（自动续跑不触发、
+                    # 图表/报告丢失）。
                     # 注意 `and not regression_rewrites`：已经在自愈重写的任务不适用这个
                     # 300s 上限（否则守护会在第 300 秒被杀），改由 REGRESSION_GUARD_MAX_* 兜底。
                     _logger.error(
-                        "[sync] 完成写入超过 %ds 仍未成功(主线程持续 in-flight?)，放弃: %s",
+                        "[sync] 完成写入超过 %ds 仍未成功(主线程持续 in-flight?)，"
+                        "登记待补写并退出本线程: %s",
                         COMPLETE_WRITE_MAX_SECONDS, sub_thread_id[:8],
+                    )
+                    await _handoff_terminal_write(
+                        main_thread_id, sub_thread_id, agent_name,
+                        run_status, watched_run_id, final_steps_cache, task,
                     )
                     break
 
@@ -1273,6 +1290,77 @@ def _merge_steps_monotonic(
         for i, (content, status) in enumerate(items)
     )
     return steps
+
+
+def render_final_steps(
+    sub_todos: list,
+    agent_name: str,
+    sub_thread_id: str,
+    run_status: str,
+) -> list:
+    """把子智能体最终 todos 渲染成落 state 的 steps 载荷（全部 completed）。
+
+    P2-4 起由 watcher 与补写器（`pending_terminal._replay_row`）**共用** ——
+    补写器在主线程空闲后重放终态时，若登记行没带步骤快照，就用同一函数现算，
+    避免两处渲染逻辑漂移（步骤 id 前缀/终态文案不一致会让前端卡片错乱）。
+    """
+    task_prefix = sub_thread_id[:8]
+    done_label = _DONE_LABELS.get(run_status, "已完成")
+    return [
+        {
+            "id": f"__subagent_header_{task_prefix}__",
+            "content": f"{_SUBAGENT_MARKER} {agent_name} 执行进度 ({done_label})",
+            "status": "completed",
+        }
+    ] + [
+        {
+            "id": f"__subagent_{task_prefix}_{i}__",
+            "content": f"{_SUBAGENT_PREFIX}{t['content']}",
+            "status": "completed",
+        }
+        for i, t in enumerate(sub_todos)
+    ]
+
+
+async def _handoff_terminal_write(
+    main_thread_id: str,
+    sub_thread_id: str,
+    agent_name: str,
+    run_status: str,
+    watched_run_id: Optional[str] = None,
+    steps: Optional[list] = None,
+    task: Optional[dict] = None,
+) -> bool:
+    """放弃本轮写入 → 把终态**登记**成待补写行，交给补写器（P2-4）。
+
+    为什么是"登记"而不是"再试一次"：主线程只要还有 pending/running 的 run，
+    `threads.update_state` 就是硬 409（`langgraph_api` 的 `run_count > 0`），当场
+    无论怎么试都写不进去。旧实现对这两种情形一视同仁：等满
+    `COMPLETE_WRITE_MAX_SECONDS` 就 `break` 走人 —— 于是 `active_queries` 永久 true
+    （进度卡永久「执行中」），且 `async_tasks` 终态没落地 → **前端自动续跑永不触发、
+    用户的图表/报告直接丢**。登记后由补写器在主线程空下来（或进程重启后）补写，
+    补写成功才触发续跑/失败汇报。
+
+    best-effort：登记失败只记日志，绝不抛异常影响 watcher 收尾。
+    """
+    try:
+        from agent.subagents.pending_terminal import record_terminal  # 惰性：防 import 环
+
+        rid = await asyncio.to_thread(
+            record_terminal,
+            main_thread_id,
+            sub_thread_id,
+            agent_name,
+            run_status,
+            str(watched_run_id or ""),
+            steps,
+            dict(task or {}),
+            "",
+        )
+        return rid is not None
+    except Exception as e:  # noqa: BLE001
+        _logger.error("[sync] 登记待补写终态失败(该任务将无人补写): %s", str(e)[:200])
+        return False
 
 
 def _lookup_task_description(
@@ -1606,6 +1694,54 @@ async def _extract_subagent_todos(client, sub_thread_id: str) -> list:
         return []
 
 
+def _run_context_config(last_run) -> dict:
+    """从主 agent 上一个 run 提取 user_id / db_name，拼成续跑 run 的 `config`。
+
+    ⚠️ `db_name` 必须一起继承（2026-09-26 生产实证，trace `eaf1c8b2…`）：续跑 run 才是
+    **报告落盘的那条 run**，缺了 db_name 会让主 agent 的系统提示丢掉「当前数据库」段、
+    让 `build_report` 读不到知识库语料 ⇒ 报告侧的口径逐字核验**永远降级**成「未核验」
+    （子 agent 侧闸门却拿父 run 透传的 db_name 正常核验，两套账）。
+    来源是**服务端自己写的** run metadata（`LangfuseMetadataMiddleware` 把钳制后的
+    db_name 写进 `config.metadata`）⇒ 授权判定早于这里，继承它不等于放权。
+
+    另：`deepagents_async_config_patch._wrap_runs_create` 只在**未显式传 config** 时才
+    注入当前 configurable；这两处续跑都带着 config 调用 ⇒ 服务端那层补不上，必须在这里给。
+
+    SDK 的 `Run` 只保证有 metadata（`config` 在 TypedDict 里都没有，读不到属正常），
+    故两条路都试。`configurable` 为空时不写该键——空 dict 会盖掉服务端注入的上下文。
+    """
+    user_id = None
+    db_name = ""
+    if last_run:
+        rcfg = last_run.get("config")
+        configurable = (rcfg or {}).get("configurable") if isinstance(rcfg, dict) else None
+        if not isinstance(configurable, dict):
+            configurable = {}
+        metadata = last_run.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        user_id = configurable.get("user_id") or metadata.get("langfuse_user_id")
+        db_name = str(configurable.get("db_name") or metadata.get("db_name") or "")
+
+    inherit: dict = {}
+    if user_id:
+        # 与 langfuse_metadata 中间件约定一致；user_id 双写供运行时其他模块读取
+        inherit["langgraph_auth_user_id"] = user_id
+        inherit["user_id"] = user_id
+    if db_name:
+        inherit["db_name"] = db_name
+
+    cfg: dict = {"recursion_limit": 500}
+    if inherit:
+        cfg["configurable"] = inherit
+    _logger.info(
+        "[sync] 续跑继承 user_id: %s, db_name: %s",
+        user_id or "(none)",
+        db_name or "(none)",
+    )
+    return cfg
+
+
 async def _notify_main_agent_continue(
     client, main_thread_id: str, agent_name: str
 ):
@@ -1633,17 +1769,8 @@ async def _notify_main_agent_continue(
                 break
             await asyncio.sleep(2)
 
-        # 2. 从主智能体上一个 run 提取 user_id（续跑 run 应继承原始用户身份）
-        user_id = None
-        if last_run:
-            # 尝试从 run 的 configurable 或 metadata 读取 user_id
-            run_config = last_run.get("config") or {}
-            configurable = run_config.get("configurable") or {}
-            user_id = configurable.get("user_id")
-            if not user_id:
-                metadata = last_run.get("metadata") or {}
-                user_id = metadata.get("langfuse_user_id")
-        _log.info("[sync] 续跑继承 user_id: %s", user_id or "(none)")
+        # 2. 从主智能体上一个 run 提取 user_id / db_name（续跑 run 必须继承原始用户身份与选库）
+        #    —— 见 `_run_context_config`
 
         # 3. 将通知消息直接作为 runs.create 的输入（而非 update_state）
         #    这样新 run 会看到这条新消息并触发 LLM 处理
@@ -1655,14 +1782,8 @@ async def _notify_main_agent_continue(
         )
         _log.info("[sync] 注入通知消息并创建新 run")
 
-        # 4. 启动新 run，消息作为 input 传入，继承 user_id
-        #    使用 langgraph_auth_user_id 键，与 langfuse_metadata 中间件约定一致
-        run_config = {"recursion_limit": 500}
-        if user_id:
-            run_config["configurable"] = {
-                "langgraph_auth_user_id": user_id,
-                "user_id": user_id,  # 双写：供运行时其他模块读取
-            }
+        # 4. 启动新 run，消息作为 input 传入，继承 user_id + db_name
+        run_config = _run_context_config(last_run)
         run = await client.runs.create(
             thread_id=main_thread_id,
             assistant_id="chat_agent",
@@ -1723,12 +1844,14 @@ async def _report_subagent_failure(
         #    子任务失败时主线程最新 run 通常是 launch run（success），立即通过；
         #    仅当用户正在别的对话/查询时才会等待。
         idle = False
+        last_run = None
         for _i in range(15):
             runs = await client.runs.list(thread_id=main_thread_id, limit=1)
             if not runs:
                 idle = True
                 break
-            if runs[0].get("status") in (
+            last_run = runs[0]
+            if last_run.get("status") in (
                 "success", "error", "cancelled", "timeout", "interrupted",
             ):
                 idle = True
@@ -1762,7 +1885,7 @@ async def _report_subagent_failure(
             thread_id=main_thread_id,
             assistant_id="chat_agent",
             input={"messages": [{"role": "user", "content": content}]},
-            config={"recursion_limit": 500},
+            config=_run_context_config(last_run),
         )
         _rid = run.get("run_id", "unknown") if isinstance(run, dict) else run
         _logger.info(

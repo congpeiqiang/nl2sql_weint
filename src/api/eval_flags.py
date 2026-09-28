@@ -21,6 +21,7 @@ import logging
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
+from agent.utils.offload import offload
 from api._common import json_response, parse_body, require_admin
 
 _logger = logging.getLogger(__name__)
@@ -81,7 +82,9 @@ async def eval_flags(request: Request) -> None:
 
     if method == "DELETE":
         before = _payload()["flags"]
-        store.clear_overrides()
+        # P1-14：覆盖层是落盘写（临时文件 + os.replace）→ 线程。读（`_payload`）留主线程：
+        # 一个请求里要读 4 次，每次搬线程比读本身还贵。
+        await offload(store.clear_overrides)
         _audit("清空覆盖", request, before, {})
         return json_response(_payload())
 
@@ -96,7 +99,7 @@ async def eval_flags(request: Request) -> None:
         )
     before = _payload()["flags"]
     try:
-        saved = store.patch_overrides(flags)
+        saved = await offload(store.patch_overrides, flags)  # P1-14：落盘写
     except ValueError as e:
         return json_response({"ok": False, "error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001

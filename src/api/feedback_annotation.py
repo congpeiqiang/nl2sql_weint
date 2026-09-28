@@ -41,6 +41,7 @@ from agent.feedback.store import (
     get_store,
 )
 from agent.eval.bad_types import BAD_TYPES, is_valid_bad_type
+from agent.utils.offload import offload, offload_long
 from api._common import json_response, parse_body, require_user
 
 _logger = logging.getLogger(__name__)
@@ -217,6 +218,21 @@ def _json_safe(v):
     return str(v)
 
 
+def _run_engine_blocking(runner, args, context):
+    """在**工作线程**里把 engine 的 `run_sql` 跑完（P1-14）。
+
+    为什么不能直接 `await runner.run_sql(...)`：10 个 engine 的 `run_sql` 都是
+    「`async` 外壳 + 同步实心」—— 签名是 async，实现里**一个 `await` 都没有**
+    （`psycopg.connect` / `pymysql.connect` / `cursor.execute` / `fetchall()` 全是
+    同步调用）。直接 await 等于把整条查询挂在**主事件循环**上，人工标注点一次
+    「预览」就能卡住全站（评估报告 §3.3 的原话：「名为 async，实现里没有一个
+    to_thread」）。所以在本线程新建一个事件循环把它跑完 —— 语义等价，但不占主循环。
+    （`asyncio.run` 在非主线程可用；这些 coroutine 体里没有 `await`，因此也不存在
+    "把主循环的对象带进新循环"的问题。AST 断言见 `verify_event_loop_liveness`。）
+    """
+    return asyncio.run(runner.run_sql(args, context))
+
+
 async def _run_preview(db_name: str, sql: str, limit: int = _PREVIEW_LIMIT) -> dict:
     """复用 dbmcp 引擎执行人工 SQL，返回预览结果。写/DDL 直接拒绝。
 
@@ -241,14 +257,20 @@ async def _run_preview(db_name: str, sql: str, limit: int = _PREVIEW_LIMIT) -> d
         raise ValueError(f"仅允许只读查询（检测到 {detail or '写/DDL'} 操作，已拒绝执行）")
 
     cfg = McpSqlConfig.from_env(db_name)
-    runner = _load_runner_class(cfg.db_type)(**cfg.config)
+    # P1-14：`_load_runner_class` 是 importlib 首次导入（可以到几百毫秒），
+    # 构造 `(**cfg.config)` 会拉起驱动模块 —— 一并放线程，别只搬执行那一步。
+    runner = await asyncio.to_thread(
+        lambda: _load_runner_class(cfg.db_type)(**cfg.config)
+    )
     context = _build_tool_context()
 
     statements = split_sql_statements(sql)
     all_results: list = []
     for stmt in statements:
         stmt = _apply_default_limit(stmt, limit)
-        df = await runner.run_sql(RunSqlToolArgs(sql=stmt), context)
+        df = await asyncio.to_thread(
+            _run_engine_blocking, runner, RunSqlToolArgs(sql=stmt), context
+        )
         all_results.append((stmt, df))
     result = combine_multi_results(all_results)
     result["rows"] = [_json_safe(r) for r in result.get("rows", [])]
@@ -295,12 +317,14 @@ async def _backfill_annotation(thread_id: str, message_id: str) -> dict | None:
 
     返回补齐后的 to_mapping()；不存在返回 None。
     """
-    ann = store.get_annotation(thread_id, message_id)
+    # P1-14：本函数里的每次 `store.*` 都是同步 sqlite（读+可能的写 commit），
+    # 而现在开始都进线程 —— 标注页详情/列表是逐条打开的。
+    ann = await offload(store.get_annotation, thread_id, message_id)
     if ann is None:
         return None
     dirty = False
     if not ann.question or not ann.bad_sql or not ann.cube_spec:
-        rec = store.get(thread_id, message_id)
+        rec = await offload(store.get, thread_id, message_id)
         if rec and (rec.question or rec.sql):
             if not ann.question and rec.question:
                 ann.question = rec.question[:2000]
@@ -328,8 +352,8 @@ async def _backfill_annotation(thread_id: str, message_id: str) -> dict | None:
         except Exception as e:  # noqa: BLE001
             _logger.debug("[annotation] 线程 state 惰性补齐失败: %s", e)
     if dirty:
-        ann = store.update_annotation(
-            thread_id, message_id,
+        ann = await offload(
+            store.update_annotation, thread_id, message_id,
             question=ann.question, bad_sql=ann.bad_sql, cube_spec=ann.cube_spec,
         ) or ann
     data = ann.to_mapping()
@@ -337,7 +361,8 @@ async def _backfill_annotation(thread_id: str, message_id: str) -> dict | None:
     # 一旦被「按新口径试算」改写，详情里就再也看不到它了，而标注页的「重置为模型原
     # 口径」与三态标记必须以此为基准才说得准（否则第二次打开看到的「原口径」其实是
     # 上一位标注员试算保存的那份）。不落库、不入数据集，纯回显。
-    data["cube_original"] = _model_cube(ann)
+    # （`_model_cube` 内部还各读一次 store，一并放线程。）
+    data["cube_original"] = await offload(_model_cube, ann)
     return data
 
 
@@ -353,9 +378,15 @@ async def list_annotations(request: Request):
     limit = max(1, min(limit, 200))
     if status and status not in ANNOTATION_STATUSES:
         return json_response({"error": f"status 必须是 {ANNOTATION_STATUSES} 之一"}, status=400)
-    records = store.list_annotations(status=status, limit=limit)
-    # 列表标题依赖 question：入队时为空，这里从本地快照快速补齐（无网络读取）
-    records = [_fill_annotation_from_snapshot(r) for r in records]
+    # 列表标题依赖 question：入队时为空，这里从本地快照快速补齐（无网络读取）。
+    # P1-14：`_fill_annotation_from_snapshot` 对**每一条**记录都会读一次反馈快照
+    # （最多 1 + 200 次同步 sqlite 读 + 其中的写），整段合成一次线程切换；否则光
+    # 打开待标注列表就是几百次阻塞读挂在事件循环上。
+    def _load() -> list:
+        return [_fill_annotation_from_snapshot(r)
+                for r in store.list_annotations(status=status, limit=limit)]
+
+    records = await offload(_load)
     return json_response(
         {
             "count": len(records),
@@ -389,7 +420,7 @@ async def judge_annotation(request: Request):
     is_valid = data.get("is_valid")
     if not isinstance(is_valid, bool):
         return json_response({"error": "is_valid 必须是布尔值"}, status=400)
-    ann = store.get_annotation(thread_id, message_id)
+    ann = await offload(store.get_annotation, thread_id, message_id)
     if ann is None:
         return json_response({"error": "标注不存在"}, status=404)
     if ann.status in ("badcase", "good", "rejected"):
@@ -428,8 +459,8 @@ async def judge_annotation(request: Request):
         return json_response({"ok": True, "annotation": updated.to_mapping(), "good": True})
 
     new_status = "annotating" if is_valid else "rejected"
-    updated = store.update_annotation(
-        thread_id, message_id,
+    updated = await offload(
+        store.update_annotation, thread_id, message_id,
         status=new_status, is_valid=1 if is_valid else 0,
         annotator=annotator, annotated_at=_now_iso(),
     )
@@ -448,7 +479,7 @@ async def execute_annotation(request: Request):
     sql = str(data.get("sql", "") or "").strip()
     if not sql:
         return json_response({"error": "sql 不能为空"}, status=400)
-    ann = store.get_annotation(thread_id, message_id)
+    ann = await offload(store.get_annotation, thread_id, message_id)
     if ann is None:
         return json_response({"error": "标注不存在"}, status=404)
     db_name = str(data.get("db_name", "") or "") or ann.db_name or ""
@@ -464,17 +495,21 @@ async def execute_annotation(request: Request):
         return json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
         _logger.warning("[annotation] 执行失败 thread=%s: %s", thread_id[:12], e)
-        store.update_annotation(thread_id, message_id, exec_error=str(e)[:2000])
+        await offload(
+            store.update_annotation, thread_id, message_id, exec_error=str(e)[:2000]
+        )
         return json_response({"error": f"执行失败: {e}"}, status=400)
-    store.update_annotation(
-        thread_id, message_id,
+    await offload(
+        store.update_annotation, thread_id, message_id,
         bad_sql=sql[:MAX_SNAPSHOT_SQL],
         exec_error="",
         db_name=db_name[:128] if db_name else ann.db_name,
     )
     # 状态推进：queued/annotating → validated（人工 SQL 已验证可执行，金标就绪）
     if ann.status in ("queued", "annotating"):
-        store.update_annotation(thread_id, message_id, status="validated")
+        await offload(
+            store.update_annotation, thread_id, message_id, status="validated"
+        )
     return json_response({"ok": True, "result": result})
 
 
@@ -554,7 +589,7 @@ async def preview_cube_annotation(request: Request):
     thread_id = request.path_params["thread_id"]
     message_id = request.path_params["message_id"]
     data = await parse_body(request)
-    ann = store.get_annotation(thread_id, message_id)
+    ann = await offload(store.get_annotation, thread_id, message_id)
     if ann is None:
         return json_response({"error": "标注不存在"}, status=404)
 
@@ -609,8 +644,8 @@ async def preview_cube_annotation(request: Request):
         # 只落口径，不动任何状态机字段：试算 ≠ 确认。
         # 传 **dict** 不是 JSON 串：记录里 cube_spec 是 dict、序列化在 update_annotation
         # 的绑定处做（那里对 cube_spec 无条件 json.dumps，传串会变成二次转义）。
-        store.update_annotation(
-            thread_id, message_id,
+        await offload(
+            store.update_annotation, thread_id, message_id,
             cube_spec=spec,
             db_name=db_name[:128] if db_name else ann.db_name,
         )
@@ -647,7 +682,7 @@ async def confirm_annotation(request: Request):
         return json_response({"error": "bad_type 不能为空"}, status=400)
     if not is_valid_bad_type(bad_type):
         return json_response({"error": f"bad_type 非法（可选: {[k for k, _, _ in BAD_TYPES]}）"}, status=400)
-    ann = store.get_annotation(thread_id, message_id)
+    ann = await offload(store.get_annotation, thread_id, message_id)
     if ann is None:
         return json_response({"error": "标注不存在"}, status=404)
     if ann.status in ("badcase", "good", "rejected"):
@@ -682,62 +717,73 @@ async def confirm_annotation(request: Request):
 
     from api.message_feedback import _find_trace_with_retry
 
-    trace_id = _find_trace_with_retry(thread_id, message_id, attempts=2)
+    # P1-14：`_find_trace_with_retry` 内部带退避重试（最多 2 次），同步跑在循环上
+    trace_id = await offload_long(_find_trace_with_retry, thread_id, message_id, attempts=2)
     question = ann.question or ""
     today = datetime.now(timezone.utc).date().isoformat()
 
     # ① Langfuse Dataset:badcase（旁路：禁用/失败不阻塞本地闭环）
-    try:
+    def _write_dataset_item() -> None:
         from agent.trace.langfuse_client import get_client, langfuse_enabled
 
-        if langfuse_enabled():
-            client = get_client()
-            _ensure_dataset(client, "badcase", "NL2SQL 人工确认的查询错误（负面样本），供回归/评测")
-            _cube = _cube_dataset_fields(ann.cube_spec)
-            client.create_dataset_item(
-                dataset_name="badcase",
-                input={"question": question or "(未取到问题)", "session_id": thread_id},
-                expected_output={"sql": gold_sql, **({"cube": _cube["cube"]} if _cube else {})},
-                metadata={
-                    "trace_id": trace_id,
-                    "reasons": ["user_feedback=0", "manual_annotation"],
-                    "source": "user-annotation",
-                    "bad_type": bad_type,
-                    # 定位键：一条 trace 可承载同会话多条反馈，撤回/核对要靠它区分
-                    "message_id": ann.message_id,
-                    "db_name": db_name,
-                    "collected_at": today,
-                    "gold_sql": gold_sql,
-                    # 用户在反馈里写的评论（原先只在本地/标注页可见，入集后
-                    # Langfuse UI 里能看到「业务为什么说这条错了」）
-                    "note": note,
-                    **({"cube_spec": _cube["cube_spec"],
-                        "cube_spec_readable": _cube["cube_spec_readable"]} if _cube else {}),
-                    # 模型原本那份口径（上面那份可能已被「按新口径试算」改过，
-                    # 两者不同才是信息——同 physical_sql_original 与 gold_sql 的关系）
-                    **_original_cube_fields(ann),
-                    # 模型原本下发的那条（gold_sql 是人改过的金标，两者不同才是信息）
-                    **_physical_sql_field(_model_sql(ann)),
-                },
-                source_trace_id=trace_id or None,
-            )
-            _logger.info("[annotation] BadCase 已写入 Dataset:badcase trace=%s type=%s",
-                         trace_id[:12] if trace_id else "?", bad_type)
+        if not langfuse_enabled():
+            return
+        client = get_client()
+        _ensure_dataset(client, "badcase", "NL2SQL 人工确认的查询错误（负面样本），供回归/评测")
+        _cube = _cube_dataset_fields(ann.cube_spec)
+        client.create_dataset_item(
+            dataset_name="badcase",
+            input={"question": question or "(未取到问题)", "session_id": thread_id},
+            expected_output={"sql": gold_sql, **({"cube": _cube["cube"]} if _cube else {})},
+            metadata={
+                "trace_id": trace_id,
+                "reasons": ["user_feedback=0", "manual_annotation"],
+                "source": "user-annotation",
+                "bad_type": bad_type,
+                # 定位键：一条 trace 可承载同会话多条反馈，撤回/核对要靠它区分
+                "message_id": ann.message_id,
+                "db_name": db_name,
+                "collected_at": today,
+                "gold_sql": gold_sql,
+                # 用户在反馈里写的评论（原先只在本地/标注页可见，入集后
+                # Langfuse UI 里能看到「业务为什么说这条错了」）
+                "note": note,
+                **({"cube_spec": _cube["cube_spec"],
+                    "cube_spec_readable": _cube["cube_spec_readable"]} if _cube else {}),
+                # 模型原本那份口径（上面那份可能已被「按新口径试算」改过，
+                # 两者不同才是信息——同 physical_sql_original 与 gold_sql 的关系）
+                **_original_cube_fields(ann),
+                # 模型原本下发的那条（gold_sql 是人改过的金标，两者不同才是信息）
+                **_physical_sql_field(_model_sql(ann)),
+            },
+            source_trace_id=trace_id or None,
+        )
+
+    try:
+        # P1-14：Langfuse SDK 是**同步** HTTP（建数据集 + 写条目至少一次网络往返，
+        # 内网慢时是秒级）→ 长任务池。它只是旁路，不该拖着全站等它。
+        await offload_long(_write_dataset_item)
+        _logger.info("[annotation] BadCase 已写入 Dataset:badcase trace=%s type=%s",
+                     trace_id[:12] if trace_id else "?", bad_type)
     except Exception as e:  # noqa: BLE001
         _logger.warning("[annotation] Dataset:badcase 写入失败（跳过，不影响本地）: %s", e)
 
     # ② badcase_status.json（reviewed + bad_type + gold_sql，进回归集）
-    try:
+    def _mark_badcase_status() -> None:
         from agent.eval.badcase_status import annotate
 
         annotate(trace_id or thread_id, bad_type, gold_sql=gold_sql, note=note,
                  question=question, db_name=db_name)
+
+    try:
+        # P1-14：写盘（+ 可能的数据集同步），进线程
+        await offload(_mark_badcase_status)
     except Exception as e:  # noqa: BLE001
         _logger.warning("[annotation] badcase_status 标记失败: %s", e)
 
     # ③ 本地标注 → badcase（终态）
-    updated = store.update_annotation(
-        thread_id, message_id,
+    updated = await offload(
+        store.update_annotation, thread_id, message_id,
         status="badcase", is_valid=1,
         gold_sql=gold_sql, gold_result=gold_result_json, bad_type=bad_type,
         annotator=annotator, annotated_at=_now_iso(), badcase_at=_now_iso(),
@@ -821,7 +867,9 @@ async def _confirm_good_commit(
     """
     from api.message_feedback import _find_trace_with_retry
 
-    trace_id = _find_trace_with_retry(ann.thread_id, ann.message_id, attempts=2)
+    # P1-14：定位 trace 走 v4 observations 接口（可能超时）+ 线性退避 `time.sleep`
+    # —— 这是**网络 + 睡眠**，挂在事件循环上会把全站按住
+    trace_id = await offload_long(_find_trace_with_retry, ann.thread_id, ann.message_id, attempts=2)
 
     try:
         from agent.trace.langfuse_client import langfuse_enabled
@@ -836,7 +884,9 @@ async def _confirm_good_commit(
         _logger.warning("[annotation] Dataset:goodcase 写入失败（跳过，不影响本地）: %s", e)
 
     now = _now_iso()
-    return store.update_annotation(
+    # P1-14：终态写入（同步 sqlite commit）→ 线程
+    return await offload(
+        store.update_annotation,
         ann.thread_id, ann.message_id,
         status="good", is_valid=1,
         gold_sql=sql,
@@ -933,7 +983,7 @@ async def confirm_good_annotation(request: Request):
     thread_id = request.path_params["thread_id"]
     message_id = request.path_params["message_id"]
     data = await parse_body(request)
-    ann = store.get_annotation(thread_id, message_id)
+    ann = await offload(store.get_annotation, thread_id, message_id)
     if ann is None:
         return json_response({"error": "标注不存在"}, status=404)
     if ann.status in ("badcase", "good", "rejected"):
@@ -1048,7 +1098,7 @@ async def revoke_good_annotation(request: Request):
     """
     thread_id = request.path_params["thread_id"]
     message_id = request.path_params["message_id"]
-    ann = store.get_annotation(thread_id, message_id)
+    ann = await offload(store.get_annotation, thread_id, message_id)
     if ann is None:
         return json_response({"error": "标注不存在"}, status=404)
     if ann.status != "good":
@@ -1057,7 +1107,8 @@ async def revoke_good_annotation(request: Request):
         )
     from api.message_feedback import _find_trace_with_retry
 
-    trace_id = _find_trace_with_retry(thread_id, message_id, attempts=2)
+    # P1-14：网络 + `time.sleep` 退避（同 _confirm_good_commit）
+    trace_id = await offload_long(_find_trace_with_retry, thread_id, message_id, attempts=2)
     warning = ""
     deleted = 0
     try:
@@ -1082,7 +1133,7 @@ async def revoke_good_annotation(request: Request):
              "reason": "delete_failed"},
             status=502,
         )
-    updated = store.reopen_annotation(thread_id, message_id)
+    updated = await offload(store.reopen_annotation, thread_id, message_id)
     if updated is None:
         return json_response({"error": "本地状态回退失败（可能已被他处改动）"}, status=409)
     _logger.info("[annotation] 撤回入集 trace=%s auto=%s",
@@ -1131,7 +1182,7 @@ async def delete_annotation(request: Request):
     message_id = request.path_params["message_id"]
     data = await parse_body(request)
 
-    ann = store.get_annotation(thread_id, message_id)
+    ann = await offload(store.get_annotation, thread_id, message_id)
     if ann is None:
         return json_response({"error": "标注不存在"}, status=404)
     err = _deletable_error(ann.status)
@@ -1203,8 +1254,8 @@ async def clear_annotations(request: Request):
 
     from api.message_feedback import _schedule_langfuse_revoke_many, purge_feedback
 
-    rows = await asyncio.to_thread(store.list_annotations, status, _BATCH_CAP)
-    capped = store.count_annotations().get(status, 0) > len(rows)
+    rows = await offload(store.list_annotations, status, _BATCH_CAP)
+    capped = (await offload(store.count_annotations)).get(status, 0) > len(rows)
 
     deleted = 0
     feedback_deleted = 0
@@ -1235,7 +1286,7 @@ async def clear_annotations(request: Request):
         else:
             skipped += 1  # CAS 未命中：循环期间它变成了终态
     scores_queued = _schedule_langfuse_revoke_many(score_pairs)
-    remaining = store.count_annotations().get(status, 0)
+    remaining = (await offload(store.count_annotations)).get(status, 0)
     _logger.info(
         "[annotation] 批量清空 status=%s deleted=%d skipped=%d capped=%s",
         status, deleted, skipped, capped,
@@ -1359,9 +1410,15 @@ async def list_dataset_items(request: Request):
 
         if not langfuse_enabled():
             return json_response({"dataset": name, "count": 0, "items": []})
-        client = get_client()
-        resp = client.api.dataset_items.list(dataset_name=name, limit=limit)
-        items = [ _dataset_item_to_row(it) for it in (resp.data or []) ]
+
+        # P1-14：Langfuse 的 `get_client()` 是**同步** SDK（`langfuse._client.client.Langfuse`，
+        # 不是 AsyncLangfuse）→ `api.dataset_items.list` 是一次阻塞 HTTP。数据集页会反复刷。
+        def _fetch() -> list:
+            client = get_client()
+            resp = client.api.dataset_items.list(dataset_name=name, limit=limit)
+            return [_dataset_item_to_row(it) for it in (resp.data or [])]
+
+        items = await offload_long(_fetch)
         return json_response({"dataset": name, "count": len(items), "items": items})
     except Exception as e:  # noqa: BLE001
         _logger.warning("[annotation] 读 Langfuse Dataset:%s 失败: %s", name, e)
@@ -1446,7 +1503,7 @@ async def dataset_stats(request: Request):
       · 数据集统计 → Langfuse 分页全量（权威，与页面看到的条目一致），60s 进程内缓存；
       · 队列深度 → 本地 SQLite（瞬时、零网络，且天然是最新的，不跟着缓存走）。
     """
-    payload: dict = {"queue": store.count_annotations()}
+    payload: dict = {"queue": await offload(store.count_annotations)}  # P1-14：同步 sqlite
     try:
         from agent.trace.langfuse_client import langfuse_enabled
 

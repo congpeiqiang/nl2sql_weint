@@ -14,7 +14,7 @@ from pathlib import Path
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 OUT = Path(r"D:\code_work_space\llm\nl2sql\docs\archify-output")
 SVG = OUT / "_standalone.svg"
-SKILL_SCRIPTS = Path(r"D:\code_work_space\llm\nl2sql\src\agent\shared\skills\main\chart-saver\scripts")
+SKILL_SCRIPTS = Path(r"/agent/shared/skills_bak\main\chart-saver\scripts")
 sys.path.insert(0, str(SKILL_SCRIPTS))
 
 svg_text = SVG.read_text(encoding="utf-8")

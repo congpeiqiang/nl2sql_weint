@@ -457,12 +457,11 @@ nl2sql/
     │   │   └── nl2sql_agent.py    # NL2SQL 子智能体
     │   ├── checkpoint/            # 持久化
     │   │   └── checkpointer_factory.py # 自定义 Checkpointer（AsyncSqliteSaver）
-    │   ├── workspace_manager/     # 多工作区管理
-    │   │   ├── __init__.py        # 重导出（向后兼容）
-    │   │   ├── manager.py         # WorkspaceManager 单例
-    │   │   └── workspaces.json    # 工作区注册表
-    │   ├── workspace/             # 默认工作区数据目录（checkpoint/feedback/report 等）
-    │   ├── shared/                # 共享资源（所有工作区共用）
+    │   ├── workspace_manager/     # 工作区路径解析（单份，路径钉死）
+    │   │   ├── __init__.py        # 重导出
+    │   │   └── manager.py         # WorkspaceManager 单例
+    │   ├── workspace/             # 工作区数据目录（AGENT_DATA_ROOT 外置后通常不在此）
+    │   ├── shared/                # 共享资源（memory/skills/model_config 等）
     │   │   ├── memory/            # 长期记忆（AGENTS.md / ORCHESTRATOR.md）
     │   │   ├── skills/            # 技能定义（SKILL.md）
     │   │   │   ├── main/          # 主智能体技能
@@ -625,7 +624,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 def _resolve_checkpoint_path() -> str:
-    # 2026-08-27：checkpoint 全局共享，锚定 src/agent/shared/（不随工作区切换）
+    # 2026-08-27：checkpoint 全局共享，锚定 shared/（★ 不随工作区；2026-09-25 起工作区也不可切换了）
     from agent.workspace_manager import get_workspace_manager
     wm = get_workspace_manager()
     wm.shared_checkpoint_dir.mkdir(parents=True, exist_ok=True)

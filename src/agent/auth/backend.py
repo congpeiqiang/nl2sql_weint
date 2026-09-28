@@ -18,6 +18,8 @@ import logging
 
 from langgraph_sdk import Auth
 
+from agent.auth.grants import claim_thread
+from agent.utils.offload import offload
 from agent.auth.ownership import (
     ADMIN_PERMISSION,
     INTERNAL_IDENTITY,
@@ -112,9 +114,15 @@ def _is_admin(ctx) -> bool:
 
 @auth.on.threads.create
 async def _stamp_thread_owner(ctx, value):
-    """建会话时把归属写进 metadata（新会话从此有主）。
+    """建会话时把归属写进 metadata **和 grants 账本**（新会话从此有主）。
 
     internal 身份不改动（后端可能代用户写：比如迁移/claim 路径已经把 owner 算好）。
+
+    P1-5：这里同时 `claim_thread`。原先 grants 行只在**建 run 时**才写，于是
+    「建了但还没跑过」的会话在 REST 层是未登记状态——`owned_thread` 改 fail-closed 后
+    那种会话的合法主人自己会被 403（trace/feedback/export/run-status）。
+    两套账本（metadata.owner / grants.thread_owner）必须在**同一个入口**一起写，
+    否则迟早出现「列表里看得见、点进去 403」。
     """
     if _is_internal(ctx):
         return None
@@ -127,10 +135,18 @@ async def _stamp_thread_owner(ctx, value):
         value["metadata"] = metadata
     # 强制覆盖：不让请求方自己指定归属（否则可把会话塞进别人的列表）
     metadata[OWNER_KEY] = identity
-    # 记进进程内集合：langfuse_metadata 中间件据此跳过重复补打
     thread_id = value.get("thread_id")
     if thread_id:
+        # 记进进程内集合：langfuse_metadata 中间件据此跳过重复补打
         mark_stamped(str(thread_id))
+        # grants 账本同写（best-effort：账本写失败不该让建会话失败，
+        # langfuse_metadata 在第一个 run 上还会补一次）
+        try:
+            # P1-14：sqlite 写（fsync）→ 线程。这是**建会话**的必经路径（auth 钩子），
+            # 每个新会话一次；挂在事件循环上等于每次建会话都让全站等一次 fsync。
+            await offload(claim_thread, str(thread_id), identity)
+        except Exception:  # noqa: BLE001
+            logger.warning("[auth] claim_thread 失败 tid=%s", thread_id, exc_info=True)
     return None
 
 

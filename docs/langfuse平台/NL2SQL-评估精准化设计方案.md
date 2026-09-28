@@ -251,7 +251,7 @@ rubric 修改 / judge 模型切换 / 埋点（final 标记等）改动：
 
 ### 8.3 落盘待评队列（幂等 / 补评）
 
-- judge 请求先入 **sqlite 待评队列**（`{data_root}/eval_queue.sqlite`：subject_id+kind 唯一，state=pending/running/done/unverifiable），后台 worker 拉取执行；
+- judge 请求先入 **sqlite 待评队列**（`{data_root}/eval_queue/eval_queue.sqlite`，一库一目录：subject_id+kind 唯一，state=pending/running/done/unverifiable），后台 worker 拉取执行；
 - 幂等：`subject_id+kind` 已 done 则跳过 → 进程重启/挂掉后 pending 自动续跑（补评）；daemon 线程不再承载「唯一一次机会」；
 - 运维工具：`eval_worker.py --replay --subject <id>` 对指定/全部存量 subject 回评（改 rubric 后一键回评，§7.4 第 3 步）。
 

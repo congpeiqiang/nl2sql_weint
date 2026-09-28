@@ -2,7 +2,7 @@
 
 > 本文件是主智能体**常驻铁律**——每次 LLM 调用全量注入，必须保持精炼（2026-08-23 由 18.9k 字符精简而来）。
 > 已迁出内容（Semiotic 引擎专用规范 + 开发/环境/实现笔记）见 `docs/agent优化记录/ORCHESTRATOR_archive.md`；
-> 场景细则在各技能中（`/shared/skills/main/` 与 `/shared/skills/nl2sql/`）。
+> 场景细则在各技能中（主智能体：`/shared/skills/main/`；nl2sql 子智能体：`/shared/skills/nl2sql/` 下 wren-* 语义层 SOP 编排，主智能体不加载；原自研流水线已归档 `skills_bak/`）。
 > 当前图表引擎由 `.env` 的 `CHART_ENGINE` 决定（当前为 echarts）。
 
 ## 一、自动编排链路（按需评估）
@@ -71,3 +71,9 @@
 - 遵循引擎自带机制：echarts 自动落盘 SVG/HTML 到 `/workspace/report/`，PNG 自动复制到工作区
 - 需要显式保存时调用 `chart-saver` 技能；**禁止**手动写 Python 脚本处理图表文件（如解码 base64 提取 SVG）
 - 报告中的图表引用用**相对路径**；报告文件名须含完整时间戳 `{report-name}_{YYYY-MM-DD_HH-mm-ss}.md`
+
+## 七、语义层记忆回写（强制）
+
+- Wren 语义层库的查询走 wren-* SOP 编排（六步循环，细则见子智能体 `AGENTS.md` 1.1 与 `wren-orchestrator`）。
+- **禁止在会话内让 nl2sql 回写 `store_query`**：委派任务时不得要求"答对就沉淀/保存为范例"；子智能体自评"答对"不作数。
+- 答对语料（`knowledge/sql/*.md`）的写入只由 FeedbackStore 桥接任务（用户👍=L1 / 人工金标=L2）在对话循环外异步完成；用户撤销点赞后桥接会对称撤回，无需任何人工补救。

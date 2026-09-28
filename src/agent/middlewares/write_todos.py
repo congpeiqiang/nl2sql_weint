@@ -43,7 +43,7 @@ WRITE_TODOS_PROTOCOL = """\
 - 并行完全合法：唯一禁止是**同一条消息里 ≥2 个 `write_todos`**；`write_todos` + `run_sql`
   或 `write_todos` + `describe_schema` 等并行不受限。
 - 正确节奏（在发实质工具调用的同一轮里带上 write_todos）：
-  - 前段是统一的理解建模（`nl2sql-understand`）：先 get_context + get_instructions 做
+  - 前段是统一的四路取料（`wren-retrieve`）：先 get_context + get_instructions 做
     清晰度裁决（clear=false 停），clear 后再 get_all_knowledge + recall_queries 加载知识；
     首次 schema 检索工具（`describe_schema`/`get_mdl`/`describe_model`）发出时 →
     把 `理解建模-清晰度与知识` completed、`Schema 提取与裁剪` in_progress；

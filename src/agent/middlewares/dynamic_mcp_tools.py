@@ -21,12 +21,12 @@
 
 1. **并入**：注册表里有、请求清单里还没有的工具（管理员刚加的库）→ 追加，当轮可见；
 2. **摘除**：看着是子工具（`wrenai_*` / `dbmcp*`）但注册表里已经没有的名字
-   （库被删/改名/重新关联）→ 从清单摘掉，模型看不到就不会去试；
+   （库被删/改名/重新关联，或本部署的 wren 不提供该工具）→ 从清单摘掉，模型看不到就不会去试；
 3. **改道**：执行时按名字取注册表里的**当前**实例（重加载后静态列表里那个是陈旧的）
    → `override(tool=...)`；
 4. **拒绝**：注册表已预热却仍收到已下线工具的调用（历史消息里的存量 tool_call、
-   模型从旧 prompt 幻觉出的名字）→ 返回 `status="error"` 的 ToolMessage，
-   **绝不执行陈旧实例**，并带上重试指引。
+   提示词里写了但本部署工具面并没有的名字）→ 返回 `status="error"` 的 ToolMessage，
+   **绝不执行陈旧实例**，并带上不带因果断言的替代指引（见 `_REMOVED_HINT`）。
 
 fail-open 边界：注册表**未预热**（离线单测、启动加载尚未跑完）时只并入、不摘除、
 不拒绝 —— 绝不因"注册表里没有"把健康工具误杀。预热 = 完成过一次全量对账。
@@ -70,12 +70,40 @@ def _tool_call_id(request: ToolCallRequest) -> str:
     return getattr(getattr(request, "runtime", None), "tool_call_id", None) or ""
 
 
+# 拒绝文案：**只许陈述可证事实**。`_resolve` 能证明的只有「这个名字不在已预热的
+# 注册表里」，至少有三种成因：① 库/语义库被删或重新关联；② 本部署的 wren 版本压根
+# 不提供这个工具；③ 名字拼写/前缀漂移（白名单与真实工具名不一致）。
+# ⚠️ 不得断言其中任何一种 —— 这条 ToolMessage 会被模型当事实**转述给用户**。
+# 血案（2026-09-26 `get_all_knowledge`）：文案断言「库已被删除或重新关联」，真因是
+# **上游 wren 0.13.0~0.15.0 全都没有这个工具**（是提示词在推荐一个不存在的工具），
+# 用户因此以为语义库被人删了。
 _REMOVED_HINT = (
-    "工具 {tool} 已不可用：它所属的数据库/语义库已被管理员删除或重新关联，"
+    "工具 {tool} 当前不在可用工具清单里（可能的原因：它所属的库已被删除或重新关联，"
+    "或本次部署的语义服务/数据源不提供这个工具）。"
     "本轮不要再用它、也不要重试。请改用当前可用的工具："
     "已建模库走 wrenai_<库名>_* 语义工具（如 get_context / run_sql），"
-    "未建模库走 dbmcp_run_sql。"
+    "未建模库走 dbmcp_run_sql。{fallback}"
 )
+
+# 已知「能力性工具」的替代做法（名字后缀 → 建议）。这些名字在上游不同版本的工具面里
+# 有出入，这里给的替代路径是本部署**确定存在**的等价能力。
+_TOOL_FALLBACKS = {
+    "get_all_knowledge": "本轮的替代做法：用 list_knowledge() 列出知识文件（metrics/glossary/caveats），再按需读取相关文件。",
+    "describe_schema": "本轮的替代做法：用 get_context(question) 取 Schema 片段（已含列/类型/FK/measure 定义）。",
+    "get_mdl": "本轮的替代做法：用 get_context(question) 取相关 model 片段，或用 list_models() 看模型清单。",
+    "describe_model": "本轮的替代做法：用 get_context(question) 或 list_models()。",
+}
+
+
+def _fallback_for(name: str) -> str:
+    """按名字后缀匹配替代做法（兼容 `wrenai_<库>_get_all_knowledge` 这类带前缀的名字）。
+
+    无匹配时返回空串 —— 文案仍然完整，只是不给具体替代（绝不因查表失败而丢消息）。
+    """
+    for suffix, hint in _TOOL_FALLBACKS.items():
+        if name == suffix or name.endswith("_" + suffix):
+            return " " + hint
+    return ""
 
 
 class DynamicMCPToolsMiddleware(AgentMiddleware):
@@ -137,10 +165,10 @@ class DynamicMCPToolsMiddleware(AgentMiddleware):
             return request
 
         _logger.warning(
-            "[DynamicMCPTools] 拒绝已下线工具 %s（注册表已预热且无此名字）", name
+            "[DynamicMCPTools] 拒绝不在可用清单里的工具 %s（注册表已预热且无此名字）", name
         )
         return ToolMessage(
-            content=_REMOVED_HINT.format(tool=name),
+            content=_REMOVED_HINT.format(tool=name, fallback=_fallback_for(name)),
             name=name,
             tool_call_id=_tool_call_id(request),
             status="error",

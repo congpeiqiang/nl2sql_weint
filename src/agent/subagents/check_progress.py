@@ -24,6 +24,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.tools import InjectedToolArg
 from pydantic import BaseModel, Field
 
+from agent.utils.offload import offload
 from agent.utils.query_tools import is_data_tool
 from agent.utils.wren_plan import (
     DEFAULT_ROW_LIMIT,
@@ -948,12 +949,21 @@ def _build_sql_note(messages, sql) -> str:
     return ""
 
 
-# ── sql-generation process_data 回填：SQL 与产出最终结果表的 run_sql 对齐 ────
-# process_data/sql-generation/*.json 在 dry_run 工具调用边界落盘，当时只能记录
+# ── dry_run 的 process_data 回填：SQL 与产出最终结果表的 run_sql 对齐 ────
+# process_data/{技能}/{tool}-{seq}.json 在 dry_run 工具调用边界落盘，当时只能记录
 # 干跑版本 A；若子 agent 执行时改为版本 B 产出最终结果表，前端展示的 SQL（check
 # 结果 sql 字段，已取产出 run_sql）会与 process_data 不一致。子任务成功后按
 # `_extract_last_sql` 确定的产出 SQL 回填，保留原干跑 SQL 便于排查。
-_BACKFILL_SKILL = "sql-generation"
+#
+# ⚠️ 血案（2026-09-26 修）：这里原先是写死的 `_BACKFILL_SKILL = "sql-generation"`
+# —— 那是**启发式族名**、不是技能名。落盘目录后来统一成技能名后，该目录只在
+# 「线程活动 skill 恰好过期、dry_run 退回族名」时才存在 ⇒ 回填**常年静默返回 0**
+# 且无人察觉（本函数 fail-open，不报错也不打日志）。而 `dry_run` 是 5 个 owner 的
+# **共享工具**，活动 skill 是 `wren-perf-optimize`（步骤5「改过必重 dry_run」正是
+# 这个形态）或 `wren-execution` 时，文件落在那些目录里 —— 换任何一个固定常量都
+# 会漏改，与旧的病同型。故改为**遍历全部技能子目录**：隔离本来就由 `dry_sqls`
+# 集合（本子任务干跑过的 SQL）承担，目录不该再当第二把筛子。
+_BACKFILL_SKIP_DIRS = ("skill_sop", "wren_plan", "query_result", "_manifest")
 
 
 def _session_thread_id() -> str:
@@ -1023,11 +1033,14 @@ def _norm_sql(s: str) -> str:
 
 
 def _backfill_process_data_sql(messages, producing_sql: str) -> int:
-    """把 sql-generation 的 process_data 里的 SQL 回填为产出最终结果表的 run_sql。
+    """把 dry_run 的 process_data 里的 SQL 回填为产出最终结果表的 run_sql。
 
     范围限定：只改本子任务干跑过的文件（按子线程消息里的 dry_run 工具调用 SQL
     精确匹配），不影响同会话里其它查询任务的中间产物。幂等：与原值一致（含纯
     空白差异）则跳过。返回实际改写文件数。
+
+    扫**全部技能子目录**（不只 `wren-sql-author/`）：`dry_run` 是 5 个 owner 的共享
+    工具，落盘归属随当时的活动 skill 变化。见上方 `_BACKFILL_SKIP_DIRS` 的注释。
     """
     producing_sql = (producing_sql or "").strip()
     if not producing_sql or not messages:
@@ -1045,37 +1058,46 @@ def _backfill_process_data_sql(messages, producing_sql: str) -> int:
         return 0
     if not root:
         return 0
-    skill_dir = Path(root) / "nl2sql_process_data" / sid / _BACKFILL_SKILL
-    if not skill_dir.exists():
+    base = Path(root) / "nl2sql_process_data" / sid
+    if not base.is_dir():
         return 0
     updated = 0
-    for f in sorted(skill_dir.glob("*.json")):
-        try:
-            obj = json.loads(f.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        inp = obj.get("input") if isinstance(obj, dict) else None
-        if not isinstance(inp, dict):
-            continue
-        cur_sql = str(inp.get("sql") or "").strip()
-        if not cur_sql or cur_sql not in dry_sqls:
-            continue  # 不是本子任务的干跑文件
-        if _norm_sql(cur_sql) == _norm_sql(producing_sql):
-            continue  # 已一致，幂等
-        inp["sql"] = producing_sql
-        obj["_dry_run_sql"] = cur_sql
-        obj["_final_sql"] = producing_sql
-        obj["_backfilled"] = True
-        obj["_backfilled_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
-        try:
-            f.write_text(json.dumps(obj, ensure_ascii=False, default=str),
-                         encoding="utf-8")
-            updated += 1
-        except OSError:
-            _logger.debug("[check_progress] process_data 回填写盘失败: %s", f)
+    for skill_dir in sorted(p for p in base.iterdir() if p.is_dir()):
+        if skill_dir.name in _BACKFILL_SKIP_DIRS:
+            continue  # 非 per-call dump 布局（skill_sop / wren_plan / manifest 等）
+        for f in sorted(skill_dir.glob("*.json")):
+            try:
+                obj = json.loads(f.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            # 只认干跑文件（平台合成的 `_routing-*.json` 等 `tool` 是 `platform:*`，
+            # 不带 input.sql，两道守卫都会跳过它）
+            if not str(obj.get("tool") or "").endswith("dry_run"):
+                continue
+            inp = obj.get("input")
+            if not isinstance(inp, dict):
+                continue
+            cur_sql = str(inp.get("sql") or "").strip()
+            if not cur_sql or cur_sql not in dry_sqls:
+                continue  # 不是本子任务的干跑文件
+            if _norm_sql(cur_sql) == _norm_sql(producing_sql):
+                continue  # 已一致，幂等
+            inp["sql"] = producing_sql
+            obj["_dry_run_sql"] = cur_sql
+            obj["_final_sql"] = producing_sql
+            obj["_backfilled"] = True
+            obj["_backfilled_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
+            try:
+                f.write_text(json.dumps(obj, ensure_ascii=False, default=str),
+                             encoding="utf-8")
+                updated += 1
+            except OSError:
+                _logger.debug("[check_progress] process_data 回填写盘失败: %s", f)
     if updated:
         _logger.info(
-            "[check_progress] sql-generation process_data 回填 %d 个文件 → 产出 run_sql",
+            "[check_progress] dry_run process_data 回填 %d 个文件 → 产出 run_sql",
             updated,
         )
     return updated
@@ -1123,6 +1145,7 @@ def apply_patch():
             else []
         )
         if run["status"] == "success":
+            sql = ""  # 无消息时保持未定义安全（下面 if messages 分支才赋值）
             if messages:
                 # 结果锚点 = 最后一条有实质内容的 AI 消息（不再机械取 messages[-1]）：
                 # 子 agent 以工具调用收尾是结构性必然，末条必是短收尾语（见
@@ -1146,6 +1169,18 @@ def apply_patch():
                 result["result"] = "(completed with no output messages)"
             # 报告装配需要真实执行 SQL：从子线程消息提取最后一次 run_sql 附到 result.sql
             sql = _extract_last_sql(messages)
+            # SQL 来源判决（cube_metric / cube_metric+llm_outer / llm_from_schema /
+            # unknown）—— **写在 if/else 分支之前**，让「有 run_sql」与「纯 Cube
+            # 快速通道」两条路都带上标记（报告侧据此决定出不出一行「SQL 生成来源」）。
+            # 判据唯一实现在 agent.utils.process_audit.judge_sql_origin，manifest /
+            # check 结果 / 报告三处共用同一份，不在这里重写第二套。审计旁路。
+            try:
+                from agent.utils.process_audit import judge_sql_origin
+                _origin = judge_sql_origin(messages, sql)
+                result["sql_origin"] = _origin.get("origin")
+                result["sql_origin_evidence"] = _origin.get("evidence") or {}
+            except Exception as e:  # noqa: BLE001
+                _logger.debug("[check_progress] SQL 来源判定失败: %s", e)
             if sql:
                 result["sql"] = sql
                 # 真正下发目标库的物理 SQL：进程内复算后附指针 + 小字段。
@@ -1186,6 +1221,11 @@ def apply_patch():
                 _cube = _extract_last_cube_call(messages)
                 if _cube:
                     result["cube_query"] = "\n".join(_cube["lines"])
+                    # `sql_kind` 是历史字段、全仓**无活读者**（删除只制造兼容风险，
+                    # 故保留原样）。它与新的 `sql_origin` 的关系一句话说清：
+                    # `sql_kind == "cube"` ⇔ `sql_origin == "cube_metric"`；手写/混合
+                    # 路径下 `sql_kind` 靠「键缺席」表达，这正是它无法区分混合路径、
+                    # 需要 `sql_origin` 补位的原因。
                     result["sql_kind"] = "cube"
                     # 原始定义 + 工具名透传给 build_report：报告「业务口径」两层
                     # （LLM 摘要 + 模板结构）要靠它们查 cube 元数据里的中文描述。
@@ -1213,12 +1253,68 @@ def apply_patch():
             full_files = _collect_full_result_files(messages)
             if full_files:
                 result["full_result_files"] = full_files
+            # 中间产物审计：写 manifest + 平台合成的 routing / cube_summary。
+            # 之所以在这里（而不是 langfuse_span 的工具边界）—— 这里是唯一同时具备
+            # 「完整子任务消息 + 已算好的锚点 SQL + 用户最终会看到的那份 check 结果」
+            # 的地方；工具边界一次只有一条工具消息，看不到全貌。
+            # `write_process_artifacts` 自带 fail-open，异常只意味着没有审计件。
+            try:
+                from agent.middlewares.langfuse_span import (
+                    _active_workspace_path,
+                    _question_id,
+                    _user_question,
+                )
+                from agent.utils.process_audit import write_process_artifacts
+                _ptrs = write_process_artifacts(
+                    root=_active_workspace_path(),
+                    session_thread_id=_session_thread_id(),
+                    sub_thread_id=thread_id,
+                    messages=messages,
+                    question_id=_question_id(),
+                    user_question=_user_question(),
+                    db_name=_current_db_name(),
+                    status="success",
+                    producing_sql=sql,
+                    result=result,
+                )
+                if _ptrs.get("manifest"):
+                    # 小指针（~100 字节），让主 agent/事后审计知道审计件在哪
+                    result["process_manifest"] = _ptrs["manifest"]
+            except Exception as e:  # noqa: BLE001
+                _logger.debug("[check_progress] 写中间产物审计失败: %s", e)
         elif run["status"] == "error":
             error_detail = run.get("error")
             result["error"] = (
                 str(error_detail) if error_detail
                 else "The async subagent encountered an error."
             )
+            # 失败路径也留一份 manifest，闭合审计记录缺口（否则「跑挂了的那些问题」
+            # 在审计目录里完全不存在，只剩产物孤儿目录）。
+            # status != "success" ⇒ 不写 routing / cube_summary（没有可判的路由结论）。
+            # producing_sql 传空 ⇒ `sql_origin` 如实落 `unknown`，不猜。
+            try:
+                from agent.middlewares.langfuse_span import (
+                    _active_workspace_path,
+                    _question_id,
+                    _user_question,
+                )
+                from agent.utils.process_audit import write_process_artifacts
+                _ptrs = write_process_artifacts(
+                    root=_active_workspace_path(),
+                    session_thread_id=_session_thread_id(),
+                    sub_thread_id=thread_id,
+                    messages=messages,
+                    question_id=_question_id(),
+                    user_question=_user_question(),
+                    db_name=_current_db_name(),
+                    status="error",
+                    producing_sql="",
+                    result=result,
+                )
+                if _ptrs.get("manifest"):
+                    result["process_manifest"] = _ptrs["manifest"]
+            except Exception as e:  # noqa: BLE001
+                _logger.debug("[check_progress] 写失败审计件失败: %s", e)
         elif run["status"] == "interrupted":
             # 审批闸门已移除（2026-08-28 起 sql_approval 只读硬拦截、不再 raise
             # interrupt），当前 interrupted 是 deepagents 上下文压缩等「会自恢复的
@@ -1353,8 +1449,17 @@ def apply_patch():
                         "[check_progress] threads.get also failed: %s", e2
                     )
 
-            result = _mod._build_check_result(
-                run, task["thread_id"], thread_values, full=bool(full)
+            # P1-14：`_build_check_result` 是**同步**函数，内部串了
+            # `plan_run_sql`（进程内复算物理 SQL：建引擎约 0.9s）、结果解析、
+            # `_backfill_process_data_sql`（可能回写 thread state）——主 agent 每轮
+            # 都可能调 `check_async_task`，直接 await 就是把这段 CPU 挂在共用事件
+            # 循环上（§3.3「check_progress 的 CPU 工作」）。
+            # 必须用 `offload`（to_thread）而不是 `offload_long`：它内部靠
+            # `get_config()` 读本请求的 db_name/thread_id，而 contextvars 只有
+            # to_thread 会传播（见 utils/offload 文件头）。
+            result = await offload(
+                _mod._build_check_result, run, task["thread_id"], thread_values,
+                full=bool(full),
             )
             _add_incremental(result, thread_values, since)
             return _mod._build_check_command(result, task, runtime.tool_call_id)

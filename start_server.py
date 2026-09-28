@@ -10,14 +10,37 @@ import sys
 import json
 from pathlib import Path
 
-# ── 文件日志（自动轮转、落盘固定路径）─────────────────────────
-# 日志目录固定在项目根下 logs/，无论从哪个工作目录启动都解析到同一位置。
-LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_FILE = LOG_DIR / "agent-server.log"
+# ── 文件日志（自动轮转、落盘持久目录）─────────────────────────
+# P2-2：日志目录**不再写死在仓库根**——容器里仓库根 = 容器可写层，`docker-compose rm`
+# 重建容器（每次发版都做）即丢；而「重启后还能查到上一次运行期间的日志」正是 P2-2 的验收。
+# 解析顺序（`resolve_log_dir()`）：
+#   ① `NL2SQL_LOG_DIR`：显式覆盖（排查/临时用）
+#   ② `<AGENT_DATA_ROOT>/logs`：生产 = `/app/data/logs`，**已经是持久卷** → 重建容器不丢
+#   ③ `<仓库根>/logs`：兜底（未配置 AGENT_DATA_ROOT 的 dev/CLI 场景，行为与改动前一致）
+# 注意 ② 与 `shared/`、`workspace/` 同级：agent 的文件读权限只放行 /shared/** 与
+# /workspace/**（agent/settings/file_permissions.py），`/logs/**` 对模型不可读 —— 日志里有
+# 别人的请求路径/用户名/会话 id，**别把日志挪进那两个目录**（见 api/request_log.py 文件头）。
+LOG_FILE_NAME = "agent-server.log"
 # 轮转：每天 0 点轮转一个文件，保留最近 7 个历史文件 + 当前文件
 LOG_WHEN = "midnight"
 LOG_INTERVAL = 1
 LOG_BACKUP_COUNT = 7
+
+
+def resolve_log_dir() -> Path:
+    """解析日志目录（见上方三条顺序）。**必须在 setup_environment() 之后调用** ——
+    `.env` / `.env.prod` 里的 AGENT_DATA_ROOT 是那时才进 os.environ 的。"""
+    override = (os.environ.get("NL2SQL_LOG_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    data_root = (os.environ.get("AGENT_DATA_ROOT") or "").strip()
+    if data_root:
+        return Path(data_root) / "logs"
+    return Path(__file__).resolve().parent / "logs"
+
+
+def resolve_log_file() -> Path:
+    return resolve_log_dir() / LOG_FILE_NAME
 
 def setup_environment():
     """Setup required environment variables"""
@@ -181,6 +204,61 @@ def preflight_check():
           f"可用工具 {len(tools)} 个\n", flush=True)
 
 
+def build_log_config(log_file: Path) -> dict:
+    """uvicorn 的 log_config（抽成函数是为了让验证脚本能直接断言这份配置本身）。
+
+    P2-2 的两处关键：① formatter 带 `%(request_id)s` + 两个 handler 都挂
+    `RequestIdFilter` → 每条日志（含业务日志与 langgraph 自己的）都带 rid；
+    ② file handler 是 TimedRotatingFileHandler，落盘到**持久目录**（见 resolve_log_dir）。
+
+    访问日志的归属：**不走 uvicorn 的 access logger**（`access_log=False`），由
+    `api/request_log.RequestContextMiddleware` 另记一份带耗时/rid 的 —— 见该模块文件头。
+    """
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "filters": {
+            # P2-2：把当前请求的 rid 注入每条日志记录（无请求上下文 → "-"）。
+            # 挂在 handler 上，覆盖所有 logger（含 langgraph 自己的）。
+            "request_id": {"()": "api.request_log.RequestIdFilter"},
+        },
+        "formatters": {
+            "default": {
+                "format": "%(asctime)s - %(name)s - %(levelname)s - [rid=%(request_id)s] %(message)s",
+            }
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "filters": ["request_id"],
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
+            "file": {
+                "formatter": "default",
+                "filters": ["request_id"],
+                "class": "logging.handlers.TimedRotatingFileHandler",
+                "filename": str(log_file),
+                "when": LOG_WHEN,
+                "interval": LOG_INTERVAL,
+                "backupCount": LOG_BACKUP_COUNT,
+                "encoding": "utf-8",
+                "delay": True,
+            }
+        },
+        "root": {
+            "level": "INFO",
+            "handlers": ["default", "file"],
+        },
+        "loggers": {
+            "uvicorn": {"level": "INFO"},
+            "uvicorn.error": {"level": "INFO"},
+            # 自带 access logger 关掉（本文件已用 request_log 替代，见 access_log 注释）
+            "uvicorn.access": {"level": "WARNING"},
+        },
+    }
+
+
 def main():
     """Start the server"""
     print("🚀 Starting API Server...")
@@ -192,7 +270,8 @@ def main():
     preflight_check()
 
     # 文件日志目录：确保存在（uvicorn log_config 的 FileHandler 需要）
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = resolve_log_file()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Print server information
     print("\n" + "="*60)
@@ -200,56 +279,25 @@ def main():
     print("📚 API Documentation: http://localhost:2026/docs")
     print("🎨 Studio UI: http://localhost:2026/ui")
     print("💚 Health Check: http://localhost:2026/ok")
-    print(f"📜 File Log: {LOG_FILE}")
-    print(f"   (每天轮转，保留最近 {LOG_BACKUP_COUNT} 个历史文件)")
+    print(f"📜 File Log: {log_file}")
+    print(f"   (每天轮转，保留最近 {LOG_BACKUP_COUNT} 个历史文件；P2-2 起落在持久目录)")
     print("="*60)
-    
+
     try:
         # Import uvicorn after environment setup
         import uvicorn
-        
+
         # Start the server directly
         uvicorn.run(
             "langgraph_api.server:app",
             host="0.0.0.0",
             port=2026,
             reload=False,
+            # P2-2：**保持 False** —— 访问日志由 `api/request_log.RequestContextMiddleware`
+            # 自己记（那才是带耗时/rid 的那份）。开成 True 只会让每个请求多一行无语义重复的
+            # 日志（uvicorn 自带格式里没有 duration，也没有 rid）。
             access_log=False,
-            log_config={
-                "version": 1,
-                "disable_existing_loggers": False,
-                "formatters": {
-                    "default": {
-                        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-                    }
-                },
-                "handlers": {
-                    "default": {
-                        "formatter": "default",
-                        "class": "logging.StreamHandler",
-                        "stream": "ext://sys.stdout",
-                    },
-                    "file": {
-                        "formatter": "default",
-                        "class": "logging.handlers.TimedRotatingFileHandler",
-                        "filename": str(LOG_FILE),
-                        "when": LOG_WHEN,
-                        "interval": LOG_INTERVAL,
-                        "backupCount": LOG_BACKUP_COUNT,
-                        "encoding": "utf-8",
-                        "delay": True,
-                    }
-                },
-                "root": {
-                    "level": "INFO",
-                    "handlers": ["default", "file"],
-                },
-                "loggers": {
-                    "uvicorn": {"level": "INFO"},
-                    "uvicorn.error": {"level": "INFO"},
-                    "uvicorn.access": {"level": "WARNING"},
-                }
-            }
+            log_config=build_log_config(log_file),
         )
     except KeyboardInterrupt:
         print("\n🛑 Server stopped by user")

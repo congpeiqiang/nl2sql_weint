@@ -1,4 +1,4 @@
-1. # NL2SQL Agent 参考手册
+# NL2SQL Agent 参考手册
 
    > **重要：报告导出职责边界**
    > 本子智能体**只负责查询数据并返回结果**，不生成报告文件、不写 Markdown。
@@ -9,30 +9,25 @@
 
 ## 1. 技能清单与加载时机
 
-### 1.1 技能清单
+### 1.1 Wren 语义层 SOP 通道（唯一激活技能集）
 
-| 技能名称                          | 对应流程步骤               | 加载时机                                                     |
-| --------------------------------- | -------------------------- | ------------------------------------------------------------ |
-| `sql-of-thought`                  | 编排器                     | NL2SQL 问题被识别时首先加载（Step 0 路由：list_cubes → C/A/B）|
-| `nl2sql-understand`               | Step 1（Phase 0 理解建模） | 策略 A/B 第一步加载（清晰度裁决 + 知识 + Schema，一次检索通道）|
-| `nl2sql-subproblem`               | Step 2（Phase 1）          | 策略 A：Step 1 完成后加载                                    |
-| `nl2sql-query-plan`               | Step 3（Phase 1）          | 策略 A：Step 2 完成后加载                                    |
-| `nl2sql-sql-generation`           | Step 4（Phase 1）          | 策略 A：Step 3 后 / 策略 B：理解建模后加载（dry_run 验证）    |
-| `nl2sql-performance-optimization` | Step 5（Phase 1）          | 策略 A：dry_run 成功后、执行前加载                            |
-| `nl2sql-execution`                | Step 6（Phase 1）          | Step 4/5 完成后加载（read 其 SKILL.md 后 run_sql 执行；仅 SELECT，上限走 run_sql limit 参数）|
-| `nl2sql-correction`               | Step 7-8（Phase 2）        | 仅当 SQL 执行失败时加载（纠错循环最多 3 次）                  |
+> 历史自研八步流水线（`sql-of-thought` 等）已整体归档，不加载、不再列入本手册；如需查阅直接读磁盘 `skills_bak/nl2sql/` 下对应技能的 SKILL.md。
 
-### 1.2 引用文件加载策略
+`/shared/skills/nl2sql/` 下为 WrenAI 官方 SOP 落地编排（wren-* 七技能，**仅本子智能体加载**；主智能体技能在 `/shared/skills/main/`，不含 wren-*）。当动态路由提示**当前库已在 Wren 语义层建模**时，按本编排执行：
 
-编排器技能和纠错技能各自有引用文件（位于 `references/` 目录）：
+| 技能 | 步骤 | 职责 |
+| ---- | ---- | ---- |
+| `wren-orchestrator` | 总控 | 六步主循环 + 具名指标三条件路由决策 |
+| `wren-retrieve` | (1) | 四路并行取料：`get_context` / `recall_queries` / `get_instructions` / `list_knowledge`，全程各至多一次 |
+| `wren-clarify` | (2) | 基于取料包做清晰度裁决；不清晰输出 `[需要澄清]` 并停止本轮 |
+| `wren-metric-query` | (3) | 具名指标 → `query_cube`（先 `sql_only=True` 预览编译 SQL） |
+| `wren-sql-author` | (3)(4) | 非指标/混合路径手写 SQL + dry_run 失败即改（≤3 次） |
+| `wren-perf-optimize` | (5) | 对照性能规则集做语义不变优化；改过必重 dry_run |
+| `wren-writeback` | 循环外 | `store_query` 回写**执行规范**，供 FeedbackStore 桥接引用；不由会话加载执行 |
 
-| 引用文件                        | 所属技能            | 加载时机                         |
-| ------------------------------- | ------------------- | -------------------------------- |
-| `error-taxonomy.md`（编排器版） | `sql-of-thought`    | 需要了解完整错误分类法时         |
-| `pipeline-flow.md`              | `sql-of-thought`    | 需要查阅完整流程决策逻辑时       |
-| `design-principles.md`          | `sql-of-thought`    | 需要回顾设计原则和失败消融教训时 |
-| `hybrid-model-strategy.md`      | `sql-of-thought`    | 需要决定模型分配策略时           |
-| `error-taxonomy.md`（纠错版）   | `nl2sql-correction` | 进入纠错循环时自动加载           |
+主循环：`(1)取料 → (2)澄清 → (3)判路由生成 → (4)dry_run 修正 → (5)性能优化 → (6)run_sql → 输出答案`。
+
+**记忆回写铁律（官方 SOP 第 6 步的落位变更）**：循环内**任何情况下禁止调用 `store_query`**——用户 👍 要下一轮请求才异步产生，LLM 自评"答对"无外部真值；误写范例进 `knowledge/sql/*.md` 会被 `recall_queries` 复利式召回污染。回写唯一通道 = FeedbackStore 桥接任务（用户👍=L1 / 人工金标=L2）在会话外按 `wren-writeback` 规范执行。
 
 ---
 
@@ -58,64 +53,42 @@
 
 ---
 
-## 3. MCP 工具手册（`WrenAI MCP 工具 show-compiler`）
+## 3. WrenAI MCP 工具手册
 
-### 3.1 MCP 工具速查
+### 3.1 工具速查（按 §1.1 wren 编排步骤分组；以运行时实际挂载的工具面为准）
 
-| MCP 工具                                           | 使用阶段 | 用途                                               | 是否需要 LLM |
-| -------------------------------------------------- | -------- | -------------------------------------------------- | ------------ |
-| `describe_schema` / `get_context`                  | Phase 1  | 加载 Schema 文档（DDL、数据字典）                  | 否           |
-| `WrenAI MCP 工具 build`（一次性，MDL已就绪可跳过） | Phase 1  | 构建 MDL（models/* → target/mdl.json）             | 是           |
-| `describe_schema` / `get_context`                  | Step 1   | 语义搜索相关表/列，**返回完整页面内容**            | 是           |
-| `describe_schema` / `get_context`                  | Step 1   | 自然语言问答（如 FK 关系查询）                     | 是           |
-| `describe_schema` / `get_context`                  | —        | 按 slug 读取页面（**仅搜 concepts/ 和 queries/**） | 否           |
-| `describe_schema` / `get_context`                  | Phase 1  | 检查编译状态、陈旧/孤立页面                        | 否           |
-| `get_data_source` + `list_models`（验证MDL可用性） | Phase 1  | 验证 MDL 完整性                                    | 否           |
+| 组 | 工具 | 用途 | 编排入口 |
+| ---- | ---- | ---- | ---- |
+| 取料·结构轴 | `get_context(question, limit)` | 语义检索 MDL 相关 model/column/cube 片段（Cube 段已含 measures/dimensions/time_dimensions） | wren-retrieve |
+| 取料·范例轴 | `recall_queries(question, limit)` | `knowledge/sql/*.md` 历史 NL→SQL 范例 | wren-retrieve |
+| 取料·规则轴 | `get_instructions` | 仅 `knowledge/rules/*.md` 业务规则 | wren-retrieve |
+| 取料·知识轴 | `list_knowledge` | 列出知识**文件清单**（不含正文，不按路径去读）；知识正文只有 `get_instructions`（rules）与 `recall_queries`（sql）。上游 wren 从无 `get_all_knowledge`，本部署也没有，别调 | wren-retrieve |
+| 结构核对 | `describe_schema` / `get_mdl` / `list_models` / `describe_model` | 全量 MDL Schema 文本/JSON 视图（取料片段不够细节时才用，不重复检索） | 按需 |
+| Cube 核对 | `list_cubes` / `describe_cube` | Cube 清单与完整定义（具名指标路由判据核对） | 按需 |
+| 方言/函数 | `get_data_source` / `list_functions` | 当前数据源 SQL 方言与可用函数 | wren-sql-author 首查 |
+| 指标查询 | `query_cube(cube, measures, dimensions, filters, ...)` | 语义层编译的 Cube 查询；`sql_only=True` 只预览编译 SQL | wren-metric-query |
+| 验证 | `dry_run(sql)` | 语法/编译校验不返数据；**run_sql 前必过** | 编排步骤(4) |
+| 转换 | `dry_plan` | 基于 MDL 的 SQL 转真实库可执行 SQL | 混合路径按需 |
+| 执行 | `run_sql(sql, limit)` | 只读执行；行数上限走 `limit` 参数（默认 1000） | 编排步骤(6) |
+| 记忆读取 | `list_stored_queries` / `list_knowledge` | 枚举已存 NL→SQL 对、知识文件 | 仅诊断用 |
+| 记忆写入 | `store_query` | **会话内禁用**——agent 不调用；只由 FeedbackStore 桥接在循环外回写 | wren-writeback 规范 |
 
-### 3.2 WrenAI MCP 工具 show 使用要点（关键）
+### 3.2 使用要点（关键）
 
-**`describe_schema` / `get_context` 返回的 `pages[].body` 已包含页面的完整 markdown 内容**（所有列定义、字段类型、外键关系等），无需额外调用 `describe_schema` / `get_context`。
-
-```json
-   // WrenAI MCP 工具 show 返回结构
-   {
-     "pages": [
-       {
-         "slug": "customer-表",
-         "title": "Customer 表",
-         "summary": "...",
-         "body": "完整的 DDL 列定义、字段类型、FK 关系..."   // ← 已包含全部信息
-       }
-     ],
-     "refs": [{ "pageId": "entities/customer-表", ... }],
-     "warnings": []
-   }
-```
-
-**常见错误：** 在 `describe_schema` / `get_context` 之后再调用 `WrenAI MCP 工具 show({ slug: pages[0].slug })`。
-
-- `describe_schema` / `get_context` 硬编码搜索目录为 `[concepts/, queries/]`，**不搜索 `entities/`**
-   - 当 `describe_schema` / `get_context` 返回 entity 页面时（如 `entities/customer-表`），`describe_schema` / `get_context` 会报 `Page not found`
-   - **正确做法：** 直接使用 `describe_schema` / `get_context` 返回的 `pages[].body`，不需要二次读取
-   
-### 3.3 核心使用原则
-
-- **MDL 复用：** 一次构建，多次查询。同一数据库的所有 NL2SQL 请求共享同一个 MDL。
-   - **MDL 更新判断：** 如果 Schema 有变化，先调用 `get_data_source` + `list_models`（验证MDL可用性） 确认是否需要重新 `python skills/sql-of-thought/scripts/gen_models_mysql.py` + `WrenAI MCP 工具 build`（一次性，MDL已就绪可跳过）。
-   - **所有 Schema 引用都要有来源：** Schema Linking Agent 输出中应标注 WrenAI MCP 工具 show 页面 slug 作为来源引用。
-   - **不要用 WrenAI MCP 工具 show 二次读取：** `describe_schema` / `get_context` 已返回完整内容。`describe_schema` / `get_context` 仅在已知页面在 `concepts/` 或 `queries/` 下且只需读单页时使用。
-   
----
-
+- **检索唯一性**：四轴工具全程各至多一次，下游只读取料包；禁止串行试探、禁止重复检索。
+- **没有"按 slug 读页面"这种二跳读取**：`get_context` 返回的结构片段已是完整定义（列、类型、FK、measure expression）；不存在 `show`/`show-compiler` 类工具，不要做二次确认式调用。
+- **聚合口径读 `expression`、永不读 `type`**（实测 wren_core 编译彻底忽略 type）；`query_cube` 的 `time_dimension` 格式 `"name:granularity:start,end"`，相对时间词先解析成字面日期。
+- **行数契约**：SQL 正文不写 LIMIT；top-N 用 ORDER BY，行数由 `run_sql(sql, limit=N)` 控制。
+- **MDL 复用**：同库查询共享同一 MDL；Schema 变更后走语义库构建流程（服务端 `api/wren_semantic.py`）重建，**不是会话内工具**；旧生成脚本 `gen_models_mysql.py` 已归档 `skills_bak/nl2sql/sql-of-thought/scripts/`。
+- **所有 Schema 引用都要有来源**：输出中标注取自取料包的 model/cube 名。
 
 ---
 
-   ## 4. WrenAI 语义层工具手册
+## 4. 生成与执行要点
 
-   ### 4.1 核心使用原则
-
-   - **日常查询推荐 dry-plan：** 在 SQL 执行前用 `dry_plan` 验证，避免无效执行
-   - **MDL 不替代 WrenAI MCP 工具 show：** Schema Linking 仍以 WrenAI MCP 工具 show 为主，MDL 提供业务语义补充
+- 任何路径产物 SQL 必须 `dry_run` 通过后才进 `run_sql`；失败按 §2 错误分类诊断修正（≤3 次）。
+- dry_run 之后 SQL 再被改动过（含性能优化）→ run_sql 前必须用**最终 SQL** 重新 dry_run，杜绝"干跑 A 执行 B"。
+- 执行失败（非语法类：权限/连接/超时）→ 交 nl2sql 既有 correction 通道处理，不在编排内重试执行。
 
 ---
 
@@ -166,7 +139,7 @@
    额外增加：
 
    ```markdown
-   - Step 7-8 (Correction Loop):
+   - 纠错记录（步骤(4) dry_run 失败即改 / 执行失败修正）:
      - 尝试 1: 诊断 [error_codes] → 修正后 [成功/失败]
      - 尝试 N: 诊断 [error_codes] → 修正后 [成功/失败]
    - 最终: [结果]
@@ -278,33 +251,31 @@
 
    **用户：** 查询所有员工的姓名和入职日期
 
-   **处理流程：**
+   **处理流程（wren 六步）：**
 
    ```
-   Step 1（理解建模）: 清晰度 clear → 知识（无口径）+ Schema → employees 表，name 列，hire_date 列
-   Step 2: Subproblem → {SELECT: "员工姓名和入职日期"}
-   Step 3: Query Plan → "1. 读取 employees 表。2. 提取 name 和 hire_date 列。"
-   Step 4: SQL Gen → SELECT name, hire_date FROM employees（dry_run 验证通过）
-   Step 5: 执行成功
+   (1) 取料: get_context → employees 表（name, hire_date 列）；其余三轴无相关命中
+   (2) 澄清: 裁决 clear（表/列均可锁定）
+   (3) 路由: 无聚合意图 → wren-sql-author 手写
+   (4) dry_run: SELECT name, hire_date FROM employees → 通过
+   (5) 性能优化: 无命中（已是最小列集）→ 原样放行
+   (6) run_sql → 执行成功，输出答案
    ```
 
-   ### 8.2 示例 2：复杂聚合查询（含纠错）
+   ### 8.2 示例 2：复杂聚合查询（含修正环）
 
    **用户：** 查找薪资超过部门平均值的员工姓名、薪资和部门名称
 
-   **处理流程：**
+   **处理流程（wren 六步）：**
 
    ```
-   Step 1（理解建模）: 清晰度 clear → 知识（报工口径等）+ Schema → employees(name, salary, dept_id), departments(id, dept_name)
-   Step 2: Subproblem → {SELECT: 员工名+薪资+部门名, JOIN: 通过 dept_id, WHERE: 薪资>部门平均}
-   Step 3: Query Plan → "1. 计算每个部门的平均薪资（子查询）。2. JOIN employees 和 departments。3. 筛选薪资>对应部门平均值的员工。"
-   Step 4: SQL Gen → [生成 SQL]（dry_run 验证通过）
-   Step 5: 执行失败 → 进入 Phase 2（Step 7 纠错循环）
-   
-   Correction Loop (尝试 1):
-     诊断: filter.condition_wrong_col → WHERE 条件中比较了 employee.salary 和全表 AVG 而非部门 AVG
-     修正: 使用相关子查询 WITH dept_id 关联
-     重新执行 → 成功
+   (1) 取料: structure → employees(name, salary, dept_id), departments(id, dept_name)；rules/caveats 无特殊口径
+   (2) 澄清: clear
+   (3) 路由: 有聚合意图但"部门平均值"非任何 cube 具名 measure → wren-sql-author 手写（相关子查询）
+   (4) dry_run 通过 → 首次 run_sql 结果异常 → 诊断 filter.condition_wrong_col（比较了全表 AVG 而非部门 AVG）
+       → 改相关子查询按 dept_id 关联 → 重 dry_run → 成功
+   (5) 性能优化: 命中规则逐条对照 → 无高危项放行
+   (6) run_sql → 成功，输出答案（会话内不回写 store_query）
    ```
 
 ---
@@ -316,9 +287,9 @@
 | 错误类型                         | 处理策略                                               |
 | -------------------------------- | ------------------------------------------------------ |
 | 语法错误（`syntax`）             | 直接根据 DB 引擎错误信息修正，通常 1 次即可修复        |
-| Schema 链接错误（`schema_link`） | 重新检查 WrenAI MCP 工具 show 中 FK 定义，验证列名拼写 |
+| Schema 链接错误（`schema_link`） | 重新检查取料包（`get_context` / `describe_schema`）中 FK 定义，验证列名拼写 |
 | Join/聚合逻辑错误                | 需 CoT 诊断，检查 JOIN 条件和 GROUP BY 是否正确        |
-| 意图不匹配（逻辑正确但结果不对） | 重新分析 NL 问题，对比 Query Plan 与实际 SQL           |
+| 意图不匹配（逻辑正确但结果不对） | 重新分析 NL 问题，对比澄清裁决/取料包与实际 SQL        |
 
    ### 9.2 纠错循环终止条件
 
@@ -327,7 +298,7 @@
 
    ### 9.3 降级策略
 
-   当 WrenAI MCP 工具 show 不可用时：
+   当语义层取料不可用（`get_context` 拿不到相关 model/column）时：
 
    1. 提示用户手动提供相关表的 DDL 或 Schema 描述
    2. 询问用户涉及的表名和列名
@@ -361,4 +332,4 @@
 1. 先回答用户明确问的问题
 2. 如果需要补充信息，在回复末尾**简单询问**是否需要进一步分析
 3. **禁止**在未经用户确认的情况下执行额外查询
-4. 如果用户的请求本身模糊，通过 Phase 0 澄清门追问，而不是自行猜测后扩展查询
+4. 如果用户的请求本身模糊，通过编排步骤(2) `wren-clarify` 追问，而不是自行猜测后扩展查询

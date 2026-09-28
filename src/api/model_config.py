@@ -28,9 +28,28 @@ from agent.llms.model import (
     resolve_max_tokens,
     resolve_max_tokens_source,
 )
+from agent.utils.offload import offload_long
 from api._common import json_response, parse_body, require_user
 
 _logger = logging.getLogger(__name__)
+
+
+def _ssrf_reject(base_url: str) -> str:
+    """出站 SSRF 守卫（P3-8）：返回拒绝原因，空串 = 放行。
+
+    这两个端点的 `base_url` **可以由请求体直接给**、服务端代发 HTTP 并把结果回显，
+    而它们只 `require_user`（模型配置是按用户独立 store，限管理员会打断正常用法）
+    ⇒ 必须在这里挡住「环回/元数据」这类**服务器能到、配置者本人到不了**的目标。
+    口径与理由见 `agent/utils/net_guard.py`：**私网一律放行**（本仓模型网关就在私网）。
+    """
+    from agent.utils.net_guard import UnsafeOutboundURLError, check_outbound_url
+
+    try:
+        check_outbound_url(base_url, what="模型网关地址")
+    except UnsafeOutboundURLError as e:
+        _logger.warning("[model_config] 出站目标被拒: %s", e)
+        return str(e)
+    return ""
 
 
 def _get_store(request: Request):
@@ -55,6 +74,12 @@ def _probe_models(base_url: str, api_key: str, api_protocol: str = "", timeout: 
         urls = [f"{base}/models"]
 
     is_anthropic = api_protocol == "anthropic"
+
+    # P3-8 纵深防御：本函数是「拿 base_url 就去列表」的通用入口，最容易被后来的新端点复用。
+    # 主防线在 handler（那边能回 400 + 明确文案）；这里再挡一次，形状与其它失败一致。
+    strict_reason = _ssrf_reject(base_url)
+    if strict_reason:
+        return False, strict_reason, []
 
     def _do_probe(url: str) -> tuple[bool, str, list[str]]:
         headers = {
@@ -135,6 +160,10 @@ def _probe_model_capabilities(
     """拉取网关模型列表并提取容量元数据：{model_id: {"context_window": int|None, "max_tokens": int|None}}。
 
     Anthropic 协议/网关不提供容量 → 返回空 dict（调用方回退静态表）。
+
+    ⚠️ **P3-8 的出站守卫在 handler 层（`probe_capabilities` 的 `_ssrf_reject`）**：本函数下面
+    那个 `except Exception: continue` 会把守卫抛的异常一起吞掉，所以**不要**把守卫只搬进这里 ——
+    那样被拒的请求会静默退化成"探活没命中、回退静态值"，用户看不出被拒了。同理见 `_probe_single_model`。
     """
     base = base_url.rstrip("/")
     if api_protocol == "anthropic":
@@ -168,7 +197,10 @@ def _probe_model_capabilities(
 def _probe_single_model(
     base_url: str, api_key: str, model_id: str, api_protocol: str = "", timeout: float = 6.0
 ) -> dict:
-    """单查 GET /models/{id} 补容量（列表探测未命中时兜底）。"""
+    """单查 GET /models/{id} 补容量（列表探测未命中时兜底）。
+
+    ⚠️ 出站守卫在 handler 层，不在本函数里（原因见 `_probe_model_capabilities` docstring）。
+    """
     if api_protocol == "anthropic":
         return {"context_window": None, "max_tokens": None}
     base = base_url.rstrip("/")
@@ -305,7 +337,14 @@ async def test_config(request: Request):
             return json_response({"error": f"模型配置 '{name}' 不存在"}, status=404)
     if not base_url:
         return json_response({"error": "base_url 必填"}, status=400)
-    ok, msg, model_ids = _probe_models(base_url, api_key, api_protocol)
+    # P3-8：出站前守卫（base_url 可能来自请求体，也可能来自"先存后测"的配置 —— 两条路径都要挡，
+    # 只挡请求体等于留个两步绕过）。响应形状与"探活失败"一致，前端直接显示 message。
+    reject = _ssrf_reject(base_url)
+    if reject:
+        return json_response({"ok": False, "message": reject, "models": []}, status=400)
+    # P1-14：`_probe_models` 是同步 `urllib.request.urlopen`（timeout 10s，且会试多个
+    # 候选 URL），走长任务池 —— 探活期间别人的 SSE 不该跟着一起等。
+    ok, msg, model_ids = await offload_long(_probe_models, base_url, api_key, api_protocol)
     return json_response(
         {"ok": ok, "message": msg, "models": model_ids},
         status=200 if ok else 400,
@@ -342,30 +381,41 @@ async def probe_capabilities(request: Request):
             return json_response({"error": f"模型配置 '{name}' 不存在"}, status=404)
     if not base_url:
         return json_response({"error": "base_url 必填"}, status=400)
+    # P3-8：出站前守卫 —— **必须在这一层**（下面的 `_probe_model_capabilities`/`_probe_single_model`
+    # 把所有异常都 `continue` 掉了，守卫放里面会被吞成"探活没命中、回退静态值"）
+    reject = _ssrf_reject(base_url)
+    if reject:
+        return json_response({"error": reject}, status=400)
 
-    probe = _probe_model_capabilities(base_url, api_key, api_protocol)
-    out = []
-    for mid in model_ids:
-        cap = probe.get(mid) or {}
-        cw = cap.get("context_window")
-        mt = cap.get("max_tokens")
-        if cw is None and mt is None:
-            # 列表未命中容量 → 单查兜底
-            single = _probe_single_model(base_url, api_key, mid, api_protocol)
-            if cw is None:
-                cw = single.get("context_window")
-            if mt is None:
-                mt = single.get("max_tokens")
-        # 推荐值：探活 > 静态推断（resolve_* 为用户配置 > 已知表 > 默认）
-        cw_final = cw if cw is not None else resolve_context_window(mid)
-        mt_final = mt if mt is not None else resolve_max_tokens(mid)
-        out.append({
-            "id": mid,
-            "context_window": cw_final,
-            "max_tokens": mt_final,
-            "context_window_source": "probe" if cw is not None else resolve_context_window_source(mid),
-            "max_tokens_source": "probe" if mt is not None else resolve_max_tokens_source(mid),
-        })
+    # P1-14：这里最多会发 1 + N 次同步 HTTP（列表探测 10s + 每个未命中模型单查 6s），
+    # 整段搬进长任务池的一次调用（循环也在里面，避免 N 次线程切换）。
+    def _probe_all() -> list[dict]:
+        probe = _probe_model_capabilities(base_url, api_key, api_protocol)
+        out = []
+        for mid in model_ids:
+            cap = probe.get(mid) or {}
+            cw = cap.get("context_window")
+            mt = cap.get("max_tokens")
+            if cw is None and mt is None:
+                # 列表未命中容量 → 单查兜底
+                single = _probe_single_model(base_url, api_key, mid, api_protocol)
+                if cw is None:
+                    cw = single.get("context_window")
+                if mt is None:
+                    mt = single.get("max_tokens")
+            # 推荐值：探活 > 静态推断（resolve_* 为用户配置 > 已知表 > 默认）
+            cw_final = cw if cw is not None else resolve_context_window(mid)
+            mt_final = mt if mt is not None else resolve_max_tokens(mid)
+            out.append({
+                "id": mid,
+                "context_window": cw_final,
+                "max_tokens": mt_final,
+                "context_window_source": "probe" if cw is not None else resolve_context_window_source(mid),
+                "max_tokens_source": "probe" if mt is not None else resolve_max_tokens_source(mid),
+            })
+        return out
+
+    out = await offload_long(_probe_all)
     return json_response({"ok": True, "message": f"已探测 {len(out)} 个模型", "models": out})
 
 

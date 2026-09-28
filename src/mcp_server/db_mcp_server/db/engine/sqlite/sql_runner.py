@@ -40,10 +40,10 @@ class SqliteRunner(SqlRunner):
             # Execute the query
             cursor.execute(args.sql)
 
-            # Determine if this is a SELECT query or modification query
-            query_type = args.sql.strip().upper().split()[0]
-
-            if query_type == "SELECT":
+            # 有没有结果集以驱动的 description 为准（同 postgres runner）：
+            # 拿 SQL 首词猜会把 `WITH ... SELECT` 判成非查询、结果整份丢掉。
+            # sqlite 没有 statement timeout 机制（只有 progress handler 轮询），刻意不做。
+            if cursor.description is not None:
                 # Fetch results for SELECT queries
                 rows = cursor.fetchall()
                 if not rows:

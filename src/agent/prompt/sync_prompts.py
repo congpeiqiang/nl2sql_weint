@@ -12,6 +12,12 @@ Langfuse UI 编辑 prompt 是版本管理的入口；本脚本负责「本地文
     python -m agent.prompt.sync_prompts --all --force                  # 内容未变也强制新版本
     python -m agent.prompt.sync_prompts --skills                       # M6：同步全部 14 个 SKILL.md
     python -m agent.prompt.sync_prompts --skills --label staging       # skill 打 staging 标签（A/B）
+    python -m agent.prompt.sync_prompts --all --skills                 # 两个渠道一起推（可组合）
+
+⚠️ 本脚本**不在发版脚本里** —— 发版只换 `/app/src`，而运行期提示词取自 Langfuse、
+运行期技能取自 `<AGENT_DATA_ROOT>/shared/skills`。所以「改 prompt / 改 SKILL.md」这类修复，
+发版后**不会自动生效**，必须补跑本脚本（技能还要落到盘上）。且 system prompt 是**导入时**
+解析的，推完必须重启后端才生效（skill 不需要，每次 run 从盘上读）。
 
 标签语义：默认 production+latest；--label staging 只打 staging+latest（production 不动，
 供 A/B 灰度用）。「latest」恒指最新版本，「production」指当前对外版本（M5 分流可改 prod-a/prod-b）。
@@ -148,16 +154,22 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--force", action="store_true", help="内容未变也强制新版本")
     args = ap.parse_args(argv)
 
+    # ⚠️ 这三个开关**必须各自独立判断**，不能写成 if/elif 链：写成链时
+    # `--all --skills` 会静默丢掉 `--all`（只跑 skills，system prompt 一个都不推），
+    # 而输出里只有 skills 那半截，看上去像是"推成功了"。已踩过一次。
+    did = False
+    if args.all:
+        for n in list(_DEFAULT_FILES):
+            sync(n, args.file, args.label, args.commit, args.force)
+        did = True
     if args.skills:
         sync_skills(args.label, args.commit, args.force)
-    elif args.all:
-        names = list(_DEFAULT_FILES)
-        for n in names:
-            sync(n, args.file, args.label, args.commit, args.force)
-    elif args.name:
+        did = True
+    if args.name:
         sync(args.name, args.file, args.label, args.commit, args.force)
-    else:
-        print("需指定 --name / --all / --skills", flush=True)
+        did = True
+    if not did:
+        print("需指定 --name / --all / --skills（可组合，如 --all --skills）", flush=True)
         sys.exit(1)
 
     print("SYNC_DONE", flush=True)

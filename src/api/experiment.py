@@ -39,6 +39,7 @@ from types import SimpleNamespace
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
+from agent.utils.offload import offload_long
 from api._common import json_response, parse_body
 from agent.utils.prompt_versioning import PROMPT_NAMES, materialize_prompt_ref
 
@@ -204,30 +205,36 @@ async def list_datasets(request: Request):
 
     from agent.trace.langfuse_client import get_client
 
-    client = get_client()
-    out = []
-    note = ""
-    try:
-        ds_resp = client.api.datasets.list(limit=100)
-        for d in (ds_resp.data or []):
-            name = getattr(d, "name", "") or ""
-            if not name:
-                continue
-            count = -1
-            try:
-                items = client.api.dataset_items.list(dataset_name=name, page=1, limit=1)
-                meta = items.meta if hasattr(items, "meta") else None
-                count = int(
-                    meta.get("total_items")
-                    if isinstance(meta, dict)
-                    else (getattr(meta, "total_items", -1) if meta else -1)
-                )
-            except Exception as e:  # noqa: BLE001
-                _logger.warning("[experiment] 数据集 %s item 数读取失败: %s", name, e)
-            out.append({"name": name, "count": count})
-    except Exception as e:  # noqa: BLE001
-        _logger.warning("[experiment] 列数据集失败: %s", e)
-        note = "读取 Langfuse 数据集失败：%s" % (str(e)[:200] or type(e).__name__)
+    # P1-14：Langfuse 的 `get_client()` 是**同步** SDK → 下面每个 `client.api.*` 都是
+    # 阻塞 HTTP。这里是 1 次 list + 每个数据集 1 次 items（N+1 次网络），整段一次搬走。
+    def _collect() -> tuple[list[dict], str]:
+        client = get_client()
+        out: list[dict] = []
+        note = ""
+        try:
+            ds_resp = client.api.datasets.list(limit=100)
+            for d in (ds_resp.data or []):
+                name = getattr(d, "name", "") or ""
+                if not name:
+                    continue
+                count = -1
+                try:
+                    items = client.api.dataset_items.list(dataset_name=name, page=1, limit=1)
+                    meta = items.meta if hasattr(items, "meta") else None
+                    count = int(
+                        meta.get("total_items")
+                        if isinstance(meta, dict)
+                        else (getattr(meta, "total_items", -1) if meta else -1)
+                    )
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning("[experiment] 数据集 %s item 数读取失败: %s", name, e)
+                out.append({"name": name, "count": count})
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("[experiment] 列数据集失败: %s", e)
+            note = "读取 Langfuse 数据集失败：%s" % (str(e)[:200] or type(e).__name__)
+        return out, note
+
+    out, note = await offload_long(_collect)
     out.sort(key=lambda x: x["name"])
     if not note and not out:
         note = (
@@ -245,19 +252,23 @@ async def prompt_labels(request: Request):
     names = [name] if name else list(PROMPT_NAMES)
     from agent.trace.langfuse_client import get_client
 
-    client = get_client()
-    out = []
-    for n in names:
-        try:
-            resp = client.api.prompts.list(name=n, limit=100)
-            metas = resp.data or []
-            labels = sorted({lb for m in metas for lb in (m.labels or [])})
-            total_versions = sum(len(m.versions or []) for m in metas)
-            out.append({"name": n, "labels": labels, "versions": total_versions, "found": len(metas)})
-        except Exception as e:  # noqa: BLE001
-            _logger.warning("[experiment] prompt %s 读取失败: %s", n, e)
-            out.append({"name": n, "error": str(e)})
-    return json_response({"prompts": out})
+    # P1-14：同步 Langfuse SDK，每个 prompt 名一次阻塞 HTTP（N 个名字 = N 次网络）
+    def _collect() -> list[dict]:
+        client = get_client()
+        out: list[dict] = []
+        for n in names:
+            try:
+                resp = client.api.prompts.list(name=n, limit=100)
+                metas = resp.data or []
+                labels = sorted({lb for m in metas for lb in (m.labels or [])})
+                total_versions = sum(len(m.versions or []) for m in metas)
+                out.append({"name": n, "labels": labels, "versions": total_versions, "found": len(metas)})
+            except Exception as e:  # noqa: BLE001
+                _logger.warning("[experiment] prompt %s 读取失败: %s", n, e)
+                out.append({"name": n, "error": str(e)})
+        return out
+
+    return json_response({"prompts": await offload_long(_collect)})
 
 
 async def skill_refs(request: Request):
@@ -283,9 +294,12 @@ async def skill_refs(request: Request):
     base = _default_skills_base()
     enc = enclosing_repo(base)
     repo_root = enc[0] if enc else None
-    local = _git_refs(Path(repo_root)) if repo_root else None
+    # P1-14：`_git_refs` 是 3 个 git 子进程（timeout 60/30s）；`remote_refs` 命中缓存快，
+    # 但**未命中时是一次 `git ls-remote` 网络调用（timeout 20s）**——直接调就是让全站
+    # 等 gitlab。两者都不读请求上下文，走长任务池。
+    local = await offload_long(_git_refs, Path(repo_root)) if repo_root else None
     origin = effective_origin(repo_root)
-    remote = remote_refs(origin) if origin else None
+    remote = await offload_long(remote_refs, origin) if origin else None
 
     tags: list[str] = []
     _seen: set[str] = set()
@@ -347,14 +361,18 @@ async def semantic_refs(request: Request):
     if not path:
         return json_response({"error": f"数据库 {db} 未建模（无语义库项目）"}, status=404)
     repo = Path(path)
-    local = _git_refs(repo)
+    # P1-14：`_git_refs` = 3 个 git 子进程；`get-url` 也是子进程；`remote_refs` 缓存
+    # 未命中时是 `git ls-remote` 网络调用（timeout 20s）→ 三处都搬出事件循环
+    local = await offload_long(_git_refs, repo)
     origin = ""
     try:
-        ok, out = git_repo._run(["remote", "get-url", "origin"], cwd=str(repo), timeout=15)
+        ok, out = await git_repo.run_async(
+            ["remote", "get-url", "origin"], cwd=str(repo), timeout=15
+        )
         origin = out.strip() if ok else ""
     except Exception:  # noqa: BLE001
         origin = ""
-    remote = remote_refs(origin) if origin else None
+    remote = await offload_long(remote_refs, origin) if origin else None
 
     tags: list[str] = []
     _seen: set[str] = set()
@@ -730,7 +748,8 @@ async def delete_run(request: Request):
         except Exception as e:  # noqa: BLE001
             _logger.warning("[experiment] 删除 %s 失败: %s", p.name, e)
     if run_dir.exists():
-        shutil.rmtree(run_dir, ignore_errors=True)
+        # P1-14：一次实验 run 目录里有本次全部 case 的落盘产物（GB 级可能）→ 长任务池
+        await offload_long(shutil.rmtree, run_dir, True)
     _logger.info("[experiment] 删除历史 run %s", stamp)
     return json_response({"ok": True, "deleted": stamp})
 

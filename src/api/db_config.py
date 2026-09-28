@@ -29,6 +29,7 @@ from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
 from api._common import json_response, parse_body, require_user, require_admin
+from agent.utils.offload import offload_long
 from mcp_server.db_mcp_server.db.core.db_config_store import DBConfig, get_store
 
 _logger = logging.getLogger(__name__)
@@ -174,10 +175,12 @@ async def upsert_config(request: Request):
         return json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
         return json_response({"error": f"保存失败: {e}"}, status=500)
-    # wren_project 变更：失效 detector 缓存，semantic 标记下次读取即反映新配置
+    # wren_project / 库名变更：失效**一组**发现类缓存（detector + db_name 归一化 +
+    # 语义库版本物化），semantic 标记与工具可见性下次读取即反映新配置。
+    # 三者必须一起清：只清 detector 会让新建模的库名归一化失败 → 静默掉到 dbmcp 直连。
     try:
-        from agent.utils.semantic_db import get_detector
-        get_detector().invalidate()
+        from agent.utils.semantic_db import invalidate_db_discovery_caches
+        invalidate_db_discovery_caches()
     except Exception:  # noqa: BLE001
         pass
     # 该库的 wrenai 工具立即进运行期注册表（免重启）。同步等待是刻意的：响应体
@@ -193,8 +196,8 @@ async def delete_config(request: Request):
     if not ok:
         return json_response({"error": f"数据库 '{name}' 不存在"}, status=404)
     try:
-        from agent.utils.semantic_db import get_detector
-        get_detector().invalidate()
+        from agent.utils.semantic_db import invalidate_db_discovery_caches
+        invalidate_db_discovery_caches()
     except Exception:  # noqa: BLE001
         pass
     # 工具立即下线（免重启）：模型清单里不再出现；历史消息里的存量调用由
@@ -227,6 +230,8 @@ async def _ensure_mcp_tools(name: str, force: bool = True) -> dict:
 
 async def mcp_status(request: Request):
     """运行期 MCP 工具注册表状态（排查"某库工具没起来"的直接抓手）。"""
+    # P1：会列出所有已加载的 server / 库名与工具数（跨租户拓扑）→ 管理员。
+    require_admin(request)
     from agent.tools.mcp_tool import get_mcp_status
 
     return json_response(get_mcp_status())
@@ -240,9 +245,11 @@ async def reload_mcp(request: Request):
     上次加载失败的条目会被**重试**（`retried` 列出），所以它同时是「某库工具一直
     没起来（建库时还没 MDL 之类）」的恢复手段——不必重启后端，也不必去动库配置。
     """
+    # P1：全局工具表操作（会起/停 MCP 子进程）→ 管理员。
+    require_admin(request)
     try:
-        from agent.utils.semantic_db import get_detector
-        get_detector().invalidate()
+        from agent.utils.semantic_db import invalidate_db_discovery_caches
+        invalidate_db_discovery_caches()
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -256,7 +263,11 @@ async def reload_mcp(request: Request):
 
 
 async def test_config(request: Request):
-    require_user(request)  # 测试连接是只读操作，允许所有登录用户
+    # P1：**改回管理员**。带 body 时 `_test_connection` 会拿请求体里的 host/port
+    # 直接建 TCP 连接（3s 超时）→ 对任何登录用户都是一个内网探活/端口扫描器
+    # （容器网络里可达的库、元数据服务、宿主内网全在内），且响应把连通性原样回报。
+    # 这是本文件里唯一能把「请求体里的地址」变成出站连接的端点，只读≠无风险。
+    require_admin(request)
     name = request.path_params["name"]
     data = await parse_body(request)
     if data:
@@ -268,7 +279,8 @@ async def test_config(request: Request):
             cfg = get_store().get(name)
         except KeyError:
             return json_response({"error": f"数据库 '{name}' 不存在"}, status=404)
-    ok, msg = _test_connection(cfg)
+    # P1-14：同步驱动建连 + `SELECT 1`（3s 超时），走长任务池
+    ok, msg = await offload_long(_test_connection, cfg)
     return json_response({"ok": ok, "message": msg}, status=200 if ok else 400)
 
 

@@ -14,6 +14,10 @@ save_chart.py — 图表保存辅助脚本
     python save_chart.py --content "<图表内容>" --name "IMDb_Movie_Genres_chart" [--format svg|png] [--dir /workspace/report/]
 
 注意：
+- 落盘文件名由**本脚本**决定（调用方只给基名）：`{基名}_{YYYYMMDD_HHMMSS}_{4位随机}.{ext}`。
+  report/ 是全站共享目录，"销售趋势"这类同名主题在不同用户/不同会话里天然同名，
+  固定基名 = 后写的人静默覆盖前一个人的图，所以必须带唯一后缀。调用方回显的
+  `✅ 图表已保存: <路径>` 才是真实文件名，**不要自己拼**。
 - 脚本运行在宿主 shell，/workspace/ 虚拟路径会被解析为宿主盘符根目录（错误位置）。
   因此脚本内部使用宿主绝对路径写入，确保虚拟文件系统可见。
 - 宿主路径映射（与 CompositeBackend 路由一致）：
@@ -24,9 +28,11 @@ save_chart.py — 图表保存辅助脚本
 
 import argparse
 import base64
+import os
 import re
 import shutil
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -88,6 +94,29 @@ def _sanitize_filename(name: str) -> str:
     """清理文件名中的非法字符。"""
     name = re.sub(r'[\\/:*?"<>|\s]+', "_", name.strip())
     return name or "chart"
+
+
+def _reserve_dest(report_dir: Path, safe_name: str, ext: str) -> Path:
+    """在 report 目录里**原子占位**一个唯一文件名并返回它。
+
+    命名 `<基名>_<YYYYMMDD_HHMMSS>_<4位随机><ext>`：
+    · 时间戳：让人一眼看出产出时间，也避免跨天同名互相覆盖；
+    · 随机后缀：同秒不同用户/会话同名仍会撞，4 位 hex 只是打散，真正的保证是下面
+      的 `O_EXCL` 独占创建——检查再写（check-then-act）在并发下必然有窗口。
+
+    占位意味着**先建 0 字节文件再写入**：本函数由调用方在内容解析/校验**之后**调用，
+    所以不会留下空文件；写失败时残留的空文件是可接受的（比覆盖别人的图轻得多）。
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for _ in range(50):
+        dest = report_dir / f"{safe_name}_{ts}_{uuid.uuid4().hex[:4]}{ext}"
+        try:
+            fd = os.open(str(dest), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return dest
+    raise RuntimeError(f"无法在 {report_dir} 生成唯一文件名: {safe_name}{ext}")
 
 
 def _extract_svg(content: str) -> str:
@@ -152,13 +181,13 @@ def save_chart(content: str, name: str, fmt: str = "", out_dir: str = "") -> str
 
     if fmt == "svg" or detected == "svg":
         svg = _extract_svg(content)
-        dest = report_dir / f"{safe_name}.svg"
+        dest = _reserve_dest(report_dir, safe_name, ".svg")
         dest.write_text(svg, encoding="utf-8")
         return str(dest)
 
     if fmt == "base64" or detected == "base64":
         svg = _decode_base64_iframe(content)
-        dest = report_dir / f"{safe_name}.svg"
+        dest = _reserve_dest(report_dir, safe_name, ".svg")
         dest.write_text(svg, encoding="utf-8")
         return str(dest)
 
@@ -166,7 +195,7 @@ def save_chart(content: str, name: str, fmt: str = "", out_dir: str = "") -> str
         src = Path(content)
         if not src.exists():
             raise ValueError(f"源图片不存在: {content}")
-        dest = report_dir / f"{safe_name}.png"
+        dest = _reserve_dest(report_dir, safe_name, ".png")
         shutil.copy2(src, dest)
         return str(dest)
 

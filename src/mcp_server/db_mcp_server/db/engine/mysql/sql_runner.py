@@ -8,6 +8,32 @@ logger = logging.getLogger(__name__)
 import pandas as pd
 
 from mcp_server.db_mcp_server.db.sql_runner import SqlRunner, RunSqlToolArgs, ToolContext
+from mcp_server.db_mcp_server.db.limits import mysql_timeout_sqls
+
+
+def _apply_statement_timeout(conn) -> None:
+    """给这条会话设 statement timeout（P2-8）。
+
+    MySQL 5.7.8+ 与 MariaDB 的变量名/单位不同，所以**按序试**（见 ``mysql_timeout_sqls``）；
+    全部失败只记 warning、不让查询失败 —— 超时是一层保护，不是查询能成立的前提。
+    """
+    sqls = mysql_timeout_sqls()
+    if not sqls:
+        return
+    last: Exception | None = None
+    for sql in sqls:
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            return
+        except Exception as e:  # noqa: BLE001  换下一个候选
+            last = e
+        finally:
+            try:
+                cur.close()
+            except Exception:  # noqa: BLE001
+                pass
+    logger.warning("[db-limits] MySQL statement timeout 未设置成功（已试 %s）：%s", sqls, last)
 
 
 class MySQLRunner(SqlRunner):
@@ -75,6 +101,8 @@ class MySQLRunner(SqlRunner):
         try:
             # Ping to ensure connection is alive
             conn.ping(reconnect=True)
+
+            _apply_statement_timeout(conn)
 
             cursor = conn.cursor()
             logger.info(f"执行sql: {args.sql}")

@@ -347,6 +347,22 @@ def _resolve_llm_config(route: str | None = None, model_name: str | None = None,
     return "", "", "", None, None, None
 
 
+def has_usable_model(user_id: str | None = None) -> bool:
+    """该账号当前是否有可用模型（api_key + base_url + 模型 id 三者齐备）。
+
+    **判据只此一份**：内部就是 `_resolve_llm_config` 的非空判断，与 `create_model`
+    走同一条解析链 —— 别在调用方另写「provider 个数 > 0」之类的弱化条件（半个配置
+    ——比如只填了 base_url 没填 api_key——在那条判据下会"通过"，然后 create_model
+    返回 None，再被上层回落成别人的模型）。
+
+    `user_id` 为空时读全局 store（无登录身份路径），语义与 `create_model` 一致。
+
+    用途：`ModelRequiredMiddleware`（账号没模型时明确报错、**不回落**共享配置）。
+    """
+    api_key, base_url, resolved_model, *_ = _resolve_llm_config(None, None, user_id)
+    return bool(api_key and base_url and resolved_model)
+
+
 def create_model(
     enable_thinking: bool | None = None,
     route: str | None = None,

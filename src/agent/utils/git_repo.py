@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from agent.utils.offload import offload_long
+
 _REMOTE_URL_RE = re.compile(r"^(?:https?|ssh)://", re.IGNORECASE)
 
 # ── SSH 密钥（语义库 ssh:// 推送用）────────────────────────────
@@ -116,6 +118,22 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[b
     if proc.returncode != 0:
         return False, (err or out or f"git 退出码 {proc.returncode}")
     return True, out
+
+
+async def run_async(
+    args: list[str], cwd: str | None = None, timeout: int = 120
+) -> tuple[bool, str]:
+    """`_run` 的**异步入口**：把 git 子进程搬出事件循环（P1-14）。
+
+    凡 `async def` 里要跑 git 的地方都必须走这里。`_run` 是阻塞 `subprocess.run`，
+    而 git 的网络动作 timeout 很大（push 300s / tag 120s，还要重试）——直接调它
+    就是把全站串在这一条 push 后面（评估报告 §3.3、§3.1：10 个后台 job 共用同一个
+    事件循环，阻塞检测被 `LANGGRAPH_ALLOW_BLOCKING=true` 关掉了，卡住是**静默**的）。
+
+    走 `offload_long`（长任务池）：git 是子进程 + 网络，不该和每请求的短调用
+    （auth 写库等）抢默认池的线程。`_run` 不读请求上下文，所以不走 contextvars。
+    """
+    return await offload_long(_run, args, cwd=cwd, timeout=timeout)
 
 
 def validate_repo_url(url: str) -> str:

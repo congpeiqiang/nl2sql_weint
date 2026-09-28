@@ -12,9 +12,10 @@ Langfuse 数据本身服务端持久，obs id 重启后仍有效 → 只需把�
 （进程内后续续跑仍走内存快路径）。
 
 设计（对齐 eval_queue.py / feedback/store.py 先例）：
-- 单连接 `check_same_thread=False` + 模块级 `threading.RLock` + `PRAGMA journal_mode=WAL`
-  + 建表幂等。db 放 `{data_root}/trace_bind.sqlite`（data_root =
-  `get_workspace_manager().data_root`，解析失败回退 `AGENT_DATA_ROOT` env → 当前目录）。
+- 单连接 `check_same_thread=False` + 模块级可重入锁（P2-3 起带计量）+ `PRAGMA journal_mode=WAL`
+  + 建表幂等。db 放 `<data_root>/trace_bind/trace_bind.sqlite`（**一库一目录**，三件套
+  同处一目录；data_root = `get_workspace_manager().data_root`，解析失败回退
+  `AGENT_DATA_ROOT` env → 当前目录。路径解析与老文件接管见 `agent/utils/sqlite_paths.py`）。
 - 运行中（worker run 活跃期）可安全写：独立 sqlite 文件不触碰 LangGraph thread
   metadata / checkpointer（后者 in-flight 时拒绝写入，见 sql_approval）。
 - 语义镜像内存版本：
@@ -34,16 +35,18 @@ Langfuse 数据本身服务端持久，obs id 重启后仍有效 → 只需把�
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from agent.utils import sqlite_paths
+from agent.utils.prom_metrics import metered_rlock
+from agent.utils.sqlite_paths import resolve_store_db
 
 _logger = logging.getLogger(__name__)
 
-_LOCK = threading.RLock()
+# P2-3：带计量的可重入锁（store="trace_bind"）
+_LOCK = metered_rlock("trace_bind")
 
 _TASK_PRUNE_CAP = 3000        # task_trace 保留最新行数上限
 _TASK_PRUNE_EVERY = 64        # 每多少次 task 写顺带 prune 一次
@@ -76,20 +79,13 @@ def _now() -> str:
 
 
 def _db_path() -> Path:
-    """绑定库路径：data_root/trace_bind.sqlite（data_root = AGENT_DATA_ROOT）。
+    """绑定库路径：`<AGENT_DATA_ROOT>/trace_bind/trace_bind.sqlite`（一库一目录）。
 
-    workspace_manager 解析失败时回退 AGENT_DATA_ROOT 环境变量（再不行当前目录），
-    保证 CLI / 缺配置场景也能落地（同 eval_queue._db_path）。
+    2026-09-25 起从数据根目录归位到同名子目录（库 + `-wal` + `-shm` 同处一目录；
+    根上的老三件套由 `agent.utils.sqlite_paths` 首次建连时接管）。data_root 解析失败时
+    回退 AGENT_DATA_ROOT 环境变量（再不行当前目录），保证 CLI / 缺配置场景也能落地。
     """
-    try:
-        from agent.workspace_manager import get_workspace_manager  # 惰性，防 import 环
-
-        root = Path(get_workspace_manager().data_root)
-    except Exception:  # noqa: BLE001
-        root = Path(os.getenv("AGENT_DATA_ROOT", "") or ".")
-    p = root / "trace_bind.sqlite"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return resolve_store_db(sqlite_paths.data_root(), "trace_bind")
 
 
 class TraceBindStore:
@@ -99,11 +95,13 @@ class TraceBindStore:
         p = Path(path) if path else _db_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         self._path = p
-        self._conn = sqlite3.connect(str(p), check_same_thread=False)
+        self._conn = sqlite3.connect(str(p), check_same_thread=False, timeout=15.0)
         self._conn.row_factory = sqlite3.Row
         self._task_writes = 0
         with _LOCK:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # 跨进程写等待（与 feedback/eval_queue 同款）：默认 5s 在多进程写入下不够。
+            self._conn.execute("PRAGMA busy_timeout=15000")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
         _logger.info("[trace_bind] 绑定存储就绪: %s", p)

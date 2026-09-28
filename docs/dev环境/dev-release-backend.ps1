@@ -99,14 +99,15 @@ $remote = "${DevDir}/.tmp/dev_src.tar.gz"
 if (-not $SkipPackage) {
     Write-Step "1/5 打包本机 src/"
     if (Test-Path $tar) { Remove-Item $tar -Force }
-    # 排除项：编译缓存 / 运行时残留 / 工作区注册表（跟过去会覆盖服务器注册表）
+    # 排除项：编译缓存 / 运行时残留
     # 同时写 "*/x" 与 "x" 两种形式，兼容不同 tar 的 glob 语义
+    # 2026-09-25：删掉 `workspaces.json` 两条（工作区注册表机制已删除，路径钉死
+    # AGENT_DATA_ROOT/workspace）；两条 workspace / workspace-temp 排除项留作空转兜底。
     $ex = @(
         "--exclude=*/__pycache__", "--exclude=__pycache__",
         "--exclude=*.pyc",
         "--exclude=src/agent/workspace", "--exclude=*/agent/workspace",
         "--exclude=src/agent/workspace-temp", "--exclude=*/agent/workspace-temp",
-        "--exclude=src/agent/workspace_manager/workspaces.json", "--exclude=*/workspace_manager/workspaces.json",
         "--exclude=src/.tmp", "--exclude=*/.tmp",
         # model_config.json 是 gitignore 的运行时配置，容器读的是 AGENT_DATA_ROOT
         # （/app/data/shared），src 里这份只是旧种子残留。不排掉的话每次发版都会把它

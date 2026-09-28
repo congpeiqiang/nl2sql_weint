@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -82,6 +83,30 @@ def _server_slug(db_name: str) -> str:
     return hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
 
 
+def db_name_from_wrenai_tool(tool_name: str) -> str:
+    """`wrenai_<slug>_<tool>` → 库名反查（取不到返回 ""）。P1-16 执行侧判权用。
+
+    **不能"反解 slug"**：`_server_slug` 是有损折叠（`WIT运营管理平台数据库` → `WIT`），
+    一个 slug 可能对应多个库名，反解必然错。所以反过来做 —— 拿**当前工作区已建模库**
+    逐个正算 `wrenai_server_name(db) + "_"` 去匹配前缀。命中不了（工作区没这个库 /
+    slug 撞名被跳过 / discover 读不出来）→ 返回 ""，调用方按**放行**处理
+    （判权不能因为"查不出库名"就拒掉合法调用）。
+
+    只认 `_run_sql` / `get_db_info` 这类**查询工具**：`wrenai_<slug>_list_knowledge`
+    同样带库名，一并反查即可（本函数不区分工具后缀，反查的是 server 前缀）。
+    """
+    name = (tool_name or "").strip()
+    if not name.startswith("wrenai_"):
+        return ""
+    try:
+        for db in get_detector().discover():
+            if name.startswith(wrenai_server_name(db) + "_"):
+                return db
+    except Exception:  # noqa: BLE001  发现集合读不出来 → 返回 ""（调用方放行）
+        _logger.warning("[semantic_db] 反查 %s 的库名失败", name, exc_info=True)
+    return ""
+
+
 # ── 语义库 A/B：WREN_SEMANTIC_OVERRIDE 版本物化 ───────────────
 # 实验 worker 进程设 WREN_SEMANTIC_OVERRIDE（逗号分隔多库）。命中后把该库的 Wren
 # 项目物化到 git ref 所指版本（git archive / 远程浅克隆），wrenai MCP server 的
@@ -99,6 +124,10 @@ def _server_slug(db_name: str) -> str:
 # 且跨容器换代存活（2026-09-12 由 tmp 迁入，见 _cache_dir）。
 _semantic_override_cache: dict[tuple[str, str, str], Optional[str]] = {}
 _semantic_override_lock = threading.Lock()
+# 物化锁：按 (db, source, ref) 一把（见 `_materialize_key_lock`）。键数 ≈ 参与 A/B 的
+# (库, 版本) 组合数，天然有界。
+_materialize_locks: dict[tuple[str, str, str], threading.Lock] = {}
+_materialize_locks_guard = threading.Lock()
 
 
 def _parse_semantic_overrides() -> dict[str, tuple[str, str]]:
@@ -150,34 +179,72 @@ def _wren_markers_hit(root: Path) -> bool:
     return any((root / m).exists() for m in _WREN_MARKERS)
 
 
-def _cache_dir(db_name: str, ref: str) -> Path:
-    """物化缓存目录：`<data_root>/offline_experiment/semantic_refs/<db>/<ref>/`。
+def _source_tag(source: str) -> str:
+    """把物化源路径压缩成目录名安全且**不重名**的片段。
+
+    `src` 是「按需覆盖的物化源」（`WREN_SEMANTIC_OVERRIDE=db=path@ref` 里的 path），
+    空串表示「用正在服务的那个库」。用「末段名 + 全路径哈希」而不是 `_safe_ref(src)`：
+    后者把 `/`、`:` 都换成 `_` 后不同路径会撞成同一个名字（`/a/b/c` 与 `/a_b/c`），
+    而这里撞名 = 两个来源共用目录 = 互相 `rmtree`（正是本次要修的坑）。末段名保留
+    可读性（一眼看出是哪个库）。
+    """
+    if not source:
+        return "base"
+    digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:8]
+    return f"{_safe_ref(Path(source).name)[:24]}-{digest}"
+
+
+def _cache_dir(db_name: str, source: str, ref: str) -> Path:
+    """物化缓存目录：`.../offline_experiment/semantic_refs/<db>/<src标签>_<ref>/`。
 
     2026-09-12 由系统临时目录（`%TEMP%/nl2sql_wren_semantic_cache/`，生产 = 容器 /tmp）
     迁入：tmp 随容器换代清空 → 每次发版后各语义库版本首用都要重新浅克隆（需 GitLab
     可达 + `/app/data/.ssh` key），物化后若跑过 wren 构建也白做。放 data_root 下与
     skill_refs/ prompt_refs/ 同属离线实验产物、运维一处可见；仍在 `FILE_PERMISSIONS`
     的 `deny /**` 之外（不进 `shared/`），在线 agent 读不到。旧 tmp 目录不自动迁移。
+
+    **目录名必须同时含 src 与 ref**（2026-09-24 审计修正）：进程缓存键是
+    `(db_name, source, ref)`、marker 也是 `source|ref`，而旧命名只含 `ref` ⇒
+    `semantic_project_path`（override 命中，src 可非空）与 `materialize_semantic_ref`
+    （src="")对同一个库的两个不同来源会**用同一个目录**：后到的那个 `rmtree` 掉前一个
+    正在服务的那份，再换进另一仓库的内容（症状 = 问数报 `target/mdl.json` 缺失 /
+    A/B 结论被污染）。加进 src 标签后，两个来源各用各的目录，这条路径彻底断开。
+    旧命名的目录会成为孤儿（**不主动删**：可能还有在跑的 A/B run 正指着它）。
     """
     from agent.workspace_manager import get_workspace_manager
 
     return (
         get_workspace_manager().offline_experiment_dir
-        / "semantic_refs" / _safe_ref(db_name) / _safe_ref(ref)
+        / "semantic_refs" / _safe_ref(db_name) / f"{_source_tag(source)}_{_safe_ref(ref)}"
     )
 
 
-def _marker_matches(root: Path, key: str) -> bool:
+def _read_marker(root: Path) -> Optional[tuple[str, str]]:
+    """读缓存根上的 marker → `(key, 项目相对根的位置)`；没有/读不动 → None。
+
+    两行格式：第一行是物化身份 `source|ref`，第二行是项目目录相对**缓存根**的位置
+    （`.` = 缓存根本身就是项目目录）。老的单行 marker 视为 `("...", ".")`。
+    """
     try:
         p = root / _MARKER_FILE
-        return p.is_file() and p.read_text(encoding="utf-8").strip() == key
+        if not p.is_file():
+            return None
+        lines = p.read_text(encoding="utf-8").splitlines()
+        return (lines[0].strip(), (lines[1].strip() if len(lines) > 1 else "."))
     except Exception:  # noqa: BLE001
-        return False
+        return None
 
 
-def _write_marker(root: Path, key: str) -> None:
+def _write_marker(root: Path, key: str, project_rel: str = ".") -> None:
+    """在**缓存根**（不是项目目录）写 marker：记身份 + 项目目录在哪。
+
+    为什么要记第二行：`git_archive_materialize` 对「仓库子目录」型的物化源
+    （`base` 在 app 主仓库内，如 `src/test/wrenai_exec_*`）会把项目放在
+    `<缓存根>/<相对路径>/` 下 ⇒ 只看缓存根本身**判断不出**它是不是一个项目，
+    旧实现的快路径对这类来源永远不命中 ⇒ 每次调用都重跑一次 git archive。
+    """
     try:
-        (root / _MARKER_FILE).write_text(key, encoding="utf-8")
+        (root / _MARKER_FILE).write_text(f"{key}\n{project_rel}\n", encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         _logger.warning("[semantic_db] 写 marker 失败: %s", e)
 
@@ -225,57 +292,176 @@ def _materialize_from_origin(source: Path, ref: str, dest_root: Path) -> bool:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _materialize_key_lock(key: tuple[str, str, str]) -> threading.Lock:
+    """按 `(db, source, ref)` 取一把锁：同一个物化目标只允许一个线程在跑。
+
+    与 `skills_versioning._key_lock` 同款。键与目录名同源（都含 source）⇒ 不看目录名
+    也能确定「不会有两把锁保护同一个目录」。只在事件循环线程/同步调用方上取，dict
+    自身用小锁保护。
+    """
+    with _materialize_locks_guard:
+        lock = _materialize_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _materialize_locks[key] = lock
+        return lock
+
+
+def _reuse_if_ready(dest_root: Path, marker_key: str) -> Optional[str]:
+    """磁盘快路径：缓存根上是本 key 物化出的合法项目 → 返回项目目录（跨进程零网络）。
+
+    判据三条缺一不可：marker 身份一致、marker 记的项目位置存在、那里有 wren 项目标记。
+    """
+    mk = _read_marker(dest_root)
+    if mk is None or mk[0] != marker_key:
+        return None
+    project = dest_root if mk[1] in ("", ".") else dest_root / mk[1]
+    return str(project) if _wren_markers_hit(project) else None
+
+
+def _new_stage_dir(dest_root: Path) -> Path:
+    """本次物化的暂存目录（与 dest_root 同盘、隐藏）。**取名即占位**。
+
+    兄弟目录而不是 `dest_root` 本身：物化过程要往目录里写一堆文件，写在**正在被读**
+    的位置上就会出现半成品（与 wren 项目那套「暂存副本 + 原子换入」同一理由）。
+    靠 mkdir 的 `FileExistsError` 判重名，同毫秒内的两次调用也不会拿到同一个名字。
+    """
+    parent = dest_root.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    stage = parent / f".stage-{dest_root.name}"
+    n = 0
+    while True:
+        try:
+            stage.mkdir()
+            return stage
+        except FileExistsError:
+            n += 1
+            stage = parent / f".stage-{dest_root.name}-{n}"
+
+
+# 目录/文件 rename 的重试参数（只对 Windows 的「瞬时被拒」有意义，见 `_rename_retry`）
+_RENAME_RETRIES = 8
+_RENAME_RETRY_SLEEP = 0.02
+
+
+def _rename_retry(src: Path, dst: Path) -> None:
+    """同盘 `os.replace`，被瞬时拒绝时退避重试几次。
+
+    Windows 上 rename 会被**瞬时**拒绝（`WinError 5`）：目标被别的进程打开、刚被删的
+    文件还在 delete-pending、AV/DLP 过滤驱动在扫刚写出来的文件……本次实测在系统临时
+    目录里偶发一次、隔 50ms 重试即成功（Linux 不受影响：rename 对被打开的目标无条件
+    成功，生产跑 Linux ⇒ 第一次就返回，重试等于零成本）。失败重试是安全的：rename
+    失败时源和目标都没动。
+    """
+    last: Optional[OSError] = None
+    for attempt in range(_RENAME_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:  # Windows only
+            last = e
+            time.sleep(_RENAME_RETRY_SLEEP * (attempt + 1))
+    raise OSError(f"rename {src.name} → {dst.name} 失败（重试 {_RENAME_RETRIES} 次）：{last}") from last
+
+
+def _install_staged(stage: Path, dest_root: Path) -> None:
+    """把物化好的暂存目录**换入** dest_root（同盘 rename，读者看不到半成品）。
+
+    目录已存在（换了 marker 身份、或上一个版本）时先把它 rename 挪开再删：直接
+    `rmtree` 会让正在读它的进程看到「文件一个个消失」。两次 rename 之间目录名短暂
+    空缺（Linux 上是 µs 级目录项更新；只有跨进程并发到同一个 key 才会碰上）。
+    """
+    trash: Optional[Path] = None
+    if dest_root.exists():
+        trash = dest_root.parent / f".old-{dest_root.name}-{os.getpid()}"
+        if trash.exists():
+            shutil.rmtree(trash, ignore_errors=True)
+        _rename_retry(dest_root, trash)  # 同盘 rename
+    try:
+        _rename_retry(stage, dest_root)
+    except OSError:
+        if trash is not None:
+            _rename_retry(trash, dest_root)  # 回滚：原目录回到原处
+        raise
+    if trash is not None:
+        shutil.rmtree(trash, ignore_errors=True)
+
+
 def _materialize_semantic(db_name: str, src: str, ref: str, base: Path) -> Optional[str]:
     """把该库语义库 ref 物化到缓存目录，返回项目目录；失败 → None。
 
     顺序：进程缓存 → 磁盘快路径（合法项目 + marker 匹配，跨进程零网络）→ 本地 git
     archive（dev / 离线 / 已在服务的版本）→ 远程浅克隆（src="" 且仓库有 origin）。
     未命中 override（spec None）由调用方判断，本函数不读 env。
+
+    并发（2026-09-24 审计修正）：慢路径按 `(db, source, ref)` 加锁 —— 旧实现里
+    `rmtree` + archive + move 全在锁外，同 key 并发（API 预检线程 + worker 子进程）
+    会把一个半成品目录当成物化好的项目用。跨进程的那一半由「暂存目录 + 原子换入」
+    （`_install_staged`）兜住：内容只在完整之后才出现在 dest_root 上。
     """
     source = Path(src).resolve() if src else base.resolve()
     key = (db_name, str(source), ref)
     with _semantic_override_lock:
         if key in _semantic_override_cache:
             return _semantic_override_cache[key]
-    dest_root = _cache_dir(db_name, ref)
-    marker_key = f"{src}|{ref}"
-    # 快路径：目录已物化本 key 的合法项目 → 复用（API 预检后 worker 子进程零网络）
-    if _wren_markers_hit(dest_root) and _marker_matches(dest_root, marker_key):
-        with _semantic_override_lock:
-            _semantic_override_cache[key] = str(dest_root)
-        return str(dest_root)
-    if dest_root.exists():
-        shutil.rmtree(dest_root, ignore_errors=True)
-    materialized = _git_archive_materialize(source, ref, dest_root)
-    result: Optional[str] = None
+    dest_root = _cache_dir(db_name, str(source), ref)
+    marker_key = f"{source}|{ref}"
+    ready = _reuse_if_ready(dest_root, marker_key)
+    if ready is None:
+        with _materialize_key_lock(key):
+            ready = _reuse_if_ready(dest_root, marker_key)  # 等锁期间别人可能做好了
+            if ready is None:
+                ready = _materialize_now(db_name, src, ref, source, dest_root, marker_key, base)
+    with _semantic_override_lock:
+        _semantic_override_cache[key] = ready
+    return ready
+
+
+def _materialize_now(
+    db_name: str, src: str, ref: str, source: Path, dest_root: Path, marker_key: str, base: Path,
+) -> Optional[str]:
+    """慢路径实体（调用方已持有该 key 的锁）：物化到暂存目录 → 换入 → 返回项目目录。"""
+    stage = _new_stage_dir(dest_root)
+    rel = "."
+    materialized = _git_archive_materialize(source, ref, stage)
     if materialized is not None and _wren_markers_hit(materialized):
-        result = str(materialized)
-        _write_marker(materialized, marker_key)
+        project = materialized
+        try:
+            # 项目目录相对缓存根的位置（仓库子目录型来源会落在 stage 的下级）——
+            # 写进 marker 第二行，快路径靠它把项目目录找回来
+            rel = str(materialized.relative_to(stage)).replace("\\", "/")
+        except ValueError:  # pragma: no cover  —— 不该发生（archive 解到 stage 里）
+            rel = "."
+        _write_marker(stage, marker_key, rel)
         _logger.info(
             "[semantic_db] 语义库 A/B：db=%s ref=%s → %s（markers=%s）",
-            db_name, ref, materialized,
-            [m for m in _WREN_MARKERS if (materialized / m).exists()],
+            db_name, ref, project,
+            [m for m in _WREN_MARKERS if (project / m).exists()],
         )
     elif not src:
         # 本地取不到该 ref（刚推 tag / 浅克隆无历史）→ 直取 origin，不再静默退化
-        if _materialize_from_origin(source, ref, dest_root):
-            result = str(dest_root)
-            _write_marker(dest_root, marker_key)
+        if _materialize_from_origin(source, ref, stage):
+            rel = "."
+            materialized = stage
+            _write_marker(stage, marker_key, rel)
             _logger.info("[semantic_db] 语义库 A/B（远程）：db=%s ref=%s → %s", db_name, ref, dest_root)
         else:
+            shutil.rmtree(stage, ignore_errors=True)
             _logger.warning(
                 "[semantic_db] 语义库版本物化失败 db=%s ref=%s（本地无该 ref 且从 origin 取不到："
                 "tag 不存在/未推送/网络不可达/未绑 git）→ 回退 %s",
                 db_name, ref, base,
             )
+            return None
     else:
+        shutil.rmtree(stage, ignore_errors=True)
         _logger.warning(
             "[semantic_db] 语义库版本物化失败/无项目标记 db=%s ref=%s → 回退 %s",
             db_name, ref, base,
         )
-    with _semantic_override_lock:
-        _semantic_override_cache[key] = result
-    return result
+        return None
+    _install_staged(stage, dest_root)
+    return str(dest_root if rel in ("", ".") else dest_root / rel)
 
 
 def semantic_project_path(db_name: str, base: Path) -> Optional[str]:
@@ -291,6 +477,19 @@ def semantic_project_path(db_name: str, base: Path) -> Optional[str]:
         return None
     src, ref = spec
     return _materialize_semantic(db_name, src, ref, base)
+
+
+def reset_semantic_override_cache() -> int:
+    """清「语义库版本物化」缓存（由 `invalidate_db_discovery_caches()` 统一调用）。返回清掉的条数。
+
+    缓存值是物化目录的绝对路径（`<offline_experiment>/semantic_refs/...`）。语义库
+    版本/环境变量变了必须重算 —— 否则 A/B 实验拿到的仍是上一次物化出来的那份。
+    只清内存里的映射，**不删磁盘目录**：重算时还能走 marker 快路径。
+    """
+    with _semantic_override_lock:
+        n = len(_semantic_override_cache)
+        _semantic_override_cache.clear()
+    return n
 
 
 def materialize_semantic_ref(db_name: str, ref: str) -> Optional[str]:
@@ -346,6 +545,39 @@ def _load_db_name_norm() -> tuple[dict[str, str], dict[str, str]]:
     with _db_name_norm_lock:
         _db_name_norm_cache = result
     return result
+
+
+def reset_db_name_norm_cache() -> None:
+    """清 db_name 归一化缓存。
+
+    不清的后果**不是显示问题**：新建模的库名归一化失败 → `is_modeled()`
+    判 False → 该库的查询静默从语义层掉到 dbmcp 直连（口径/物理 SQL 全变），
+    而且不报错。本缓存原先**没有任何失效入口**（P1-11 补上），
+    现在由 `invalidate_db_discovery_caches()` 统一调用 —— **别只调 detector 的那个**。
+    """
+    global _db_name_norm_cache
+    with _db_name_norm_lock:
+        _db_name_norm_cache = None
+
+
+def invalidate_db_discovery_caches() -> None:
+    """db_config / 语义库发生**写变更**后统一失效「发现类」缓存 —— 唯一推荐入口。
+
+    三个缓存必须一起动，漏一个就是静默错：
+      - `SemanticDbDetector` 缓存：已建模库集合 / 项目路径 → 决定工具可见性与 wren 定位；
+      - `_db_name_norm_cache`：库名归一化 → 漏则新建模的库被判"未建模"，静默掉到 dbmcp 直连；
+      - `_semantic_override_cache`：语义库版本物化目录 → 漏则 A/B 跑的是旧版本那份。
+
+    历史：这三个原先是「切工作区时清一遍」（`workspace_manager/cache_reset.py`，
+    2026-09-25 随多工作区机件删除）。工作区路径已钉死、不再有切换，缓存只会因为
+    **db_config / 语义库被改写**而失效 —— 所以改挂到这里，并由
+    `api/db_config.py`（增删改库 / 手动对账）、`api/wren_semantic.py`（语义库变更）
+    在写路径上调用。调用点极少，改动时请一并核对：
+    `grep -rn invalidate_db_discovery_caches src/`。
+    """
+    get_detector().invalidate()
+    reset_db_name_norm_cache()
+    reset_semantic_override_cache()
 
 
 def normalize_db_name(db_name: str) -> str:

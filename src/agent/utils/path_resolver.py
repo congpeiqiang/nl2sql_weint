@@ -1,7 +1,7 @@
 import asyncio
 import concurrent.futures
 import json
-import logging, base64, os, re
+import logging, base64, os, re, threading, time
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,56 @@ _log = logging.getLogger(__name__)
 def _get_workspace_dir() -> Path:
     from agent.workspace_manager import get_workspace_manager
     return get_workspace_manager().active_workspace
+
+
+def _reserve_report_file(report_dir: Path, base_name: str, ext: str) -> tuple[str, Path]:
+    """在 report 目录里**原子占位**一个唯一文件名，返回 (文件名, 路径)。
+
+    P1-3：`report/` 是**全站共享目录**，而图表基名来自图表标题（"月度销售趋势"），
+    天然在不同用户/会话间重复；原先 `{基名}_{秒级时间戳}` 在同秒必然同名 →
+    后落盘的人静默覆盖前一个人的图（报告里引用的还是旧文件名，于是别人的那份被替换）。
+    这里加 4 位随机后缀，并用 `O_EXCL` 独占创建消除 check-then-act 竞态。
+
+    先占位再写入：本函数只在内容已解析成功后调用（调用方随后立即 write_text），
+    失败时残留 0 字节文件，比覆盖他人文件轻得多。
+    """
+    import uuid
+    from datetime import datetime
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for _ in range(50):
+        fname = f"{base_name}_{ts}_{uuid.uuid4().hex[:4]}{ext}"
+        dest = report_dir / fname
+        try:
+            fd = os.open(str(dest), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return fname, dest
+    raise RuntimeError(f"无法在 {report_dir} 生成唯一文件名: {base_name}{ext}")
+
+
+def _record_chart_owner(fname: str) -> None:
+    """把刚落盘的图表文件登记到当前用户（P1-3）。
+
+    身份取自 `configurable`——外部请求的 user_id 已被 LangfuseMetadataMiddleware
+    钳制为登录身份（客户端伪造的会被覆盖），所以这里读到的值可信；内部调用/dev
+    旁路没有 user_id，直接跳过（文件保持"无记录"→ 走 `can_read_report` 的放行口径）。
+
+    best-effort：失败只记日志，绝不影响图表返回给模型。
+    """
+    if not fname or _lg_get_config is None:
+        return
+    try:
+        cfg = _lg_get_config().get("configurable", {}) or {}
+        uid = str(cfg.get("user_id") or "")
+        if not uid:
+            return
+        from agent.auth.grants import record_report_owner
+
+        record_report_owner(fname, uid, str(cfg.get("thread_id") or ""))
+    except Exception:  # noqa: BLE001 账本问题不该影响出图
+        _log.debug("[ECHARTS] 图表归属登记失败: %s", fname, exc_info=True)
 
 
 _CHART_ERROR_MSG = "图表生成失败，请检查数据格式。"
@@ -151,11 +201,11 @@ def _parse_echarts_option(result: Any) -> str | None:
 def _save_echarts_html_to_workspace(html: str, option_json: str) -> str:
     """将交互式 HTML 图表保存到工作区 report 目录。
 
-    返回保存后的文件名（如 ``chart_20260805_120000.html``）；失败返回空字符串。
-    文件名优先从 option 的 title.text 提取，否则用时间戳。
+    返回保存后的文件名（如 ``chart_20260805_120000_a3f1.html``）；失败返回空字符串。
+    文件名 = 基名（优先 option 的 title.text）+ 时间戳 + 随机后缀（见
+    `_reserve_report_file`：共享目录下同名必须各存各的，不能互相覆盖）。
     """
     import re as _re
-    from datetime import datetime
     try:
         report_dir = _get_workspace_dir() / "report"
         report_dir.mkdir(parents=True, exist_ok=True)
@@ -178,10 +228,9 @@ def _save_echarts_html_to_workspace(html: str, option_json: str) -> str:
         except Exception:
             pass
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"{base_name}_{ts}.html"
-        dest = report_dir / fname
+        fname, dest = _reserve_report_file(report_dir, base_name, ".html")
         dest.write_text(html, encoding="utf-8")
+        _record_chart_owner(fname)
         _log.info(f"[ECHARTS] 交互式 HTML 图表已保存到工作区: {dest}")
         return fname
     except Exception as e:
@@ -260,6 +309,8 @@ def _echarts_option_to_data_url(option_json: str) -> str | None:
     `{ts}`，拼出来的名字差 17 秒（实测 `…_20260914_165606.html` 被写成
     `…_20260914_165623.html`）→ 前端"图表文件"链接全 404（只有报告 md 能打开）。
     走 VFS 路径，VfsPathResolverMiddleware 会改写为真实磁盘路径（与报告一致）。
+    2026-09-23（P1-3）：名字里又多了 4 位随机后缀，模型更不可能猜对 —— 所以下面
+    那句"照抄此路径"是硬要求，不是建议。
     """
     import base64
     html = _build_echarts_html(option_json)
@@ -318,6 +369,8 @@ def _move_echarts_image_to_workspace(src_path: str) -> str:
         # 保留原文件名（uuid.png），避免重名冲突
         dest = report_dir / src.name
         shutil.copy2(src, dest)
+        # P1-3：登记归属（uuid 名不参与覆盖问题，但「谁能读这份图」同样要记账）
+        _record_chart_owner(dest.name)
         _log.info(f"[ECHARTS] 图片已复制到工作区: {dest}")
         return str(dest)
     except Exception as e:
@@ -338,11 +391,11 @@ def _svg_to_data_url(svg: str) -> str:
 def _save_svg_to_workspace(svg: str) -> str:
     """将 ECharts 生成的 SVG 字符串自动保存到工作区 report 目录。
 
-    返回保存后的文件名（如 ``echarts_20260803_091223.svg``）；若保存失败返回空字符串。
+    返回保存后的文件名（如 ``echarts_20260803_091223_a3f1.svg``）；失败返回空字符串。
     这样每次生成 SVG 图表都会自动落盘，报告可直接引用，无需手动用 write_file 保存。
+    命名规则同 HTML 路径（时间戳 + 随机后缀，共享目录防覆盖）。
     """
     import re as _re
-    from datetime import datetime
     try:
         svg = svg.strip()
         if not svg:
@@ -367,10 +420,9 @@ def _save_svg_to_workspace(svg: str) -> str:
             if t:
                 base_name = t
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"{base_name}_{ts}.svg"
-        dest = report_dir / fname
+        fname, dest = _reserve_report_file(report_dir, base_name, ".svg")
         dest.write_text(clean_svg, encoding="utf-8")
+        _record_chart_owner(fname)
         _log.info(f"[ECHARTS] SVG 已自动保存到工作区: {dest}")
         return fname
     except Exception as e:
@@ -681,6 +733,14 @@ _TOOL_TIMEOUTS = {
 
 _TOOL_TIMEOUT_MSG = "工具调用超时（{timeout}s）。可能原因：SQL 复杂度过高 / 数据量过大 / 数据库无响应。请耐心等待"
 
+# 并发槽被占满（而不是自己跑超时）时返回的**另一条**消息：必须与超时区分开 ——
+# 超时说明这次调用真跑了，繁忙说明**一次都没跑**，让 LLM 换到"用已有数据继续"的路径上，
+# 而不是傻等或重试同一条 SQL。
+_TOOL_BUSY_MSG = (
+    "⚠️ 工具执行繁忙：并发执行槽已被占满（存在长时间未返回的调用），本次调用**未执行**。"
+    "请稍后重试，或先基于已有数据继续分析。"
+)
+
 
 def _tool_timeout_for(name: str) -> int | None:
     """按工具名取超时秒数；None/0 表示不超时。"""
@@ -693,17 +753,140 @@ def _tool_timeout_for(name: str) -> int | None:
     return t if t and t > 0 else None
 
 
-# 同步 _run 超时用的线程池（超时后线程仍在后台跑，但不阻塞返回）
-_TOOL_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+# ── 同步工具的线程池：满载快速失败 + 卡死回收（P1-10）───────────────
+#
+# 为什么不是裸 `ThreadPoolExecutor`：它的工作队列**无界**。`max_workers` 个槽位一旦
+# 被「永不返回」的 MCP 调用占满，后续 `submit` 只会安静排队，而调用方仍要等到
+# 自己的 timeout（语义层数据工具 300s）才拿到超时消息 —— 用户看到的是每个工具都
+# 「假超时」（明明一秒都没跑），而那 4 个槽位再也回不来。
+#
+# 本实现做三件事：
+#   1. **自己记在用量**（`_inuse`）并**在取槽阶段**判满 —— 满就快速返回「繁忙」，
+#      不排队、不假超时。`_inuse` 只在工作函数真正返回时才减一，所以「超时但还在跑」
+#      的任务**仍然占着槽**（这才如实反映"没有可用并发"）。
+#   2. 取槽允许等一小会儿（默认 5s）：正常的短工具调用挤在一起时排队几秒是合理的，
+#      不该被判繁忙；只有**卡死**的池子才会持续拒绝。
+#   3. 满载持续超过回收阈值（默认 300s）就**换一个新池**。Python 杀不掉线程
+#      （`future.cancel()` 只对**尚未开始**的任务有效），所以「真取消」在同步路径上
+#      做不到；能做的是把被占死的槽位连同旧池一起弃用，让后续调用立刻恢复可用。
+#      旧线程随各自那次调用结束自然退出（泄漏上限 = 每次回收 ≤ max_workers 条）。
+class _SyncToolPool:
+    def __init__(
+        self,
+        max_workers: int = 4,
+        wait_seconds: float = 5.0,
+        recycle_after: float = 300.0,
+        name: str = "tool-timeout",
+    ) -> None:
+        self._max = max_workers
+        self._wait = wait_seconds
+        self._recycle_after = recycle_after
+        self._name = name
+        self._lock = threading.Lock()
+        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._inuse = 0
+        self._full_since = 0.0
+        self.recycles = 0
 
+    # ── 内部（调用方必须持锁）──
 
-def _get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
-    global _TOOL_EXECUTOR
-    if _TOOL_EXECUTOR is None:
-        _TOOL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="tool-timeout"
+    def _executor_locked(self) -> concurrent.futures.ThreadPoolExecutor:
+        if self._executor is None:
+            self._executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._max, thread_name_prefix=self._name
+            )
+        return self._executor
+
+    def _take_locked(self) -> bool:
+        if self._inuse < self._max:
+            self._inuse += 1
+            self._full_since = 0.0
+            return True
+        if not self._full_since:
+            self._full_since = time.monotonic()
+        return False
+
+    def _recycle_locked(self) -> concurrent.futures.ThreadPoolExecutor | None:
+        """满载太久 → 摘掉旧池并清零占用，返回旧池（由调用方在锁外 shutdown）。"""
+        if not self._full_since or time.monotonic() - self._full_since < self._recycle_after:
+            return None
+        old, self._executor = self._executor, None
+        self._inuse = 0
+        self._full_since = 0.0
+        self.recycles += 1
+        _log.error(
+            "[TOOL POOL] 满载超过 %.0fs，回收换新池（第 %d 次）；旧槽位上的调用仍在后台，"
+            "其返回值会被丢弃（同步路径无法取消线程）",
+            self._recycle_after, self.recycles,
         )
-    return _TOOL_EXECUTOR
+        return old
+
+    def _release(self) -> None:
+        with self._lock:
+            if self._inuse > 0:
+                self._inuse -= 1
+
+    def _call(self, fn, args, kwargs):
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            self._release()  # 无论正常/异常/超时后晚到，槽位都在**真正结束**时归还
+
+    # ── 对外 ──
+
+    def _acquire(self) -> bool:
+        """取槽：先自愈（可能换池），再等一小会儿；返回 False = 该报繁忙。"""
+        deadline = time.monotonic() + self._wait
+        while True:
+            with self._lock:
+                old = self._recycle_locked()
+                if self._take_locked():
+                    taken = True
+                else:
+                    taken = False
+            if old is not None:
+                try:
+                    old.shutdown(wait=False)  # 锁外调用：不等卡住的任务
+                except Exception:  # noqa: BLE001
+                    pass
+            if taken:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)  # 短轮询足够：这里等的是「秒级」级别的槽位释放
+
+    def run(self, fn, args, kwargs, timeout: float) -> tuple[str, Any]:
+        """在池里执行 fn。返回 (status, result)：'ok' | 'busy' | 'timeout'。"""
+        if not self._acquire():
+            return "busy", None
+        with self._lock:  # 与回收互斥：不让 submit 落到正在 shutdown 的池上
+            executor = self._executor_locked()
+            try:
+                future = executor.submit(self._call, fn, args, kwargs)
+            except RuntimeError:  # 保险：池已停
+                self._executor = None
+                self._inuse = max(0, self._inuse - 1)
+                return "busy", None
+        try:
+            return "ok", future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # 槽位**不归还**：线程还在跑，等它自己结束（见 _call 的 finally）
+            return "timeout", None
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {"inuse": self._inuse, "max": self._max, "recycles": self.recycles}
+
+
+# 进程级单例（测试可整体替换以缩小规模）
+_TOOL_POOL: _SyncToolPool | None = None
+
+
+def _get_tool_pool() -> _SyncToolPool:
+    global _TOOL_POOL
+    if _TOOL_POOL is None:
+        _TOOL_POOL = _SyncToolPool()
+    return _TOOL_POOL
 
 
 def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
@@ -874,10 +1057,16 @@ def wrap_tool(tool: Any) -> Any:
             timeout = _tool_timeout_for(tool.name)
             try:
                 if timeout is not None:
-                    future = _get_tool_executor().submit(original_run, *new_args, **new_kwargs)
-                    try:
-                        result = future.result(timeout=timeout)
-                    except concurrent.futures.TimeoutError:
+                    status, result = _get_tool_pool().run(
+                        original_run, new_args, new_kwargs, timeout
+                    )
+                    if status == "busy":
+                        _log.warning(
+                            "[TOOL BUSY] %s 未执行：并发槽已满（%s），返回繁忙消息",
+                            tool.name, _get_tool_pool().stats(),
+                        )
+                        return (_TOOL_BUSY_MSG, None)
+                    if status == "timeout":
                         _log.warning(
                             "[TOOL TIMEOUT] %s 超过 %ds（同步路径），返回超时消息",
                             tool.name, timeout,

@@ -152,13 +152,19 @@ def _split_messages(messages: list[dict]) -> tuple[list[dict], list[dict]]:
     return to_summarize, preserved
 
 
-async def _generate_summary(messages: list[dict]) -> str:
-    """调用 LLM 生成对话摘要。"""
+async def _generate_summary(messages: list[dict], user_id: str = "") -> str:
+    """调用 LLM 生成对话摘要；用**该账号自己的**模型配置。
+
+    `user_id`（2026-09-28 隔离）：以前 `create_model()` 不带 user_id ⇒ 读全局/共享
+    store，新账号没配模型时这里会拿别账号的 key 总结自己的会话（额度记在别人名下）。
+    带身份时必须传真实 user_id；该账号没配模型 → `create_model` 返回 None →
+    走既有 `_fallback_summary` 截断降级（不报错、不阻塞压缩）。
+    """
     try:
         # 延迟导入，避免循环依赖
         from agent.llms.model import create_model
 
-        model = create_model(enable_thinking=False)
+        model = create_model(enable_thinking=False, user_id=user_id or None)
         if model is None:
             _logger.warning("[thread_compact] 无可用模型，使用简单截断摘要")
             return _fallback_summary(messages)
@@ -247,9 +253,10 @@ async def compact_thread(request: Request):
     if not _UUID_RE.match(thread_id):
         return Response("无效的会话 ID", status_code=400, media_type="text/plain")
 
-    # P2：校验会话归属
+    # P2：校验会话归属（返回值即当前用户，下面按账号取摘要模型用）
     from api._common import require_thread
-    require_thread(request, thread_id)
+    user = require_thread(request, thread_id)
+    user_id = str(user.get("user_id") or "")
 
     base = _base_url()
     timeout = httpx.Timeout(180.0, connect=10.0)
@@ -307,7 +314,7 @@ async def compact_thread(request: Request):
             })
 
         # 3. 生成摘要
-        summary = await _generate_summary(to_summarize)
+        summary = await _generate_summary(to_summarize, user_id)
         _logger.info(
             "[thread_compact] 压缩完成: 总结 %d 条消息(~%d tokens) → %d chars 摘要, "
             "保留 %d 条(~%d tokens)，线程 wire 总量 ~%d → ~%d tokens",

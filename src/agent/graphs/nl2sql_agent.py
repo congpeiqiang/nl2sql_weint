@@ -17,6 +17,7 @@ from agent.llms.model import deepseek_model
 from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
 from agent.middlewares.quota_error import QuotaErrorMiddleware
 from agent.middlewares.model_timeout import ModelTimeoutMiddleware
+from agent.middlewares.model_required import ModelRequiredMiddleware
 from agent.middlewares.sql_approval import build_sql_approval_middleware
 from agent.middlewares.query_gate import QueryGateMiddleware
 from agent.middlewares.tool_filter import ToolFilterMiddleware
@@ -26,6 +27,7 @@ from agent.middlewares.message_slimmer import MessageSlimmerMiddleware
 from agent.middlewares.query_result_offload import QueryResultOffloadMiddleware
 from agent.middlewares.write_todos import WriteTodosProtocolMiddleware
 from agent.middlewares.progress_boundary import ProgressBoundaryMiddleware
+from agent.middlewares.caliber_gate import CaliberGateMiddleware
 from agent.middlewares.dangling_tool_calls import DanglingToolCallsMiddleware
 from agent.tools.mcp_tool import sub_tools as mcp_tools
 from agent.subagents.track_progress import ProgressTrackerMiddleware
@@ -228,6 +230,14 @@ _middleware = [
     ),
     skills_middleware,
     ProgressTrackerMiddleware(),
+    # 业务口径逐字证据核验（终态答复无 tool_calls 时触发；不合规 → jump_to="model"
+    # 打回重写 ≤2 次）。位置讲究：`factory.py:1738` 把链入口接在 after_model 列表**末位**、
+    # 再按 `range(len-1, 0, -1)` 逐个往前接 ⇒ **index 越大越先跑**。故放在 ProgressBoundary
+    # **之前**（index 更小）＝跑得更晚 ⇒ 先让 ProgressBoundary 推进完 todos，再打回；
+    # 反过来写会让打回那轮跳过 todo 推进。
+    # 强依赖类方法上的 @hook_config(can_jump_to=["model"])（见其模块 docstring：我们不是
+    # loop_exit_node，漏了这行 jump_to 会被静默丢弃、注入的消息变成末条污染尾部）。
+    CaliberGateMiddleware(),
     # 层2 监督机：after_model 确定性推进 write_todos（模型中途不自发更新也保证
     # 每阶段边界推进；本轮模型自己已写 write_todos 时自动跳过，不打架）。
     ProgressBoundaryMiddleware(),
@@ -277,6 +287,9 @@ _middleware.append(WriteTodosProtocolMiddleware())
 _middleware.insert(0, QuotaErrorMiddleware())
 # 紧邻：LLM 调用超时 → 友好中文提示（不抛异常，agent 正常结束，前端可见）
 _middleware.insert(0, ModelTimeoutMiddleware())
+# 再外层：账号级模型门禁（2026-09-28）—— 账号没配模型时明确报错，**不回落**模块级
+# deepseek_model（那读的是全局/共享 store = 别账号的 key）。命中时不调用 handler。
+_middleware.insert(0, ModelRequiredMiddleware())
 
 agent = create_deep_agent(
     model=deepseek_model,

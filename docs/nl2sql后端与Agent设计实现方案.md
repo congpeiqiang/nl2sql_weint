@@ -184,13 +184,13 @@ flowchart TB
 - **全局 lifespan**：仅停机 flush Langfuse 上送队列。
 - **共享工具**：`src/api/_common.py` 的 `parse_body()` / `json_response()`；在各 handler 内联解析 JSON，**不使用**包裹整个 app 的 JSON 中间件（会破坏 SSE 路由）。
 
-**19 个路由模块（按业务域）** 
+**路由模块（按业务域）**（下表为撰写时口径；`workspace.py` 已于 2026-09-25 删除，其余随 P1/P2 系列有增补）
 
 | 业务域 | 模块 | 前缀 / 职责 |
 |---|---|---|
 | 配置 | `db_config.py` | `/api/db-configs`、`/healthz`：数据库连接 CRUD + 连通性测试 + 脱敏列表 |
 | 配置 | `model_config.py` | `/api/model-configs`：LLM provider CRUD / 激活 / 探活 / 能力探测 |
-| 配置 | `workspace.py` | `/api/workspaces`：工作区注册 / 激活 / 注销 / 彻底删除 |
+| ~~配置~~ | ~~`workspace.py`~~ | ~~`/api/workspaces`：工作区注册 / 激活 / 注销 / 彻底删除~~ —— **2026-09-25 已删除**（工作区改为单一、路径钉死 `<AGENT_DATA_ROOT>/workspace`，见 ARCHITECTURE §3.7） |
 | 配置 | `eval_flags.py` | `/api/eval-flags`：在线评估开关（override / env / 代码默认值三层） |
 | 会话 | `message_feedback.py` | `/api/threads/{tid}/…feedback`、`/api/feedback/export`：点赞/点踩、撤销、回显、导出 |
 | 会话 | `auto_title.py` | `/api/auto-title`：首条问题 → ≤20 字会话标题（无状态，不读 checkpointer） |
@@ -342,7 +342,8 @@ client.runs.create(thread_id=新线程,
 
 配套 API：`task_cancel.py`（取消 + 回写终态 + 保活 watcher）、`sql_approval.py`（审批恢复，当前休眠）。
 
-> 死代码提示（**不要画进架构图**）：`subagents/loader.py`、`configs/procurement_*.yaml`、`prompt_bak/` 均无调用方。
+> 死代码提示（**不要画进架构图**）：`subagents/loader.py`、`configs/procurement_*.yaml` 均无调用方。
+> （`prompt_bak/` 2026-09-25 已删除；同类死副本 `skills/`、`shared/skills_bak/`、`workspace-temp/` 一并清掉。）
 
 #### 3.3.7 提示词层
 
@@ -643,9 +644,9 @@ sequenceDiagram
 | 统一事件日志 | SQLite WAL | `<shared>/trace/traces.sqlite` | `TraceRecorderMiddleware` | `api/trace_routes.py`、谱系引擎 |
 | 会话全文索引 | SQLite FTS5 | `<shared>/checkpoint/fts.sqlite` | `api/thread_search.py` | 同上 |
 | 消息反馈 + 标注状态机 | SQLite WAL | `<shared>/feedback/message_feedback.db` | `api/message_feedback.py`、`feedback_annotation.py` | `feedback_stats.py`、导出端点 |
-| 待评队列（LLM-judge） | SQLite WAL | `{data_root}/eval_queue.sqlite` | `evaluators.schedule_judge` | 单例守护 worker |
-| trace 归并绑定 | SQLite WAL | `{data_root}/trace_bind.sqlite` | `langfuse_client` 登记闸门 | 内存 miss 兜底并回填 |
-| 工作区注册表 | JSON（原子写） | `{data_root}/workspaces.json` | `api/workspace.py` | 路径解析（每次） |
+| 待评队列（LLM-judge） | SQLite WAL | `{data_root}/eval_queue/eval_queue.sqlite` | `evaluators.schedule_judge` | 单例守护 worker |
+| trace 归并绑定 | SQLite WAL | `{data_root}/trace_bind/trace_bind.sqlite` | `langfuse_client` 登记闸门 | 内存 miss 兜底并回填 |
+| 子任务终态待补写登记表 | SQLite WAL | `{data_root}/pending_terminal/pending_terminal.sqlite` | `sync_subagent_todos` 放手时登记（P2-4） | 补写器 `pending_terminal.start_reaper` |
 | 库配置 | JSON + 密码加密 | `{active_workspace}/db_config.json` | `api/db_config.py` | `mcp_tool`、dbmcp runner、`wren_semantic` |
 | 模型配置 | JSON + key 加密 | `<shared>/model_config.json`（工作区可覆盖） | `api/model_config.py` | `llms/model.py` |
 | 评估开关覆盖层 | JSON（mtime 失效缓存） | `{data_root}/shared/eval_flags.json` | `api/eval_flags.py` | 全部评估器 |

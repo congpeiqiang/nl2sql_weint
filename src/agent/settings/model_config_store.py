@@ -6,6 +6,9 @@
 设计（对齐 `db_config_store.py` 范式）：
 - 单 JSON 文件（默认 `src/agent/shared/model_config.json`，已 gitignore，
   可被 .env 的 `MODEL_CONFIG_PATH` 覆盖）。
+- **按账号隔离**：API 与带登录身份的 run 一律走 `get_user_store(user_id)` ⇒
+  `<AGENT_DATA_ROOT>/users/<uid>/model_config.json`。**新账号从空开始、不继承共享配置**
+  （2026-09-28 变更，见 `get_user_store` docstring）。
 - api_key 用 AES-256-GCM 加密落盘（密钥取自 `.env` 的 `MODEL_CONFIG_SECRET`，
   缺失时依次回退 `DB_CONFIG_SECRET`、开发默认值并告警）。
   加密值形如 `enc:<base64(nonce+ct+tag)>`。
@@ -379,47 +382,42 @@ def _user_config_path(user_id: str) -> Path:
     return base / "model_config.json"
 
 
-def _shared_config_path() -> Optional[Path]:
-    """共享配置文件路径（仅用于首次迁移拷贝）。"""
-    try:
-        from agent.workspace_manager import get_workspace_manager
-        return get_workspace_manager().shared_model_config_path
-    except Exception:
-        p = _DEFAULT_PATH
-        return Path(p) if p else None
-
-
 def get_user_store(user_id: str) -> ModelConfigStore:
     """获取用户专属的模型配置 store（进程级缓存）。
 
-    首次调用时，若用户文件不存在但共享文件有 providers，自动拷贝作为初始配置。
+    **不继承任何共享配置**（2026-09-28 变更）：该账号的文件不存在时，拿到的就是一个
+    **空 store**（`ModelConfigStore` 对不存在的路径即空配置，**不落盘空文件**）——
+    效果与「用户自己把 provider 删光」完全一致。新账号必须自己到「设置 → 模型」
+    新增接入点才能问数。
+
+    变更前的行为是：首次调用且用户文件不存在/0 字节时，把共享 `model_config.json`
+    **整份拷贝**成该用户的初始配置（日志「首次初始化：从共享配置拷贝 N 个 provider」）。
+    那会让新建账号（**含新建的管理员账号**）直接拿到别账号的 provider 与 api_key
+    —— 界面显示 `****` 但服务端能用，额度记在别人名下。用户 2026-09-28 明确要求取消。
+
+    ⚠️ **不回溯清理**已有账号的存量副本：那是历史播种出来的快照，删掉会把"本来能用"
+    的账号变成"没有模型"。
+
+    判断「某账号当前有没有可用模型」用 `agent.llms.model.has_usable_model(user_id)`
+    （与 `create_model` 同一条解析链），**不要**在别处另写一套条件。
+
+    身份不是**真实用户**时（`internal` / `dev` 哨兵，见 `auth/ownership.NON_USER_IDENTITIES`）
+    也回退全局 store —— `NL2SQL_AUTH_DISABLED=1` 的本地开发把 `configurable.user_id`
+    写成 `"dev"`（AuthMiddleware dev 旁路 → langfuse_metadata 覆盖式写入），若按账号读，
+    单机开发会变成"一个模型都没有"（界面空、发送被禁、run 被门禁拒）。离线批处理同理。
     """
     if not user_id:
-        return get_store()  # 兜底：无用户时回退全局
+        return get_store()  # 兜底：无登录身份时回退全局（AUTH_DISABLED / 离线批处理等）
+    from agent.auth.ownership import is_real_owner
+
+    if not is_real_owner(user_id):
+        return get_store()
+
 
     if user_id in _user_stores:
         return _user_stores[user_id]
 
     user_path = _user_config_path(user_id)
-
-    # 首次初始化：从共享配置拷贝（若共享有内容且用户文件为空）
-    if not user_path.exists() or user_path.stat().st_size == 0:
-        shared = _shared_config_path()
-        if shared and shared.exists():
-            try:
-                data = json.loads(shared.read_text(encoding="utf-8"))
-                if data.get("providers"):
-                    user_path.write_text(
-                        json.dumps(data, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
-                    _logger.info(
-                        "[model_config] 用户 %s 首次初始化：从共享配置拷贝 %d 个 provider",
-                        user_id, len(data["providers"]),
-                    )
-            except Exception:  # noqa: BLE001
-                pass
-
     store = ModelConfigStore(path=str(user_path))
     try:
         store._ensure_consistent()
@@ -429,6 +427,18 @@ def get_user_store(user_id: str) -> ModelConfigStore:
     _user_stores[user_id] = store
     _logger.info("[model_config] 用户 %s store 加载: %s", user_id, user_path)
     return store
+
+
+def reset_user_stores() -> int:
+    """清空进程级用户 store 缓存，返回被清掉的数量。
+
+    **只给验收脚本用**（模拟"进程刚起来/用户文件刚变化"）：生产代码不要调它
+    ——store 对象本身是无状态的文件读写器，清缓存不会丢数据，但会让下一次调用
+    重新做密钥一致性检查。
+    """
+    n = len(_user_stores)
+    _user_stores.clear()
+    return n
 
 
 if __name__ == "__main__":

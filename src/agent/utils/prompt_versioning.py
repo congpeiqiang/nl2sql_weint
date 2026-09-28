@@ -132,6 +132,19 @@ def _load_manifest(dest: Path) -> Optional[dict]:
         return None
 
 
+def reset_prompt_cache() -> int:
+    """清 prompt 版本物化缓存（切工作区用，P1-11）。返回清掉的条数。
+
+    缓存值同样是**工作区内的绝对路径**（`<offline_experiment>/prompt_refs/...`）。
+    ⚠️ 与其它缓存一样是 best-effort：正在并发物化的 run 可能在清空之后又写回一条
+    旧工作区路径（最坏=退回本次修复前的行为），不做全局停顿。
+    """
+    with _prompt_lock:
+        n = len(_prompt_cache)
+        _prompt_cache.clear()
+    return n
+
+
 def materialize_prompt_ref(label: str) -> Optional[Path]:
     """按 label 解析各 prompt 版本 + 正文并落盘，返回快照目录；失败 → None。
 

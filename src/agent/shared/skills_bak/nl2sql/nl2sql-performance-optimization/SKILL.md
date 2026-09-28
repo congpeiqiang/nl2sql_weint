@@ -24,7 +24,7 @@ SQL-of-Thought 流水线性能优化环节。在 SQL 生成成功、dry_run 验�
 
 - 优先从对话上下文中获取 sql-generation 输出的 SQL
 - 若上下文中找不到，则 read_file `/workspace/nl2sql_process_data/{thread_id}/nl2sql-sql-generation/sql.sql` 作为 fallback
-- 可选：从上下文或 read_file 获取 schema-linking 的 Schema（辅助判断索引/列）
+- 可选：从上下文或 read_file 获取理解建模（nl2sql-understand）产出的 Schema（辅助判断索引/列）
 
 ## 输出
 

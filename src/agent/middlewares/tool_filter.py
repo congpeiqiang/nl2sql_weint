@@ -11,6 +11,9 @@
 - dbmcp_* → 当前库**有**语义层工具时移除（语义层独占，见下），否则保留
 - 非 wrenai/dbmcp 的工具 → 保留（如图表工具等）
 
+未选库（db_name 为空）时（P1-2）：不再「原样返回全部工具」，改为**按调用者可见库
+裁剪 wrenai 工具**——不选库不能成为拿到所有库语义层工具的后门，见 `_filter_unselected`。
+
 语义层独占（2026-09-09）：
 已建模库上 dbmcp 直连不经过语义层、丢业务口径，此前靠 QueryGate 事后拦截
 （模型先试一次 → 收 status=error → 重读指引 → 重发语义层工具，白费一轮）。
@@ -61,6 +64,61 @@ def _is_dbmcp(name: str) -> bool:
 class ToolFilterMiddleware(AgentMiddleware):
     """按当前数据库名（configurable.db_name）过滤工具，只暴露当前库的 wrenai 工具。"""
 
+    def _allowed_wrenai_prefixes(self) -> set[str] | None:
+        """调用者可见库的 wrenai 工具前缀集合；None = 不启用这项过滤。
+
+        身份与授权口径统一走 `agent.auth.runtime`（P1-16 起 `query_gate` 也在用，
+        两处必须同口径，所以不再各写一份）：`resolve_caller` 返回 None = 内部调用 /
+        dev 旁路 / 读用户记录失败 → 不裁剪；返回 user = 真实身份，取可见库。
+        查不到账号时 `resolve_caller` 给的是 `is_admin=False` 的空权限 user →
+        可见库为空 → **fail-closed**（无权就什么语义层工具都不给）。
+        """
+        from agent.auth import runtime as _rt
+
+        user = _rt.resolve_caller("tool_filter")
+        if user is None:
+            return None  # 内部调用 / dev 旁路：保持原行为，不按用户裁剪
+        try:
+            from agent.auth.grants import visible_dbs
+            from agent.utils.semantic_db import wrenai_server_name
+
+            return {wrenai_server_name(d) + "_" for d in visible_dbs(user)}
+        except Exception:  # noqa: BLE001
+            # 读授权信息本身失败（sqlite / db_config IO）：fail-open，否则一次读故障
+            # 会让所有人都查不了数。失败会留 warning 日志。
+            _logger.warning("[ToolFilter] 读取授权失败，跳过按用户裁剪", exc_info=True)
+            return None
+
+    def _filter_unselected(self, request: ModelRequest[ContextT]) -> ModelRequest[ContextT]:
+        """未选库时的兜底裁剪。
+
+        `_filter_tools` 的 `if not db_name: return tools` 意味着「不选库 = 不裁剪 =
+        把**所有**库的 wrenai 工具都绑给模型」。正常用户不选库只是想闲聊，但越权者
+        只要**省略** db_name（前端 localStorage 未选过时本来就是这个状态），就能拿到
+        全部语义层工具 —— 这是 P1-2 库授权校验的一个绕过口，必须堵。
+
+        只在「有真实登录身份」时启用；内部调用与 dev 旁路保持原样（见
+        `_allowed_wrenai_prefixes`）。
+        """
+        allowed = self._allowed_wrenai_prefixes()
+        if allowed is None:
+            return request
+
+        tools = getattr(request, "tools", None) or []
+        kept = [
+            t
+            for t in tools
+            if not (getattr(t, "name", "") or "").startswith("wrenai_")
+            or (getattr(t, "name", "") or "").startswith(tuple(allowed))
+        ]
+        if len(kept) == len(tools):
+            return request
+        _logger.info(
+            "[ToolFilter] 未选库 → 按用户可见库裁剪 wrenai 工具: %d → %d",
+            len(tools), len(kept),
+        )
+        return request.override(tools=kept)
+
     def _resolve_db_name(self) -> str:
         """从 LangGraph 运行时 config 读取当前数据库名。
 
@@ -97,6 +155,9 @@ class ToolFilterMiddleware(AgentMiddleware):
            时移除；否则保留（fail-open：未建模库 / wrenai server 加载失败时 dbmcp
            是唯一查询通道）
         3. 非 wrenai/dbmcp 工具 → 保留（图表工具等）
+
+        `db_name` 为空时直接返回原列表 —— 调用方（`_filter`）已改走
+        `_filter_unselected` 按用户可见库裁剪，不会漏到这里。
         """
         if not db_name:
             return tools
@@ -139,7 +200,7 @@ class ToolFilterMiddleware(AgentMiddleware):
         """读取 db_name，过滤工具，返回新的 ModelRequest。"""
         db_name = self._resolve_db_name()
         if not db_name:
-            return request
+            return self._filter_unselected(request)
 
         tools = getattr(request, "tools", None) or []
         filtered = self._filter_tools(tools, db_name)

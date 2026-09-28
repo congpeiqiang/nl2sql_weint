@@ -49,11 +49,15 @@ from agent.trace.langfuse_client import (
     get_thread_trace_context,
     langfuse_enabled,
 )
+# 目录轴规范化（落盘目录恒为技能名，不随展示名的启发式回退漂移）。
+# 顶层 import 安全：process_audit 顶层只依赖 stdlib + wren_call_extract，反向依赖
+# （它要用 TOOL_SKILL_MAP / _TOOL_OWNER_SKILLS）一律在函数内延迟 import。
+from agent.utils.process_audit import normalize_skill_dir  # noqa: E402
 
 _logger = logging.getLogger(__name__)
 
 # 工具名后缀 → skill 分类（启发式；wrenai_imdb_run_sql / dbmcp_run_sql 均命中后缀）。
-# knowledge-retrieval 族是「理解建模(nl2sql-understand)」的信息收集真实工作：不在 map 里
+# knowledge-retrieval 族是取料技能(wren-retrieve)的信息收集真实工作：不在 map 里
 # → 无 span，语义检索/schema 探查在 trace 里完全不可见。get_context/get_instructions/
 # get_all_knowledge 曾补入；SKILL.md 写的能力性工具名（describe_schema/get_all_knowledge）
 # 与实际部署的 wrenai 工具面有出入（老 wren 只有 describe_model/list_knowledge/
@@ -134,7 +138,7 @@ def _classify_skill(tool_name: str) -> Optional[str]:
     """按工具名后缀分类到 skill（无则 None，跳过 span）。
 
     注意：这是**启发式分类**（recall-queries / sql-execution 等泛化名），不是真实
-    编排 skill（nl2sql-schema-linking / sql-of-thought 等）。同一工具被多个编排
+    编排 skill（wren-sql-author / wren-orchestrator 等）。同一工具被多个编排
     skill 共用，工具名无法区分——真实信号是 read_file 命中的 SKILL.md 路径
     （deepagents 渐进披露：执行某 skill 前必先读其 SKILL.md）。评分仍走本启发式，
     展示名用 _resolve_display_skill 解析的真实编排 skill。
@@ -148,7 +152,7 @@ def _classify_skill(tool_name: str) -> Optional[str]:
 # 线程最近加载的编排 skill：thread_id → skill 名。deepagents 渐进披露要求模型执行
 # 某 skill 前先 read_file 其 SKILL.md（skills.py "How to Use Skills"）——该调用是
 # 「当前在跑哪个编排 skill」的权威信号。但 skill 内容也注入系统提示词（SkillsMiddleware），
-# 模型常不重读 SKILL.md 就切换 skill（实例：读 clarification 后直接跑 sql-of-thought
+# 模型常不重读 SKILL.md 就切换 skill（实例：读 wren-clarify 后直接跑查询流水线
 # 流水线），导致活动 skill 过期。故后续工具调用不是无条件继承，而是先查「工具→归属
 # skill」权威表（见 _resolve_display_skill）。进程级，线程安全靠 GIL。
 _THREAD_ACTIVE_SKILL: dict[str, str] = {}
@@ -174,47 +178,47 @@ def _set_active_skill(thread_id: str, skill: str) -> None:
     _THREAD_ACTIVE_SKILL[thread_id] = skill
 
 
-# 工具 → 正向使用它的真实编排 skill（从各 SKILL.md 抽取，排除"不要/禁止"否定引用）。
-# - sql-of-thought 是顶层编排器，正向执行 run_sql/list_models/query_cube 等
-#   （sql-generation 的 run_sql 是"不要执行 run_sql"；schema-linking 已移除 list_models）；
-# - 值长度 1 = 唯一归属 → 展示直接采用（覆盖过期活动 skill，修复"模型读完
-#   clarification SKILL.md 后未重读其它 SKILL.md 就跑流水线 → list_models/run_sql
-#   被误标 clarification"）；长度 >1 = 共享工具 → 活动 skill 是 owner 才继承。
+# 工具 → 正向使用它的真实编排 skill（owner 取自各 SKILL.md 的正向引用，排除"不要/禁止"否定引用）。
+# - 值长度 1 = 唯一归属 → 展示直接采用（覆盖过期活动 skill，修复"模型读完 wren-clarify
+#   SKILL.md 后未重读其它 SKILL.md 就跑流水线 → run_sql/query_cube 被误标 wren-clarify"）；
+#   长度 >1 = 共享工具 → 活动 skill 是 owner 才继承，否则回退启发式。
+# ⚠️ owner 拼写必须 = **真实 skill 目录名**：read_file 命中 SKILL.md 时
+#   _skill_name_from_path 返回的是目录名，写错会让同一 skill 出现两种 tag
+#   （skill:xxx:read_file vs skill:yyy:run_sql），按 skill 过滤/聚合被拆开。
+#   技能集 2026-09 由 sql-of-thought 系整体更名为 wren-* 系（六个能力 skill 按
+#   六步主循环切分），本表同步更名——旧名（sql-of-thought / nl2sql-understand /
+#   nl2sql-execution / nl2sql-sql-generation / nl2sql-correction /
+#   nl2sql-performance-optimization）在盘上已无对应目录。
 _TOOL_OWNER_SKILLS: dict[str, tuple[str, ...]] = {
     # ── 唯一归属（覆盖过期活动 skill）──
-    # 注意 owner 拼写必须 = 真实 skill 目录名（read_file 命中 SKILL.md 时
-    # _skill_name_from_path 返回目录名）。顶层编排器目录名是 sql-of-thought
-    # （无 nl2sql- 前缀），此前写 "nl2sql-sql-of-thought" → 同一 skill 两种 tag
-    # （skill:sql-of-thought:read_file vs skill:nl2sql-sql-of-thought:list_models），
-    # 按 skill 过滤/聚合会被拆开。已统一为真实目录名。
-    "list_models": ("sql-of-thought",),
-    "list_cubes": ("sql-of-thought",),
-    "describe_cube": ("sql-of-thought",),
-    "query_cube": ("sql-of-thought",),
-    # run_sql 执行专属 skill（2026-09-05 新增 nl2sql-execution，Step6 查询执行）。
-    # 展示从编排器 sql-of-thought 挪到真实执行步。
-    "run_sql": ("nl2sql-execution",),
-    "dry_plan": ("nl2sql-sql-generation",),
-    # 前段三合一后，检索/知识/Schema 工具的唯一前端 owner = nl2sql-understand。
-    # 全部唯一化（不再共享给 sql-of-thought）：这些工具只会在理解建模里被正向调用，
+    # 步骤(1) 取料轴 + 语义库探查族：这些都只在四路取料/理解阶段被正向调用，
     # 唯一归属可覆盖「活动 skill 过期/未设」的 stale 状态，杜绝 heuristic 名
     # （knowledge-retrieval / schema-linking 等）泄漏到展示。
-    # 2026-09-06：补 list_knowledge / get_data_source（此前只进了 TOOL_SKILL_MAP，
-    # 未在 owner 表 → 展示回退 heuristic 名 knowledge-retrieval）。
-    "get_context": ("nl2sql-understand",),
-    "get_instructions": ("nl2sql-understand",),
-    "get_all_knowledge": ("nl2sql-understand",),
-    "list_knowledge": ("nl2sql-understand",),
-    "recall_queries": ("nl2sql-understand",),
-    "describe_schema": ("nl2sql-understand",),
-    "describe_model": ("nl2sql-understand",),
-    "get_data_source": ("nl2sql-understand",),
-    "get_mdl": ("nl2sql-understand",),
-    "get_db_info": ("nl2sql-understand",),
+    "get_context": ("wren-retrieve",),
+    "get_instructions": ("wren-retrieve",),
+    "get_all_knowledge": ("wren-retrieve",),
+    "list_knowledge": ("wren-retrieve",),
+    "recall_queries": ("wren-retrieve",),
+    "describe_schema": ("wren-retrieve",),
+    "list_cubes": ("wren-retrieve",),
+    # 探查族（2026-09-25 定）：MDL / 模型 / 数据源 / 库信息 / 单 cube 明细，
+    # 取料包不足时的补充读取，同属取料技能。
+    "get_mdl": ("wren-retrieve",),
+    "describe_model": ("wren-retrieve",),
+    "get_data_source": ("wren-retrieve",),
+    "get_db_info": ("wren-retrieve",),
+    "describe_cube": ("wren-retrieve",),
+    # 步骤(3) 具名指标车道独占：query_cube 只属指标查询。
+    "query_cube": ("wren-metric-query",),
+    # 步骤(3)(4) SQL 产出侧：dry_plan 把 MDL 语义 SQL 展开成目标方言 SQL，属作者技能。
+    "dry_plan": ("wren-sql-author",),
+    # 步骤(6) 执行专属 skill（2026-09-25 从编排器拆出成独立技能，见 wren-execution/SKILL.md）。
+    # 唯一归属 ⇒ 永远覆盖活动 skill，杜绝"执行步被标成编排器/生成步"。
+    "run_sql": ("wren-execution",),
     # ── 共享（活动 skill 在 owners 内才继承）──
     "dry_run": (
-        "nl2sql-sql-generation", "sql-of-thought",
-        "nl2sql-correction", "nl2sql-performance-optimization",
+        "wren-sql-author", "wren-orchestrator",
+        "wren-perf-optimize", "wren-metric-query", "wren-execution",
     ),
 }
 
@@ -579,7 +583,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
     # ── 公共执行 ─────────────────────────────────────────
 
     def _span_meta(self, tool_name: str, skill: str, thread_id: str, db_name: str,
-                   args: dict, heuristic: str = "") -> dict:
+                   args: dict, heuristic: str = "", vfs_dir_skill: str = "") -> dict:
         meta = {
             "skill": skill,
             "tool": tool_name,
@@ -595,8 +599,14 @@ class LangfuseSpanMiddleware(AgentMiddleware):
         if vfs:
             meta["vfs_path"] = vfs
         else:
-            # 查询类工具无文件路径，标出 skill 产物目录供排查
-            meta["vfs_dir"] = f"{VFS_PROCESS_DATA_PREFIX}{thread_id}/{skill}/"
+            # 查询类工具无文件路径，标出 skill 产物目录供排查。
+            # ⚠️ 用 vfs_dir_skill（规范化技能目录名）而非 skill（span 轴展示名）——
+            # 两者只在「活动 skill 过期、展示名回退成启发式族名」时不同，那时落盘
+            # 目录必须仍是技能名，否则同一条链的产物被劈成两套目录（见
+            # agent/utils/process_audit.normalize_skill_dir 的模块 docstring）。
+            meta["vfs_dir"] = (
+                f"{VFS_PROCESS_DATA_PREFIX}{thread_id}/{vfs_dir_skill or skill}/"
+            )
         return meta
 
     def _invoke(self, request: Any, handler: Callable[[Any], Any], heuristic: str) -> Any:
@@ -608,8 +618,11 @@ class LangfuseSpanMiddleware(AgentMiddleware):
         # 展示用 skill 名：真实编排 skill（read_file SKILL.md 信号 / 线程最近加载），
         # 回退启发式；评分仍走 heuristic（_maybe_score 的 sql-execution 等判断不变）。
         display = _resolve_display_skill(tool_name, args, thread_id, heuristic)
+        # 目录轴 ≠ span 轴：展示名可能回退成启发式族名（sql-generation 等），落盘
+        # 目录必须规范化回技能名，否则同一条链的产物被劈成两套目录。
+        dir_skill = normalize_skill_dir(display, heuristic)
         span = self._start_span(tool_name, display, thread_id, db_name, args,
-                                heuristic=heuristic)
+                                heuristic=heuristic, vfs_dir_skill=dir_skill)
         result = None
         try:
             result = handler(request)
@@ -619,7 +632,8 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                               exec_thread=exec_thread, error=e)
             raise
         self._finish_span(span, result, tool_name, _tool_call_id(request))
-        self._dump_process_data(tool_name, args, result, thread_id, display, heuristic)
+        self._dump_process_data(tool_name, args, result, thread_id, dir_skill, heuristic,
+                                display)
         self._record_subject_evidence(tool_name, heuristic, display, args, result, thread_id)
         self._maybe_score(tool_name, heuristic, args, result, ok=True, span=span,
                           exec_thread=exec_thread, error="")
@@ -632,8 +646,11 @@ class LangfuseSpanMiddleware(AgentMiddleware):
         exec_thread = _exec_thread_id(request)
         db_name = self._db_name_default or args.get("db_name", "")
         display = _resolve_display_skill(tool_name, args, thread_id, heuristic)
+        # 目录轴 ≠ span 轴：展示名可能回退成启发式族名（sql-generation 等），落盘
+        # 目录必须规范化回技能名，否则同一条链的产物被劈成两套目录。
+        dir_skill = normalize_skill_dir(display, heuristic)
         span = self._start_span(tool_name, display, thread_id, db_name, args,
-                                heuristic=heuristic)
+                                heuristic=heuristic, vfs_dir_skill=dir_skill)
         result = None
         try:
             result = handler(request)
@@ -645,7 +662,8 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                               exec_thread=exec_thread, error=e)
             raise
         self._finish_span(span, result, tool_name, _tool_call_id(request))
-        self._dump_process_data(tool_name, args, result, thread_id, display, heuristic)
+        self._dump_process_data(tool_name, args, result, thread_id, dir_skill, heuristic,
+                                display)
         self._record_subject_evidence(tool_name, heuristic, display, args, result, thread_id)
         self._maybe_score(tool_name, heuristic, args, result, ok=True, span=span,
                           exec_thread=exec_thread, error="")
@@ -848,7 +866,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
     # ── Langfuse 封装（全部容错，监控旁路）────────────────
 
     def _start_span(self, tool_name: str, skill: str, thread_id: str, db_name: str, args: dict,
-                    heuristic: str = ""):
+                    heuristic: str = "", vfs_dir_skill: str = ""):
         if not langfuse_enabled():
             return None
         try:
@@ -862,7 +880,8 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                 "name": f"skill:{skill}:{display_wrenai_tool_name(tool_name)}",
                 "as_type": "span",
                 "input": _compact(args, 2000),
-                "metadata": self._span_meta(tool_name, skill, thread_id, db_name, args, heuristic),
+                "metadata": self._span_meta(tool_name, skill, thread_id, db_name, args,
+                                            heuristic, vfs_dir_skill),
             }
             parent_tid = _parent_trace_id()
             _path_c = False  # M-T6b：路径 C 标志（主 agent 直接调工具）
@@ -1027,8 +1046,12 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                     f"/workspace/large_tool_results/{_sanitize_tool_call_id(tool_call_id)}"
                     if tool_call_id else "/workspace/large_tool_results/"
                 )
+                # 带上原长度：这行是**展示用**指针（模型侧收到的是原文；落盘与否只由
+                # MessageSlimmer 决定，知识类工具还有免截断白名单）。不带长度时极易被
+                # 误读成「模型没拿到内容」——2026-09-25 排查「报告缺业务口径」时就被它
+                # 误导过一轮（把免截断生效的 get_instructions 当成被落盘丢掉了）。
                 span.update(
-                    output=f"[large result truncated, see {vfs}]",
+                    output=f"[large result truncated: {len(text)} chars, see {vfs}]",
                     metadata={"vfs_path": vfs},
                 )
             span.end()
@@ -1045,13 +1068,21 @@ class LangfuseSpanMiddleware(AgentMiddleware):
             pass
 
     def _dump_process_data(self, tool_name: str, args: dict, result: Any,
-                           thread_id: str, skill: str, heuristic: str) -> None:
+                           thread_id: str, skill: str, heuristic: str,
+                           display_skill: str = "") -> None:
         """服务端把中间产物落盘（0 模型开销，替代模型 write_file 的高成本方案）。
 
         上下文优先设计下模型不一定 write_file，但工具调用边界 span 已捕获完整
         input/output——这里直接代写为 process_data/{thread}/{skill}/{tool}-{seq}.json，
         让 vfs_dir 指向的目录真实存在、可排查。纯磁盘写（毫秒级），失败仅 debug，
-        不影响工具执行。目录名/文件名与 span metadata 的 vfs_dir 同源（同一 display skill）。
+        不影响工具执行。
+
+        ⚠️ `skill` 是**规范化后的技能目录名**（`normalize_skill_dir` 的产物，恒为真实
+        技能名）；`display_skill` 是 span 轴的展示名，两者只在「活动 skill 过期、展示名
+        回退成启发式族名」时不同 —— 那时目录必须是技能名，否则同一条链的产物被劈成
+        两套目录，读者（`check_progress._backfill_process_data_sql`）只能读到其中一套。
+        payload 里 `skill` 恒等于父目录名（文件自述与所在目录一致），`display_skill`
+        仅在不等时才写（镜像 `_span_meta` 里 `heuristic` 的条件写法）。
         """
         if not _DUMP_ENABLED or not thread_id or not skill:
             return
@@ -1074,8 +1105,8 @@ class LangfuseSpanMiddleware(AgentMiddleware):
             user_question = _user_question()
             payload = {
                 "tool": tool_name,
-                "skill": skill,
-                "heuristic": heuristic,
+                "skill": skill,          # = 父目录名（技能名），文件自述与所在目录一致
+                "heuristic": heuristic,  # 工具族（8 值），与 skill 是两个维度，都留
                 "thread_id": thread_id,
                 "question_id": question_id,
                 "user_question": user_question,
@@ -1085,6 +1116,8 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                 if _DUMP_OUTPUT_ENABLED
                 else _output_marker(result),
             }
+            if display_skill and display_skill != skill:
+                payload["display_skill"] = display_skill
             blob = json.dumps(payload, ensure_ascii=False, default=str)
             qprefix = question_id[:8] if question_id else ""
             fname = f"{qprefix}_{tool_name}-{seq}.json" if qprefix else f"{tool_name}-{seq}.json"

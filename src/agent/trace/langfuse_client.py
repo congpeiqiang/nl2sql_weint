@@ -734,6 +734,16 @@ def _wrenai_display_pairs() -> tuple:
     return _wrenai_display_cache
 
 
+def reset_wrenai_display_cache() -> None:
+    """清 wrenai 显示名映射（切工作区用，P1-11）。
+
+    映射由**当前工作区**的已建模库算出 → 切工作区后换工作区重算。只影响 Langfuse
+    UI / Session 页的显示名，不改运行/路由/打分（见上方说明）。
+    """
+    global _wrenai_display_cache
+    _wrenai_display_cache = None
+
+
 def display_wrenai_tool_name(name: Any) -> str:
     """wrenai 工具显示名净化前缀 → 库名全名；非 wrenai / 未建模 → 原样返回。"""
     if not isinstance(name, str) or not name.startswith("wrenai_"):

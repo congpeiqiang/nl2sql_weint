@@ -62,7 +62,13 @@ MAX_ROW_LIMIT = 10000
 PLAN_INLINE_MAX = 3000
 
 _MDL_REL = ("target", "mdl.json")
-_CACHE_MAX = 4
+# 引擎缓存上限（P3-7）。缓存键含「连接指纹」⇒ **键数 ≈ 同时活跃的语义库数**，
+# 上限必须 ≥ 库数，否则多库用户会在库之间来回把引擎挤出去、每次都要重建。
+# 4 是单库时期的取值，多工作区/多库之后明显偏小（一次 miss 就是一次 `_build_engine`，
+# 本地小库实测 1~3ms、冷启动 1.7s，生产模型多的库按注释记约 0.9s）。
+# 默认放宽到 16（≈ 4× 当前库数的余量），并用 `WREN_PLAN_CACHE_MAX` 覆盖；
+# **代价是内存**（每个引擎常驻），库很多时按实际 RSS 调小。
+DEFAULT_CACHE_MAX = 16
 _TRAILING_LIMIT_RE = re.compile(r"\bLIMIT\s+\d+\s*$", re.IGNORECASE)
 _SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z一-鿿_-]+")
 
@@ -206,6 +212,17 @@ def _cache_enabled() -> bool:
     return os.environ.get("WREN_PLAN_CACHE", "1") not in ("0", "false", "False")
 
 
+def cache_max() -> int:
+    """引擎缓存上限。`WREN_PLAN_CACHE_MAX` 覆盖，**非数字/≤0 退回默认**（与
+    `db/limits.py`、`llm_gate` 同口径：坏值不该被当成「关掉保护」）。"""
+    raw = os.environ.get("WREN_PLAN_CACHE_MAX", "")
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_CACHE_MAX
+    return n if n > 0 else DEFAULT_CACHE_MAX
+
+
 def _build_engine_for(mdl_path: Path, conn: Dict[str, Any]):
     """建引擎。**不做 stdout/stderr 重定向**——redirect_stdout 是进程级全局替换，
     在服务端会吞掉并发协程的日志输出；这里失败路径本就由 try/except 兜住。"""
@@ -231,10 +248,15 @@ def _engine_for(mdl_path: Path, conn: Dict[str, Any]):
     with _CACHE_LOCK:
         eng = _ENGINE_CACHE.get(key)
         if eng is None:
-            # 持锁构建：并发同键只建一次（~0.9s），不同键互相等一下可接受
+            # 持锁构建：并发同键只建一次（~0.9s），不同键互相等一下可接受。
+            # ⚠️ 这里是**串行**的：N 个库的首次查询同时到达 ⇒ 墙钟 ≈ N × 建引擎耗时
+            # （本地 4 个库实测并发到达的墙钟 15ms ≈ 串行和）。改成「按键加锁、锁外构建」
+            # 能让不同键并行，但 wren 的 `_build_engine` 是否线程安全**没有证据**
+            # （可能碰进程级全局，如数据源注册）⇒ 不做，除非先在生产量出这个串行是可观测瓶颈。
             eng = _build_engine_for(mdl_path, conn)
             _ENGINE_CACHE[key] = eng
-            while len(_ENGINE_CACHE) > _CACHE_MAX:
+            limit = cache_max()
+            while len(_ENGINE_CACHE) > limit:
                 _ENGINE_CACHE.popitem(last=False)
         else:
             _ENGINE_CACHE.move_to_end(key)

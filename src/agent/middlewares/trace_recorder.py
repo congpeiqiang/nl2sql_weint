@@ -27,7 +27,7 @@ from langchain.agents.middleware import (
 )
 
 from agent.trace.event_log import EventType, TraceEvent
-from agent.trace.event_store import EventStore
+from agent.trace.event_store import get_event_store
 
 _logger = logging.getLogger(__name__)
 
@@ -44,19 +44,33 @@ class TraceRecorderMiddleware(AgentMiddleware):
     """
 
     def __init__(self, db_path: str, agent_type: str = "chat_agent"):
-        self._store = EventStore(db_path)
-        self._store.open()
+        # 共享实例（同路径进程内唯一）：中间件本身也是进程内单例，但 trace API、
+        # sync 循环同样打开这份 traces.sqlite —— 各建一条连接会 fd 泄漏 + seq 撞号。
+        self._store = get_event_store(db_path)
         self._agent_type = agent_type
-        self._cached_thread_id: Optional[str] = None
-        self._cached_parent_thread_id: Optional[str] = None
         _logger.info(
             "[TraceRecorder] initialized: agent=%s db=%s", agent_type, db_path
         )
 
     # ── thread_id 获取 ──────────────────────────────────────────
 
-    def _get_thread_id(self, request: ModelRequest[ContextT]) -> str:
-        """从 request 中提取 thread_id（wrap_model_call 可用）。"""
+    def _get_thread_id(self, request: Any) -> str:
+        """取「当前 run **自己**的 thread id」（模型调用与工具调用共用）。
+
+        来源优先级：
+          1. `request.runtime.execution_info.thread_id` —— run 自己的线程。
+             `ModelRequest` 与 `ToolCallRequest` 都带 runtime/execution_info，
+             所以两条路径能用同一个来源（这是本中间件的关键约束：模型事件与
+             工具事件必须落在同一个 thread 上）。
+          2. `configurable.thread_id` —— 兜底（execution_info 缺失/为空时）。
+
+        ⚠️ 曾经的做法是在 `wrap_model_call` 里把结果存到 `self._cached_thread_id`，
+        再由 `wrap_tool_call` 读回来。**那是并发下必错的写法**：中间件实例是进程内
+        单例，而「写入」（模型调用）到「读取」（工具调用）之间隔着**整个 LLM 推理
+        时长**，期间别的 run 的模型调用会覆盖这个属性 → 工具事件系统性挂到最后一个
+        发起模型调用的会话上（生产 10 个 run 共用 1 个实例，必有此现象）。
+        现取（contextvar / request 携带）才与并发数无关。
+        """
         try:
             runtime = getattr(request, "runtime", None)
             if runtime is not None:
@@ -64,7 +78,16 @@ class TraceRecorderMiddleware(AgentMiddleware):
                 if exec_info is not None:
                     tid = getattr(exec_info, "thread_id", "")
                     if tid:
-                        return tid
+                        return str(tid)
+        except Exception:
+            pass
+        try:
+            from langgraph.config import get_config as _cfg
+            if _cfg is not None:
+                cfg = _cfg() or {}
+                tid = (cfg.get("configurable") or {}).get("thread_id", "")
+                if tid:
+                    return str(tid)
         except Exception:
             pass
         return ""
@@ -102,8 +125,7 @@ class TraceRecorderMiddleware(AgentMiddleware):
                     thread_id=thread_id,
                     agent_type=self._agent_type,
                     task_id=task_id,
-                    parent_thread_id=self._cached_parent_thread_id
-                    or self._get_parent_thread_id(),
+                    parent_thread_id=self._get_parent_thread_id(),
                     event_type=event_type,
                     timestamp=time.time(),
                     data=data or {},
@@ -121,7 +143,6 @@ class TraceRecorderMiddleware(AgentMiddleware):
     ) -> ModelResponse[ResponseT]:
         """同步 LLM 调用：记录事件。"""
         thread_id = self._get_thread_id(request)
-        self._cached_thread_id = thread_id
 
         self._record(thread_id, EventType.LLM_CALL_START, {
             "model": getattr(request, "model_name", "unknown"),
@@ -158,7 +179,6 @@ class TraceRecorderMiddleware(AgentMiddleware):
     ) -> ModelResponse[ResponseT]:
         """异步 LLM 调用：记录事件。"""
         thread_id = self._get_thread_id(request)
-        self._cached_thread_id = thread_id
 
         self._record(thread_id, EventType.LLM_CALL_START, {
             "model": getattr(request, "model_name", "unknown"),
@@ -197,7 +217,9 @@ class TraceRecorderMiddleware(AgentMiddleware):
         handler: Callable[[Any], Any],
     ) -> Any:
         """同步工具调用：记录事件 + 检测 start_async_task。"""
-        thread_id = self._cached_thread_id or ""
+        # 现取（不再读模型调用留下的实例属性）——见 _get_thread_id 的说明。
+        # ToolCallRequest 同样带 runtime.execution_info.thread_id，与模型事件同源。
+        thread_id = self._get_thread_id(request)
         tool_name = _get_tool_name(request)
 
         is_subagent_spawn = (
@@ -258,7 +280,7 @@ class TraceRecorderMiddleware(AgentMiddleware):
         handler: Callable[[Any], Any],
     ) -> Any:
         """异步工具调用：记录事件 + 检测 start_async_task。"""
-        thread_id = self._cached_thread_id or ""
+        thread_id = self._get_thread_id(request)  # 现取，见 _get_thread_id
         tool_name = _get_tool_name(request)
 
         is_subagent_spawn = (
@@ -323,12 +345,26 @@ def _extract_usage(response: Any) -> dict[str, Any] | None:
     return None
 
 
+def _tc_field(tc: Any, key: str, default: Any = None) -> Any:
+    """从 tool_call 里取字段，dict 与对象两种形态都支持。
+
+    ⚠️ `ToolCall` 在本版本是 TypedDict —— **运行时就是普通 dict**，`getattr(tc,"args")`
+    恒为 None。此前 `_summarize_args` 因此把每个工具事件的 args_summary 都写成 `"{}"`
+    （查 trace 时看不出工具入参，等于白记）。这里统一按形态取值。
+    """
+    if tc is None:
+        return default
+    if isinstance(tc, dict):
+        value = tc.get(key, default)
+    else:
+        value = getattr(tc, key, default)
+    return default if value is None else value
+
+
 def _get_tool_name(request: Any) -> str:
     """从 ToolCallRequest 中提取工具名称。"""
     try:
-        tc = getattr(request, "tool_call", None)
-        if tc is not None:
-            return getattr(tc, "name", "") or tc.get("name", "unknown")
+        return str(_tc_field(getattr(request, "tool_call", None), "name", "") or "unknown")
     except Exception:
         pass
     return "unknown"
@@ -337,12 +373,10 @@ def _get_tool_name(request: Any) -> str:
 def _summarize_args(request: Any) -> str:
     """提取工具调用参数的摘要（最多 200 字符）。"""
     try:
-        tc = getattr(request, "tool_call", None)
-        if tc is not None:
-            args = getattr(tc, "args", None) or {}
-            if isinstance(args, dict):
-                text = str(args)
-                return text[:200] + ("..." if len(text) > 200 else "")
+        args = _tc_field(getattr(request, "tool_call", None), "args", None)
+        if isinstance(args, dict):
+            text = str(args)
+            return text[:200] + ("..." if len(text) > 200 else "")
     except Exception:
         pass
     return ""

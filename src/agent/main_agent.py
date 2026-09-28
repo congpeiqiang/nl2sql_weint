@@ -1,6 +1,9 @@
 """主智能体 — 异步子智能体架构。支持取消长时间运行的查询。"""
 """主智能体 - 异步子智能体架构。"""
+import logging
 from pathlib import Path
+
+_logger = logging.getLogger(__name__)
 
 # 增强 check_async_task 返回详细进度（必须在 create_deep_agent 之前导入）
 import agent.subagents.check_progress  # noqa: F401
@@ -30,8 +33,12 @@ from agent.middlewares.trace_recorder import TraceRecorderMiddleware
 from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
 from agent.middlewares.vfs_path_resolver import VfsPathResolverMiddleware
 from agent.middlewares.execute_guard import ExecuteGuardMiddleware
+from agent.middlewares.chart_artifact_owner import ChartArtifactOwnerMiddleware
 from agent.middlewares.quota_error import QuotaErrorMiddleware
 from agent.middlewares.model_timeout import ModelTimeoutMiddleware
+# 账号级模型门禁（2026-09-28）：新账号不继承共享模型配置，没配就明确报错、绝不回落。
+# 必须最外层（列表首元素）：命中时连模型实例都不构造。
+from agent.middlewares.model_required import ModelRequiredMiddleware
 from agent.trace.langfuse_client import get_langfuse_callbacks, get_prompt_text
 from agent.utils.skills_versioning import effective_skills_sources
 from typing import Annotated
@@ -71,7 +78,10 @@ def _build_system_prompt() -> str:
         chart_spec = chart_spec_path.read_text(encoding="utf-8")
     else:
         chart_spec = ""
-        _log.warning("[main_agent] chart_specs/echarts.md 不存在，图表规范将缺失")
+        # 注意这行在**模块导入期**执行（L85 `SYSTEM_PROMPT = _build_system_prompt()`），
+        # 所以这里当年若名字解析不了（`_log` 未定义）不是「少打一条日志」，而是
+        # **整个 agent 起不来**。测试文件缺失才会走到这一支，属于潜伏炸弹。
+        _logger.warning("[main_agent] chart_specs/echarts.md 不存在，图表规范将缺失")
 
     # 替换占位符
     prompt = base.replace("{{CHART_SPEC}}", chart_spec)
@@ -155,6 +165,8 @@ composite_backend = CompositeBackend(
     },
 )
 # SKILLS_REF 实验注入时换成物化版 skill，默认仍读共享磁盘 skill
+# 2026-09-25：skills/ 按组分挂——main/ 为主智能体技能，nl2sql/ 现为 wren-* 语义层 SOP
+# 编排集（原自研八步流水线已归档 /shared/skills_bak/）；主智能体不加载 wren-*。
 skills_middleware = SkillsMiddleware(
     backend=vfs_root_backend,
     sources=effective_skills_sources(["/shared/skills/main/"], group="main"),
@@ -177,6 +189,9 @@ vfs_path_resolver = VfsPathResolverMiddleware()
 # execute（shell）护栏：文件权限管不住 execute（LocalShellBackend 直接跑宿主 shell），
 # 这里拦截破坏性命令与工作区外路径引用（rm /tmp/x 等），见 execute_guard.py。
 execute_guard = ExecuteGuardMiddleware()
+# P1-17：execute 产出的图表（chart-saver skill 的 .svg/.png）登记归属。挂在这里是唯一
+# 能做对的地方——子进程拿不到请求身份（见 chart_artifact_owner.py 文件头）。
+chart_owner = ChartArtifactOwnerMiddleware()
 
 nl2sql_async = AsyncSubAgent(
     name="nl2sql",
@@ -246,7 +261,7 @@ agent = create_deep_agent(
     memory=["/shared/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
     # vfs_path_resolver 放列表末尾（最内层、紧贴模型）：后处理在 langfuse_span /
     # trace_recorder 等外层记录之前完成，保证 trace、checkpoint、前端看到同一份真实路径。
-    middleware=[QuotaErrorMiddleware(), ModelTimeoutMiddleware(), execute_guard, skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, DanglingToolCallsMiddleware(), dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent"), vfs_path_resolver],
+    middleware=[ModelRequiredMiddleware(), QuotaErrorMiddleware(), ModelTimeoutMiddleware(), execute_guard, chart_owner, skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, DanglingToolCallsMiddleware(), dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent"), vfs_path_resolver],
     backend=composite_backend,
     permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写
     system_prompt=SYSTEM_PROMPT,

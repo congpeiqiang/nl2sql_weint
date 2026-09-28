@@ -19,10 +19,10 @@ SQL-of-Thought 流水线第4步。**仅在策略A（复杂查询）中执行。*
 
 ## 输入
 
-- 优先从对话上下文中获取前序 Skill 的输出（knowledge-loader / schema-linking / subproblem 的 JSON）
+- 优先从对话上下文中获取前序 Skill 的输出（nl2sql-understand 理解建模的 JSON、subproblem 的 JSON）
 - 若上下文中找不到，则 read_file 对应文件作为 fallback：
-  - `/workspace/nl2sql_process_data/{thread_id}/knowledge-loader/knowledge.json`
-  - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-schema-linking/schema.json`
+  - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-understand/knowledge.json`
+  - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-understand/schema.json`
   - `/workspace/nl2sql_process_data/{thread_id}/nl2sql-subproblem/subproblem.json`
 
 ## 输出

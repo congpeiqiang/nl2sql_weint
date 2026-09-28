@@ -35,7 +35,7 @@ description: "触发条件：用户发起任意对话；主智能体需要进行
 | 维度 | 详情 |
 |------|------|
 | **职责** | 将用户自然语言数据问题转换为 SQL 并执行，支持图表可视化 |
-| **技能** | `sql-of-thought`（编排器）、`nl2sql-schema-linking`（表发现）、`nl2sql-subproblem`（分解）、`nl2sql-query-plan`（计划）、`nl2sql-sql-generation`（生成）、`nl2sql-correction`（纠错） |
+| **技能** | `sql-of-thought`（编排器）、`nl2sql-understand`（理解建模）、`nl2sql-subproblem`（分解）、`nl2sql-query-plan`（计划）、`nl2sql-sql-generation`（生成）、`nl2sql-performance-optimization`（性能优化）、`nl2sql-execution`（查询执行）、`nl2sql-correction`（纠错） |
 | **工具** | `run_sql`（执行SQL）、`suggestCharts`（推荐图表）、`getSchema`（图表Schema）、`renderChart`（渲染图表） |
 | **Shell** | `wren context show`（查看表模型）、`wren dry-plan`（验证SQL）、`wren query`（查询）、`python skills/sql-of-thought/scripts/gen_models_mysql.py`（生成模型） |
 

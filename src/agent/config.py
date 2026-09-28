@@ -4,10 +4,7 @@ from pathlib import Path
 import httpx
 from langchain.chat_models import init_chat_model
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.mongodb import MongoDBSaver
-from langgraph.store.memory import InMemoryStore
 from opensandbox.config import ConnectionConfigSync
-from pymongo import MongoClient
 
 from agent.env_utils import (
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL,
@@ -106,22 +103,23 @@ SCOPE_MAP = {
 
 # ---------- 中间件参数 ----------
 
-# ---------- MongoDB 配置（用于持久化 Agent 短期记忆/checkpoint） ----------
-MONGODB_URI = "mongodb://root:123456@39.100.100.28:27017/?authSource=admin"
-MONGODB_DB_NAME = "langchain_db"
-MONGODB_CHECKPOINT_COLLECTION = "checkpoints"
-
-# ---------- 持久化存储 ----------
-# InMemoryStore: 开发阶段使用。生产环境替换为持久 Store。
-STORE = InMemoryStore()
-
-# MongoDBSaver: Agent 对话状态的 MongoDB 持久化 checkpointer。
-# 支持 Human-in-the-Loop（interrupt 状态持久化）和跨重启对话恢复。
-_mongodb_client = MongoClient(MONGODB_URI)
-CHECKPOINTER = MongoDBSaver(
-    client=_mongodb_client,
-    db_name=MONGODB_DB_NAME,
-    checkpoint_collection_name=MONGODB_CHECKPOINT_COLLECTION,
-)
+# ---------- 已删除：MongoDB 配置 / MongoDBSaver / InMemoryStore（2026-09-24，P2-10 收尾） ----------
+# 原样（`MONGODB_URI` / `STORE` / `CHECKPOINTER`）在本仓**零引用**，且副作用是**导入即执行**：
+#   ① `MongoClient(MONGODB_URI)` + `MongoDBSaver(...)` 在模块导入时就把一个**硬编码凭据**
+#      （`mongodb://root:123456@39.100.100.28/...`）指向外网主机 —— 而 src/ 是整包发版内容，
+#      等于把凭据随发行包发出去；
+#   ② `pymongo` / `langgraph.checkpoint.mongodb` **不在 `pyproject.toml`** ⇒ 这两个 import
+#      在任何环境都必然 ModuleNotFoundError ⇒ **`import agent.config` 目前是坏的**
+#      （唯一消费者是 `agent/backends/sandbox_setup.py`，而它按本仓设计文档是 E3 未接线死代码，
+#      故一直没有暴露出来）。
+# checkpointer 的真实入口是 `agent/checkpoint/checkpointer_factory.py`（经
+# `LANGGRAPH_CHECKPOINTER` 加载，见 `main_agent.py:225`）——**别再往本文件加回来**。
+#
+# 附带说明（本文件整体已死，不必去修）：`from agent.env_utils import (...)` 指向的
+# `src/agent/env_utils.py` **不存在**（只有这一处引用）⇒ `import agent.config` 在删除上面
+# 那两条 Mongo import 之前就已经是 ModuleNotFoundError，与本次改动无关；
+# 本文件也**没有任何真实消费者**（唯一 importer 是 E3 死代码 sandbox_setup.py）。
+# 若要整文件删除，需先确认没有按字符串路径加载它（如 langgraph 的
+# `LANGGRAPH_CHECKPOINTER`/自定义 app 钩子那类字符串入口）—— 见清单 P2-10 收尾项。
 
 

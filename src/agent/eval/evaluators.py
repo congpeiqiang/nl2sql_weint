@@ -12,7 +12,7 @@
 设计（对齐 §3.2「全量规则校验 + 部分 LLM-Judge 采样」+ 设计文档 P0 §8.2/§8.3）：
 - 确定性维度在 span 结束时同步写，零成本、无 LLM、每查询必现；
 - LLM-judge 维度按采样率（环境变量 NL2SQL_EVAL_JUDGE_SAMPLE，0~1，默认 0.3）
-  先入 {AGENT_DATA_ROOT}/eval_queue.sqlite 落盘待评队列，由单例守护 worker
+  先入 {AGENT_DATA_ROOT}/eval_queue/eval_queue.sqlite 落盘待评队列，由单例守护 worker
   异步执行（幂等、进程重启自动续跑、失败重试留痕），取代旧 fire-and-forget
   daemon 线程（P0 可靠交付，见 docs/langfuse平台/NL2SQL-评估精准化设计方案.md §8）；
   judge 需要用户问题 → 从执行线程的 state 读最后一条非系统 human 消息
@@ -317,7 +317,7 @@ def schedule_judge(
     """把一次 LLM-judge 采样任务入**落盘待评队列**（幂等），由守护 worker 执行写分。
 
     P0 可靠交付（docs/langfuse平台/NL2SQL-评估精准化设计方案.md §8.3）：取代旧
-    fire-and-forget daemon 线程——任务持久化到 {AGENT_DATA_ROOT}/eval_queue.sqlite，
+    fire-and-forget daemon 线程——任务持久化到 {AGENT_DATA_ROOT}/eval_queue/eval_queue.sqlite，
     进程崩溃/重启后 pending 自动续跑（补评）；失败可重试可查。签名与调用点不变。
 
     Args:
@@ -327,7 +327,7 @@ def schedule_judge(
     """
     # 离线隔离：run_experiment 实验 worker 设 NL2SQL_EVAL_JUDGE_QUEUE=0 → 不把 LLM-judge
     # 任务入队、不起 drainer。原因：worker 与在线生产共用同一
-    # {AGENT_DATA_ROOT}/eval_queue.sqlite，worker 起 drainer 时 _drain_loop 启动即
+    # {AGENT_DATA_ROOT}/eval_queue/eval_queue.sqlite，worker 起 drainer 时 _drain_loop 启动即
     # reset_running_to_pending() 会把在线 drainer 正在跑的 running 行重置 → 重复打分。
     # 实验的 sql_biz_correct 由 run_experiment._score_record 同步直评（不依赖本队列），
     # 确定性分（sql_valid/exec/schema）仍同步写实验 trace → 关掉入队不丢任何分。

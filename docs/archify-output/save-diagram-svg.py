@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 HTML = Path(r"D:\code_work_space\llm\nl2sql\docs\archify-output\nl2sql后端整体架构.html")
-SKILL_SCRIPTS = Path(r"D:\code_work_space\llm\nl2sql\src\agent\shared\skills\main\chart-saver\scripts")
+SKILL_SCRIPTS = Path(r"/agent/shared/skills_bak\main\chart-saver\scripts")
 sys.path.insert(0, str(SKILL_SCRIPTS))
 
 html = HTML.read_text(encoding="utf-8")

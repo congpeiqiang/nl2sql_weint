@@ -17,6 +17,8 @@ Or via environment variables::
     python -m NL2SQL.servers.mcp.server
 """
 
+import logging
+import re
 from typing import Any, Dict, Optional
 
 import click
@@ -27,22 +29,58 @@ from mcp_server.db_mcp_server.db.core.settings import settings
 from mcp_server.db_mcp_server.db.sql_runner import RunSqlToolArgs, ToolContext
 
 from mcp_server.db_mcp_server.db.config import McpSqlConfig
+from mcp_server.db_mcp_server.db.limits import effective_row_cap
 from mcp_server.db_mcp_server.db.multi_sql import split_sql_statements, combine_multi_results, df_to_result as _h_df_to_result
 
+_logger = logging.getLogger(__name__)
 
-def _apply_default_limit(stmt: str, limit: int) -> str:
-    """给 SELECT/WITH 语句追加 LIMIT（服务端默认行数上限）。
+# 结尾的「裸整数 LIMIT」（可带分号/空白）。**故意不匹配 `LIMIT n OFFSET m`** ——
+# 那种形态没法就地改写（改错会变语法错误），留给下一档的「无 LIMIT 才追加」之外的兜底。
+_TRAILING_INT_LIMIT_RE = re.compile(r"\bLIMIT\s+(\d+)\s*;?\s*$", re.IGNORECASE)
+# 词边界判 LIMIT 是否存在：旧的 `"LIMIT" not in sql.upper()` 会把 `LIMITED` 之类的
+# 子串也算命中，从而**该注入时不注入**。
+_HAS_LIMIT_RE = re.compile(r"\bLIMIT\b", re.IGNORECASE)
 
-    与语义层 run_sql 契约一致：SQL 已含 LIMIT 时跳过；非 SELECT 语句不动。
+
+def _apply_default_limit(stmt: str, limit: int, *, clamp_existing: bool = False) -> str:
+    """给 SELECT/WITH 语句收敛/追加 LIMIT（服务端行数上限）。
+
+    与语义层 run_sql 契约一致：SQL 已含 LIMIT 时不动；非 SELECT 语句不动。
+
+    改造前只有「全文不含 LIMIT 就追加」一条分支，于是 `LIMIT 999999999` 这种
+    **模型自己写的大 LIMIT 能原样下发**，结果全量进内存。现在三档：
+
+    1. 结尾是裸整数 LIMIT → `clamp_existing=True` 时**收敛到上限**；否则原样
+    2. 全文无 LIMIT 且是 SELECT/WITH → 追加
+    3. 其它（含 `LIMIT n OFFSET m`、注释/字符串里出现过 LIMIT）→ 原样不动
+
+    ⚠️ 第 3 档是**已知的放行**，不能指望它；真正的兜底是 ``run_sql`` 取数后的按行硬截断
+    （文本判据可以被绕过，行数绕不过去）。
+
+    ``clamp_existing`` 为什么默认关：**agent 直连通道**要收敛（上限就是该通道的硬闸），
+    但 ``api/feedback_annotation._run_preview`` 传进来的可能是**语义层已按连接器上限
+    处理过的物理 SQL**（见该文件 :634 的注释），把它按 `_PREVIEW_LIMIT` 压小会让
+    「口径试算的行数与线上工具不一致」——那是那个功能的立身之本。口径不同就得显式分开。
     """
-    if not limit or limit <= 0:
-        return stmt
+    cap = effective_row_cap(limit)
     s = stmt.strip()
     if not s:
         return s
-    upper = s.upper()
-    if upper.startswith(("SELECT", "WITH")) and "LIMIT" not in upper:
-        return f"{s} LIMIT {int(limit)}"
+
+    m = _TRAILING_INT_LIMIT_RE.search(s)
+    if m:
+        given = int(m.group(1))
+        if clamp_existing and given > cap:
+            # 只换掉那个数字（`m.start(1)`），保留原来的 `LIMIT`/`limit` 写法与前后空白
+            clamped = s[: m.start(1)] + str(cap)
+            _logger.warning(
+                "[db-limits] SQL 自带 LIMIT %d 超过上限 %d，已收敛为 %d", given, cap, cap
+            )
+            return clamped
+        return s
+
+    if s.upper().startswith(("SELECT", "WITH")) and not _HAS_LIMIT_RE.search(s):
+        return f"{s} LIMIT {cap}"
     return s
 
 
@@ -124,24 +162,48 @@ class NL2SQLMcpSqlServer:
             Args:
                 sql: SQL 语句，多条语句以分号 `;` 分隔
                 db_name: 数据库名（前端「数据库」下拉框选中的配置名，必须已配置）
-                limit: SELECT 语句的默认返回行数上限（与语义层 run_sql 契约一致，
-                    服务端自动给 SELECT 追加 LIMIT；SQL 已含 LIMIT 时不重复追加）。
+                limit: SELECT 语句的返回行数上限（与语义层 run_sql 契约一致）。
+                    服务端会把 SQL 里自带的裸整数 LIMIT **收敛**到该值、给没有 LIMIT 的
+                    SELECT/WITH 追加该值，并在取数后按行数硬截断；上限本身也被
+                    ``NL2SQL_DB_MAX_ROW_LIMIT``（默认 10000）封顶。传 0/负数按默认 1000。
 
             Returns:
                 包含 columns、rows、row_count 的字典。
+                发生过截断时额外包含 ``truncated`` 与 ``truncated_note``。
                 多语句时额外包含 statement_count 和 statements 执行摘要。
             """
             statements = split_sql_statements(sql)
             runner = self._get_runner(db_name)
+            cap = effective_row_cap(limit)
 
             all_results: list = []
+            truncated: list[dict] = []
             for stmt in statements:
-                stmt = _apply_default_limit(stmt, limit)
+                # clamp_existing=True：本条通道的 cap 就是硬闸 —— 模型自己写的
+                # `LIMIT 999999999` 也要收敛（这是唯一能堵住它的地方）。
+                stmt = _apply_default_limit(stmt, cap, clamp_existing=True)
                 args = RunSqlToolArgs(sql=stmt)
                 df = await runner.run_sql(args, self._context)
+                # 取数后的硬截断：注入那一层靠文本判断，绕得过去（子查询 LIMIT、
+                # `LIMIT n OFFSET m`、注释里出现 LIMIT）；这一层只看事实行数。
+                if len(df) > cap:
+                    _logger.warning(
+                        "[db-limits] 单条语句返回 %d 行，超过上限 %d，已截断（db=%s）",
+                        len(df), cap, db_name,
+                    )
+                    truncated.append({"rows": int(len(df)), "kept": cap})
+                    df = df.iloc[:cap]
                 all_results.append((stmt, df))
 
-            return combine_multi_results(all_results)
+            result = combine_multi_results(all_results)
+            if truncated:
+                result["truncated"] = True
+                result["truncated_note"] = (
+                    f"结果被截断到 {cap} 行（原始行数："
+                    f"{', '.join(str(t['rows']) for t in truncated)}）。"
+                    "如需完整数据请加筛选条件缩小范围，或改用聚合查询。"
+                )
+            return result
 
         @self.mcp.tool()
         async def get_db_info(db_name: str = "") -> Dict[str, Any]:
@@ -163,8 +225,10 @@ class NL2SQLMcpSqlServer:
             }
             try:
                 list_sql = _TABLE_LIST_SQL.get(cfg.db_type, "SHOW TABLES")
+                # 这条也不经 `_apply_default_limit`（改造前就没经），但同样按行数封顶：
+                # 表清单天生有界，这里只是不让「唯一一个绕过注入的入口」成为例外。
                 df = await runner.run_sql(RunSqlToolArgs(sql=list_sql), self._context)
-                info["tables"] = [str(v) for v in df.iloc[:, 0].tolist()]
+                info["tables"] = [str(v) for v in df.iloc[:, 0].tolist()][: effective_row_cap(0)]
             except Exception as e:  # noqa: BLE001
                 info["tables_error"] = f"{type(e).__name__}: {e}"
             return info
