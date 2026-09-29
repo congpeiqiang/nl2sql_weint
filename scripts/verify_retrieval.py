@@ -28,12 +28,14 @@ jsonl = 存储原语（稀疏向量/缓存分桶）；lance = 引擎面（icu �
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 from unittest import mock
 
 # ⚠️ 必须在 import 业务模块之前：数据落点由 AGENT_DATA_ROOT 推导
@@ -42,6 +44,8 @@ _WORK = pathlib.Path(tempfile.mkdtemp(prefix="nl2sql-verify-retrieval-"))
 os.environ["AGENT_DATA_ROOT"] = str(_WORK)
 os.environ["NL2SQL_EMBED_DIM"] = "16"          # 假嵌入用 16 维，碰撞多但足以验融合
 os.environ["NL2SQL_EMBED_TIMEOUT"] = "1"
+os.environ["NL2SQL_EMBED_COOLDOWN"] = "0"     # 熔断默认关：避免跨段的窗口把后续用例带偏
+
 sys.path.insert(0, str(_REPO / "src"))
 
 results: list[tuple[bool, str, str]] = []
@@ -397,8 +401,341 @@ def run_shared(backend_name: str, ws: pathlib.Path, proj: pathlib.Path,
         check(bool(search.search(idx_dir, "工时")), "纯 FTS 索引照样能查（质量损失、可用性不损失）")
         check(
             all(h["legs"] == ["fts"] for h in search.search(idx_dir, "工时")),
-            "查询期也只用了 FTS 腿（不花那 2.5s 超时）",
+            "查询期也只用了 FTS 腿（不花嵌入超时：查询期 4s / 索引期 2.5s）",
         )
+
+        # ── ⑥-b 嵌入响应校验：模型名闸（同维数换模型是静默错乱）────
+        section(f"⑥-b 嵌入响应校验：模型名 / 维数 / 条数 [{backend_name}]")
+        want = embedder.model_name()
+        good_vec = [0.1] * embedder.dim()
+
+        def _resp(model, vec=good_vec, n=1):
+            """伪造一次 embedding 响应（替代 `_post`，不碰网络）。"""
+            return {
+                "model": model,
+                "data": [{"index": i, "embedding": list(vec)} for i in range(n)],
+            }
+
+        def _with_post(payload, texts=("工时",)):
+            with mock.patch.object(embedder, "_post", lambda *a, **kw: payload):
+                return embedder.embed_texts(list(texts))
+
+        check(_with_post(_resp(want)) is not None, "正对照：模型名一致 ⇒ 正常返回向量")
+        check(
+            _with_post(_resp(f"{want}-另一个")) is None,
+            "**同维数换模型 ⇒ None**（修复前这里会返回 16 维向量，与旧索引静默混用）",
+            f"期望 {want!r}",
+        )
+        check(
+            _with_post(_resp(f"BAAI/{want}")) is not None,
+            "负对照：路径式全名 BAAI/<model> 归一后一致 ⇒ 放行（不误杀）",
+        )
+        check(
+            _with_post(_resp(want.upper())) is not None,
+            "负对照：大小写不同 ⇒ 放行（归一含小写）",
+        )
+        check(
+            _with_post({"data": [{"index": 0, "embedding": list(good_vec)}]}) is not None,
+            "负对照：服务端**不回** model 字段 ⇒ 放行（只留维数闸，不误杀正常通道）",
+        )
+        check(
+            _with_post(_resp(12345)) is not None,
+            "负对照：model 非字符串 ⇒ 当「没报告」放行（判不出不误杀）",
+        )
+        check(
+            _with_post(_resp(want, vec=[0.1] * (embedder.dim() - 1))) is None,
+            "负对照：模型名对但**维数不符** ⇒ None（两道闸各自独立）",
+        )
+        check(
+            _with_post(_resp(want, n=2)) is None,
+            "负对照：条数与入参不符 ⇒ None（模型名闸不掩盖原有闸）",
+        )
+
+        # ── ⑥-c 索引 meta 与嵌入配置不同源（响应闸抓不到的那条路）────
+        # 「配置改了、索引没重建」：服务端报告的正是**新**名字 ⇒ 响应闸放行，
+        # 只能靠 meta 里记的建索引那一刻的真相判。
+        section(f"⑥-c 索引 meta vs 当前嵌入配置（同维数混用）[{backend_name}]")
+        check(embedder.same_model("bge-m3", "BAAI/BGE-M3") is True, "same_model 归一：路径/大小写")
+        check(embedder.same_model("bge-m3", "bge-m3-v2") is False, "same_model 不模糊匹配")
+        check(embedder.same_model("bge-m3", "") is False, "same_model：空 ⇒ False（判不出不放行）")
+
+        # 真场景：**带向量**建索引 → 只改配置（不重建）⇒ 必须只走 FTS。
+        # （不去手改 meta —— lance 的 meta 有「版本提示」缓存，改 meta 不改数据集版本
+        #   时后端读到的仍是旧 meta，「陈旧缓存闸」会先接管，测不到本闸。）
+        env_model_key = "NL2SQL_EMBED_MODEL"
+        before_env = os.environ.get(env_model_key)
+        want = embedder.model_name()
+        ec_proj = make_project(ws / "embedcfg_wrenai")
+        ec_dir = S.index_dir_for(ec_proj)
+        fake_embed = lambda texts, **kw: [_bag_of_chars(t) for t in texts]  # noqa: E731
+        with mock.patch.object(embedder, "embed_texts", fake_embed):
+            ec_build = indexer.build_index(ec_proj, "embedcfg", force=True)
+        ec_meta = S.read_meta(ec_dir)
+        check(
+            ec_meta.get("embed_model") == want and ec_meta.get("vectors") == ec_meta.get("items") > 0,
+            "夹具：索引带向量且 meta 记了建索引时的 embed_model",
+            f"model={ec_meta.get('embed_model')!r} vectors={ec_meta.get('vectors')}/{ec_meta.get('items')}",
+        )
+
+        calls: list[str] = []
+        spy = lambda text, **kw: calls.append(text) or [0.5] * embedder.dim()  # noqa: E731
+        try:
+            check(search._embed_cfg_matches(ec_dir) is True, "正对照：meta 与当前配置同源 ⇒ 放行")
+            with mock.patch.object(embedder, "embed_one", spy):
+                same_hits = search.search(ec_dir, "工时")
+            check(
+                bool(calls) and any("vector" in h["legs"] for h in same_hits),
+                "正对照：同源 ⇒ 向量腿真的跑了（嵌入被调用、结果带 vector 腿）",
+                f"legs={[h['legs'] for h in same_hits][:2]}",
+            )
+
+            os.environ[env_model_key] = f"{want}-另一个"   # 模拟「换配置没重建索引」
+            calls.clear()
+            with mock.patch.object(embedder, "embed_one", spy):
+                check(
+                    search._embed_cfg_matches(ec_dir) is False,
+                    "**配置改了没重建索引 ⇒ 拒绝向量腿**（修复前放行 ⇒ 同维数静默混用）",
+                )
+                mixed_hits = search.search(ec_dir, "工时")
+                check(not calls, "不同源 ⇒ 连嵌入调用都没发生（向量腿进都没进）")
+                check(
+                    bool(mixed_hits) and all(h["legs"] == ["fts"] for h in mixed_hits),
+                    "不整体拒绝索引：FTS 腿照常召回（§8.1 的 L1，只掉质量）",
+                    f"{len(mixed_hits)} 条",
+                )
+
+            os.environ[env_model_key] = want
+            S.write_meta(ec_dir, {**ec_meta, "embed_dim": embedder.dim() + 8})
+            check(
+                search._embed_cfg_matches(ec_dir) is False,
+                "负对照：模型名同但 meta.embed_dim 不符 ⇒ 也拒绝",
+            )
+            S.write_meta(ec_dir, {**ec_meta, "embed_model": ""})
+            check(
+                search._embed_cfg_matches(ec_dir) is True,
+                "负对照：`--no-vectors` 索引（embed_model 空）⇒ 放行（由 vectors==0 短路接管）",
+            )
+            S.write_meta(ec_dir, {**ec_meta, "embed_dim": "不是数字"})
+            check(
+                search._embed_cfg_matches(ec_dir) is True,
+                "负对照：meta.embed_dim 被改坏 ⇒ 当「没记」放行（读侧永不抛）",
+            )
+        finally:
+            S.write_meta(ec_dir, ec_meta)
+            if before_env is None:
+                os.environ.pop(env_model_key, None)
+            else:
+                os.environ[env_model_key] = before_env
+        check(os.environ.get(env_model_key) == before_env, "NL2SQL_EMBED_MODEL 已复原")
+
+        # ── ⑥-d 重试与查询期熔断（2026-09-29 生产实证的离散停顿）────
+        # 生产：正常 73ms 的通道偶发停顿 ≥2.5s ⇒ 单次 timed out ⇒ 那一次检索降级纯 FTS。
+        # 形状是「重试能救」的，所以加一次重试；再用**查询期熔断**兜住「通道整个消失」时
+        # 重试带来的额外开销（否则每次检索 4s×2 > 原来 2.5s×1）。
+        section(f"⑥-d 重试与查询期熔断 [{backend_name}]")
+
+        class _Resp:
+            """最小可用响应：满足 `with ... as resp:` + `resp.read()`。"""
+
+            def __init__(self, payload: dict) -> None:
+                self._body = json.dumps(payload).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self) -> bytes:
+                return self._body
+
+        ok_payload = _resp(embedder.model_name())
+
+        def _transport(plan: list):
+            """按 plan 依次出结果；元素是 Exception ⇒ 抛，是 dict ⇒ 当成功响应。返回计数器。"""
+            calls = {"n": 0}
+
+            def fake(req, timeout):
+                i = calls["n"]
+                calls["n"] += 1
+                step = plan[i] if i < len(plan) else plan[-1]
+                if isinstance(step, Exception):
+                    raise step
+                return _Resp(step)
+
+            return fake, calls
+
+        def _with_transport(plan: list, fn):
+            fake, calls = _transport(plan)
+            before = {k: os.environ.get(k) for k in
+                      ("NL2SQL_EMBED_RETRIES", "NL2SQL_EMBED_COOLDOWN", "NL2SQL_EMBED_QUERY_TIMEOUT")}
+            os.environ["NL2SQL_EMBED_COOLDOWN"] = "0"   # 本节单独验熔断时再打开
+            embedder._reset_breaker_for_test()
+            try:
+                with mock.patch.object(embedder, "_open", fake):
+                    return fn(), calls, before
+            finally:
+                for k, v in before.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+                embedder._reset_breaker_for_test()
+
+        to = lambda: TimeoutError("timed out")  # noqa: E731
+
+        class _cooldown_env:
+            """临时把 `NL2SQL_EMBED_COOLDOWN` 设成 value，退出时**还原**（不是 pop）。
+
+            为什么强调「还原」：套件级那个 `= 0`（文件开头）一旦被 pop 掉，本节之后**所有**
+            段的熔断就悄悄变成默认 60s ⇒ 某一节的一次失败会开一个跨段的窗口，把后面用例
+            的向量腿变成静默空腿（**假通过**）。本类自带 `_reset_breaker_for_test()`，
+            所以每段不留窗口、也不改坏套件级默认值。
+            """
+
+            def __init__(self, value: str) -> None:
+                self._value = value
+
+            def __enter__(self):
+                self._before = os.environ.get("NL2SQL_EMBED_COOLDOWN")
+                os.environ["NL2SQL_EMBED_COOLDOWN"] = self._value
+                embedder._reset_breaker_for_test()
+                return self
+
+            def __exit__(self, *a):
+                if self._before is None:
+                    os.environ.pop("NL2SQL_EMBED_COOLDOWN", None)
+                else:
+                    os.environ["NL2SQL_EMBED_COOLDOWN"] = self._before
+                embedder._reset_breaker_for_test()
+                return False
+
+        check(embedder.query_timeout_s() == 4.0 and embedder.timeout_s() == 1.0,
+              "值域：查询期默认 4s、索引期单批仍是 env 里的 1s（两条独立预算）",
+              f"query={embedder.query_timeout_s()} batch={embedder.timeout_s()}")
+        res, calls, _ = _with_transport([to(), ok_payload], lambda: embedder.embed_one("工时"))
+        check(res is not None and calls["n"] == 2,
+              "首次超时 + 第二次成功 ⇒ **重试救回向量**（生产那两次的形状）", f"尝试 {calls['n']} 次")
+        res, calls, _ = _with_transport([to()], lambda: embedder.embed_one("工时"))
+        check(res is None and calls["n"] == 2, "一直超时 ⇒ None，且尝试次数 = 1+retries（不是无限）",
+              f"尝试 {calls['n']} 次")
+        os.environ["NL2SQL_EMBED_RETRIES"] = "0"
+        try:
+            res, calls, _ = _with_transport([to()], lambda: embedder.embed_one("工时"))
+            check(res is None and calls["n"] == 1,
+                  "负对照：NL2SQL_EMBED_RETRIES=0 ⇒ 只试 1 次（能关掉）", f"尝试 {calls['n']} 次")
+        finally:
+            os.environ.pop("NL2SQL_EMBED_RETRIES", None)
+        err400 = urllib.error.HTTPError("u", 400, "bad model", {}, None)
+        res, calls, _ = _with_transport([err400], lambda: embedder.embed_one("工时"))
+        check(res is None and calls["n"] == 1,
+              "负对照：HTTP 400（模型名/路径写错）⇒ **不重试**（重试一万次也一样）",
+              f"尝试 {calls['n']} 次")
+        err503 = urllib.error.HTTPError("u", 503, "model is loading", {}, None)
+        res, calls, _ = _with_transport([err503, ok_payload], lambda: embedder.embed_one("工时"))
+        check(res is not None and calls["n"] == 2, "HTTP 503（Ollama 载模型中）⇒ 重试", f"尝试 {calls['n']} 次")
+
+        # 熔断：一次失败后窗口内**零等待**，且不再发请求
+        with _cooldown_env("30"):
+            fake, calls = _transport([to()])
+            with mock.patch.object(embedder, "_open", fake):
+                first = embedder.embed_one("工时")
+                n_after_first = calls["n"]
+                second = embedder.embed_one("工时")
+                third = embedder.embed_one("工时")
+            check(first is None and n_after_first == 2 and calls["n"] == 2
+                  and second is None and third is None,
+                  "熔断：一次失败 ⇒ 冷却窗口内直接 None，**不再发请求**（通道消失时不再每次白烧 8s）",
+                  f"请求数 {calls['n']}")
+            check(embedder.breaker_open() is True, "熔断状态对外可观测（日志/排查用）")
+            embedder._reset_breaker_for_test()
+            check(embedder.breaker_open() is False, "reset 后窗口关闭（测试钩子）")
+            res, calls, _ = _with_transport([ok_payload], lambda: embedder.embed_one("工时"))
+            check(res is not None, "reset 后恢复：下一次成功调用正常返回", f"尝试 {calls['n']} 次")
+
+        # ⚠️ 熔断只管查询期：索引期失败一次不许让整批向量静默丢失
+        with _cooldown_env("30"):
+            fake, calls = _transport([to(), to(), _resp(embedder.model_name(), n=2)])
+            with mock.patch.object(embedder, "_open", fake):
+                embedder.embed_one("工时")                     # 2 次都超时 ⇒ 打开熔断
+                opened = embedder.breaker_open()
+                batch = embedder.embed_texts(["工时", "报工"])  # 索引期必须照试不误
+            check(opened and batch is not None and calls["n"] == 3,
+                  "负对照：熔断不管索引期 —— 查询期刚失败（熔断已开），embed_texts 仍照试并成功",
+                  f"请求数 {calls['n']}")
+
+        # 熔断的**可观测性**：窗口本身是静默的（不发请求 ⇒ 没有失败日志），必须自己说出来。
+        # 生产日志级别到 INFO ⇒ 开启要 WARNING、跳过要 INFO；两者任一掉到 DEBUG，日志里就
+        # 只剩「一条失败 + 60 秒静默 + 又一条失败」，查不出中间几次检索为什么没向量腿。
+
+        class _Cap(logging.Handler):
+            """只收集、不输出（免得把日志刷进验收输出）。"""
+
+            def __init__(self) -> None:
+                super().__init__(level=logging.DEBUG)
+                self.records: list[logging.LogRecord] = []
+
+            def emit(self, record: logging.LogRecord) -> None:
+                self.records.append(record)
+
+        cap = _Cap()
+        elog = logging.getLogger("agent.retrieval.embedder")
+        level_before = elog.level
+        elog.setLevel(logging.DEBUG)   # 让 DEBUG 也进 cap，才能证明「没掉到 DEBUG」
+        elog.addHandler(cap)
+        try:
+            with _cooldown_env("30"):
+                fake, calls = _transport([to()])
+                with mock.patch.object(embedder, "_open", fake):
+                    embedder.embed_one("工时")   # 两次超时 ⇒ 开熔断
+                    embedder.embed_one("工时")   # 窗口内 ⇒ 跳过
+        finally:
+            elog.removeHandler(cap)
+            elog.setLevel(level_before)
+
+        opened = [r for r in cap.records if "熔断开启" in r.getMessage()]
+        check(bool(opened) and opened[0].levelno >= logging.WARNING,
+              "熔断**开启**打 WARNING（状态变化，运维该看见；含冷却秒数）",
+              f"{len(opened)} 条 / {opened[0].levelname if opened else '-'}")
+        skipped = [r for r in cap.records if "冷却中" in r.getMessage()]
+        check(bool(skipped) and skipped[0].levelno == logging.INFO,
+              "负对照：窗口内**跳过**打 INFO（不是 DEBUG）⇒ 生产日志里能看见降级原因",
+              f"{len(skipped)} 条 / {skipped[0].levelname if skipped else '无'}")
+        check(embedder.cooldown_s() == 0.0 and embedder.breaker_open() is False,
+              "本节结束后套件级「熔断默认关」安然无恙（env 只许还原、不许 pop，否则窗口跨段污染）",
+              f"cooldown={embedder.cooldown_s()}s open={embedder.breaker_open()}")
+
+        # **成功也必须留痕**：否则「向量可用」与「压根没调用/形状闸没过」在日志里长得一样。
+        # 判据分两半：① 成功 ⇒ 一条 INFO「向量可用」（含尝试次数与耗时）；② 负对照 ——
+        # 形状闸没过（维数不符）⇒ **不许**打「向量可用」（否则「成功」被高估成 HTTP 200）。
+        cap2 = _Cap()
+        elog.addHandler(cap2)
+        # ⚠️ 必须显式抬到 DEBUG/INFO：`Logger.setLevel(NOTSET)` 会**继承 root 的 WARNING**,
+        # INFO 记录直接在这一层被丢掉、根本到不了 handler（这条踩过一次）。
+        elog.setLevel(logging.DEBUG)
+        try:
+            with _cooldown_env("0"):
+                embed_once, _, _ = _with_transport([ok_payload], lambda: embedder.embed_one("工时"))
+                rescued, _, _ = _with_transport([to(), ok_payload], lambda: embedder.embed_one("工时"))
+                bad = _resp(embedder.model_name(), vec=[0.0] * 8)   # HTTP 通、维数闸不过
+                embed_bad, _, _ = _with_transport([bad], lambda: embedder.embed_one("工时"))
+        finally:
+            elog.removeHandler(cap2)
+            elog.setLevel(level_before)
+
+        # 发版后评估「加的重试有没有用」就靠这一条：成功行里写 `第 2/2 次尝试`
+        rescued_line = [r.getMessage() for r in cap2.records if "第 2/2 次尝试" in r.getMessage()]
+        check(rescued is not None and bool(rescued_line),
+              "**重试救回在日志里可判**：成功行写「第 2/2 次尝试」（不是只看失败 WARNING）",
+              rescued_line[0].replace("[embedder] ", "") if rescued_line else "无")
+
+        ok_lines = [r for r in cap2.records if "向量可用" in r.getMessage()]
+        check(embed_once is not None and len(ok_lines) == 2 and ok_lines[0].levelno == logging.INFO,
+              "成功打一条 INFO「向量可用」（带 维数/尝试次数/耗时；4 次调用里 2 次成功 ⇒ 恰 2 条）",
+              ok_lines[0].getMessage() if ok_lines else "无")
+        check(embed_bad is None and len(ok_lines) == 2,
+              "负对照：维数闸不过（HTTP 200 但 8 维）⇒ **不打**「向量可用」，只有「维数不符」",
+              f"向量可用 {len(ok_lines)} 条 / 降级 {[r.getMessage()[:28] for r in cap2.records if '降级' in r.getMessage()]}")
 
         # ── ⑦ 空 mdl 拒绝构建 ────────────────────────────
         section(f"⑦ 空 mdl 拒绝构建 [{backend_name}]")
@@ -576,6 +913,25 @@ def run_lance_only(ws: pathlib.Path, proj: pathlib.Path) -> None:  # noqa: C901
             not any(sparse_item.id == h["id"] for h in hyb if "vector" in h["legs"]),
             "向量腿不返回向量为 null 的行（where vector IS NOT NULL 生效）",
         )
+
+        section("⑪-lance 分数列必须显式 select（不靠自动投影）")
+        # 2026-09-29 修：lancedb 0.37.1 仍会**自动投影** `_score`/`_distance`（每次查询打
+        # Deprecation warning），官方明说将来不再投影 ⇒ 不显式列进 select，两个 `r.get(...)`
+        # 会拿到 None ⇒ 上报分数**静默全 0**（召回与排序不受影响，所以更难发现）。
+        raw = backends.open_backend(idx_dir)
+        raw_fts = raw.fts("工时", limit=3)
+        check(bool(raw_fts) and all("_score" in r["row"] for r in raw_fts),
+              "FTS 腿原始行含 `_score`（显式 select 生效）")
+        with mock.patch.object(embedder, "embed_one", lambda text, **kw: _bag_of_chars(text)):
+            raw_vec = raw.vector("工时", limit=3)
+        check(bool(raw_vec) and all("_distance" in r["row"] for r in raw_vec),
+              "向量腿原始行含 `_distance`（同上）")
+        set_mode("fts")
+        only_fts = search.search(idx_dir, "工时", limit=3)
+        check(bool(only_fts) and all(h["score"] != 0 for h in only_fts),
+              "单腿 fts 模式下上报 score 非零（分数被真读到，而不是 0 兜底）",
+              str([h["score"] for h in only_fts[:3]]))
+        set_mode("hybrid")
 
         section("⑪-lance 分词器事实（换 tokenizer/换配置就会漂）")
         import lancedb  # noqa: E402

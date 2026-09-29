@@ -61,6 +61,19 @@ _CONTEXT_NOTE = (
 )
 
 
+def forget_freshness(project: Path) -> None:
+    """丢掉某项目的「新鲜度」判定缓存（**刚重建/刚写过索引**后必须调）。**永不抛**。
+
+    为什么必须有：`_index_fresh` 有 30s TTL。索引重建后不丢缓存，进程内会继续沿用
+    「陈旧 ⇒ 回落全量」的旧判定 —— 表现为「重建成功了，但 30s 内检索还是不走」，
+    属于最难查的那种「看起来没生效」。**失败只影响缓存，不影响索引本身**。
+    """
+    try:
+        _fresh_cache.pop(str(S.index_dir_for(Path(project))), None)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("[retrieval] 清理新鲜度缓存失败（无害，最多多陈旧 %ss）: %s", FRESH_TTL, e)
+
+
 def _index_fresh(project: Path, *, ttl: float = FRESH_TTL) -> bool:
     """索引存在、后端就绪、且 rev 与当前 `target/mdl.json` 一致。**永不抛**。"""
     try:
@@ -296,7 +309,7 @@ def refresh_examples(project: Path, db_name: str, md_path: Path) -> dict:
         result = indexer.upsert_items(project, db_name, [item])
         if result.get("need_rebuild"):
             result = {**indexer.build_index(project, db_name), "rebuilt": True}
-        _fresh_cache.pop(str(S.index_dir_for(project)), None)   # 刚写过 ⇒ 下次重新判新鲜度
+        forget_freshness(project)   # 刚写过 ⇒ 下次重新判新鲜度
         return result
     except Exception as e:  # noqa: BLE001
         _log.warning("[retrieval] 刷新索引失败（忽略，不影响写 markdown）: %s", e)

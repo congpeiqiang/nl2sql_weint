@@ -16,6 +16,8 @@
 - **空 mdl 不建索引**：`target/mdl.json` 读不到 ⇒ 拒绝构建（否则会写出一个「零条目」
   的假索引，读侧会以为一切正常而永远返回空）。
 - 失败的构建**不落盘**、不覆盖旧索引（先收集完再写）。
+- **写路径共三处**：CLI（`main` / `build_all`）、`store_query` 的 `adapters.refresh_examples`、
+  语义库换入 mdl.json 后的钩子 `rebuild_project`（后两处都走 `build_index`，幂等按 rev）。
 """
 from __future__ import annotations
 
@@ -482,6 +484,80 @@ def build_all(*, force: bool = False, with_vectors: bool | None = None, verbose:
         )
         out.append({"db_name": entry["db_name"], **result})
     return out
+
+
+def _registry_entry_for(project: Path) -> dict | None:
+    """注册表里指向该目录的条目（**只信注册表**：绝不按目录名拼 db_name）。**永不抛**。
+
+    生产 `db_config.json` 的 `wren_project` 是绝对路径（`/app/data/workspace/witops_wrenai`），
+    而 `name` 是库名（`witops`）—— 两者不相等，所以必须按**路径**匹配而不是名字。
+    先比字符串（原样相等就能命中，省一次 realpath），再比 `resolve()`。
+    """
+    want = str(project)
+    try:
+        want_real = str(Path(project).resolve())
+    except OSError:
+        want_real = want
+    for entry in S.registered_projects():
+        raw = str(entry.get("project") or "")
+        if raw in (want, want_real):
+            return entry
+        try:
+            if str(Path(raw).resolve()) == want_real:
+                return entry
+        except OSError:
+            continue
+    return None
+
+
+def rebuild_project(project: Path, *, force: bool = False, verbose: bool = False) -> dict:
+    """按**项目路径**重建索引（语义库「重建 / 更新 / 接管 / 新建」换入 mdl.json 后的钩子）。**永不抛**。
+
+    为什么需要：读侧的新鲜度看 `sha256(target/mdl.json)[:16]`，而上面那些动作都会改动它
+    ⇒ 不重建的话索引**立刻陈旧**，检索静默回落全量注入（安全，但配了等于没配）。
+    这个函数就是把「运维记得重跑 CLI」变成「自动做」。
+
+    三条刻意的行为：
+
+    - **只信注册表**（R8）：db_name 从 `registered_projects()` 取；注册表里没有这个目录
+      ⇒ **不建**。用空 db_name 硬建出来的条目会被搜索侧的库过滤掉 ⇒ 表现得像「检索没有
+      结果」（`{"matches": []}`，**不回落**），比「没有索引」更糟。
+    - **`off` 直接跳过**：没有消费者时建索引纯属白花嵌入算力，且会给 `off` 引入磁盘副作用
+      （「`off` 一键回退」必须是干净的）。
+    - **幂等交给 `build_index`**：它自带 rev 闸（内容没变 ⇒ `skipped`），所以换入动作后
+      **无条件**调用是安全的 —— 更新只拉了个 README 之类的场景不会白重建一遍。
+    """
+    project = Path(project)
+    if not S.is_enabled():
+        return {"ok": True, "skipped": True, "reason": "检索关闭", "mode": S.retrieval_mode()}
+    try:
+        entry = _registry_entry_for(project)
+        if entry is None:
+            return {
+                "ok": False,
+                "reason": "项目不在注册表 ⇒ 跳过（不按目录名拼 db_name）",
+                "project": str(project),
+            }
+        result = build_index(
+            project, str(entry.get("db_name") or ""), force=force, verbose=verbose
+        )
+        if result.get("ok"):
+            from agent.retrieval import adapters   # 函数级 import：避免与 adapters 成环
+
+            adapters.forget_freshness(project)     # 刚重建 ⇒ 不许再吃 30s TTL 的旧判定
+            # 向量腿开着却一条向量都没落 ⇒ 嵌入通道大概率挂了，而这一版**已经覆盖**掉
+            # 上一版（可能 1213/1213 有向量）的索引。`build_index` 按设计「嵌入是纯增益、
+            # 零向量也落盘」，所以这里不拦，但要**显式标出来**给调用方/运维看 —— 手跑 CLI
+            # 能从 `向量 0/1213` 看出来，自动钩子就必须在响应/日志里说清。
+            # ⚠️ 必须排除 `skipped`：跳过（rev 未变）压根没重建、旧索引的向量原封不动，
+            # 此时 `result` 里**没有 `vectors` 键**，`not None` 会把「跳过」误报成
+            # 「零向量」——2026-09-29 生产冒烟当场抓到（日志每跳一次假报一次）。
+            if not result.get("skipped") and S.vector_enabled() and not result.get("vectors"):
+                result = {**result, "vectors_degraded": True}
+        return result
+    except Exception as e:  # noqa: BLE001
+        _log.warning("[retrieval] 按项目重建索引失败（调用方 best-effort，忽略）: %s", e)
+        return {"ok": False, "reason": f"{type(e).__name__}: {e}", "project": str(project)}
 
 
 def main(argv: list[str] | None = None) -> int:

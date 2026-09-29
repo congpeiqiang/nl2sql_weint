@@ -551,6 +551,25 @@ def _final_numeric_values(messages) -> set | None:
     return nums if nums else None
 
 
+def _cube_produced_data(messages) -> bool:
+    """这批消息里是否存在**成功取到数**的 Cube 调用（`query_cube` 非 `sql_only`）。
+
+    判据与 `process_audit.judge_sql_origin` 的 `cube_data_calls` **同源**（同一份
+    `scan_tool_calls` + 同一条件 `ok and not sql_only`），不重写第二套。刻意**不**
+    把 `sql_only` 预览算进来：预览只是一条被编译出来的 SQL、没返回数据，不能证明
+    「数据来自 Cube」。fail-open：扫不出来 ⇒ False ⇒ 调用方走老行为。
+    """
+    try:
+        from agent.utils.process_audit import scan_tool_calls
+        for r in scan_tool_calls(messages):
+            if (_CUBE_TOOL_HINT in r["tool"] and r["ok"]
+                    and not r["args"].get("sql_only")):
+                return True
+    except Exception as e:  # noqa: BLE001  审计旁路，探测失败不改变任何行为
+        _logger.debug("[check_progress] Cube 通道探测失败: %s", e)
+    return False
+
+
 def _extract_last_sql(messages) -> str:
     """从子线程消息提取真实执行 SQL，供报告装配（build_report）使用。
 
@@ -580,6 +599,13 @@ def _extract_last_sql(messages) -> str:
       1) 结果列名与子 agent 最终答案表格表头匹配的 run_sql；
       2) 返回行数最多的 run_sql（最终数据表通常是最大结果集）；
       3) 兜底：最后一条 run_sql。
+
+    ⚠️ 兜底层（2/3）之前有一道**通道闸**（2026-09-29 修，生产 trace dcce39a0）：
+    tier 0/0b/1 全落空 = 选中的这条 SQL **没有任何「产出了最终表」的证据**，此时若同批
+    消息里存在成功取数的 Cube 调用（`_cube_produced_data`）⇒ 数据来自 Cube 通道，那条
+    run_sql 只是探值 ⇒ 返回 ""，交回 Cube 通道（调用方的 `else` 分支如实给查询定义 +
+    编译后的物理 SQL，来源判 `cube_metric`）。**只在无证据时生效**：任何一层命中
+    （值/标量/列名对得上最终表）都照旧返回那条 SQL，无论通道是 Cube 还是 run_sql。
     """
     sqls = []  # [{sql, rows, cols, values}]
     for i, m in enumerate(messages):
@@ -660,6 +686,29 @@ def _extract_last_sql(messages) -> str:
         for s in reversed(sqls):
             if s["cols"] and set(s["cols"]) & final_headers:
                 return s["sql"]
+
+    # ── 通道闸：无证据的兜底候选 vs Cube 通道（2026-09-29）─────────────
+    # 生产 trace dcce39a0（发版后用户实测）：数据由 4 次 `query_cube`（cube
+    # `bug_quality`，measures bug_count / finished_count 按 create_time:day）产出，
+    # 但中途跑过一次 `SELECT CURRENT_DATE AS today, DATE_FORMAT(...) ...` 探值——
+    # 那是**唯一**一条 run_sql。答案表是「日期|新增|完成」的中文表头日明细，与探值
+    # 三列（today/month_start/month_end）无值/列名交集 ⇒ tier0/0b/1 全落空 ⇒ tier2
+    # 「行数最多」把这条恒 1 行的探值当成了产出 SQL。后果不止「SQL 选错」：调用方
+    # `if sql:` 分支据此压掉了 `else` 里的 Cube 查询定义 + `plan_cube_sql`（真实
+    # 物理 SQL **整节消失**），`judge_sql_origin` 也因「锚点之前没有成功 cube 调用」
+    # 判成 `llm_from_schema`——报告里那句「模型依据语义库 schema 手写（未使用 Cube
+    # 具名指标）」正好与事实相反。
+    # 判据：兜底层选中的 SQL 本身**没有任何产出证据**，而同批消息里有成功取数的 Cube
+    # 调用 ⇒ 数据来自 Cube。返回 ""（合法返回值，契约里「没有产出 SQL」即空串），
+    # 让调用方走 Cube 通道如实渲染。tier 0/0b/1 命中时根本走不到这里，故正例不受影响。
+    if _cube_produced_data(messages):
+        _logger.info(
+            "[check_progress] run_sql 候选无产出证据（tier0/0b/1 全落空）且有成功取数的 "
+            "Cube 调用 → 判数据来自 Cube 通道，不用探值充当产出 SQL（候选 %d 条，"
+            "行数 %s）",
+            len(sqls), [c["rows"] for c in sqls],
+        )
+        return ""
 
     # ── tier 2：行数最多 ──────────────────────────────────────────
     best = max(sqls, key=lambda s: s["rows"])
@@ -993,15 +1042,102 @@ def _session_thread_id() -> str:
 
 
 def _current_db_name() -> str:
-    """读当前库名（主 agent configurable.db_name，S3-2 口径护栏用）。"""
+    """读当前库名（主 agent configurable.db_name，S3-2 口径护栏用）。
+
+    configurable 读不到 → 回落**会话账本** `thread_db`（恰好记着一个库才采用）。
+
+    ⚠️ 兜底不是防御性编程，是生产实证（2026-09-29，会话 `01a0eb59`）：manifest 只由
+    **续跑 run** 写，而那条 run 的 config 是 `sync_subagent_todos._run_context_config`
+    从「上一个 run」捞 db_name 手拼的——**某一环捞不到就断链**，且下一个续跑又拿本 run
+    当「上一个 run」⇒ 该会话后续全空（实测 77 份 manifest：64 填 / 13 空）。断链时
+    `configurable` 只剩 user_id，`thread_db` 里却有一行（该表由 HTTP 层在
+    `configurable.db_name` 非空时写、且写的是**钳制之后**的值）⇒ 本兜底与
+    `report_builder._current_db_name` **同源同闸**（那边 09-26 已踩过同一个坑）。
+
+    影响面不止审计字段：本值还直接喂 `caliber_sql_warning(sql, _current_db_name())`，
+    空值 ⇒ `lookup_spec("")` 返回 None ⇒ **S3-2 口径护栏静默失效**。
+    """
     try:
         from langgraph.config import get_config as _lg_get_config
         cfg = _lg_get_config()
         if cfg:
-            return str((cfg.get("configurable") or {}).get("db_name", "") or "")
+            db = str((cfg.get("configurable") or {}).get("db_name", "") or "")
+            if db:
+                return db
     except Exception:  # noqa: BLE001
         pass
+    try:
+        tid = _session_thread_id()
+        if not tid:
+            return ""
+        from agent.auth.grants import dbs_for_thread
+
+        cands = [d for d in dbs_for_thread(tid) if d]
+        if len(cands) == 1:
+            _logger.info(
+                "[check_progress] configurable 无 db_name，回退会话账本：库 %s", cands[0]
+            )
+            return cands[0]
+        _logger.info(
+            "[check_progress] configurable 无 db_name，会话账本记着 %d 个库 → 不猜",
+            len(cands),
+        )
+    except Exception as e:  # noqa: BLE001  兜底失败 = 维持原行为（空串）
+        _logger.debug("[check_progress] 会话账本兜底失败: %s", e)
     return ""
+
+
+def _question_identity(thread_id: str = "") -> tuple[str, str]:
+    """(question_id, user_question)：config.metadata 优先，缺则查 trace_bind 的子任务绑定。
+
+    ⚠️ 这个兜底同样是生产实证倒逼的（2026-09-29，会话 `01a0eb59`，trace `dcce39a0…`）：
+    manifest 只在**续跑 run** 里写，而那条 run 的两个问题身份键都拿不到——
+      - `user_question`：续跑 run 的 config 是手拼的（只有 configurable），`input.messages`
+        又是以 `[系统通知]` 开头的合成消息 —— `langfuse_metadata._extract_question_summary`
+        **有意跳过** `[系统` 前缀 ⇒ HTTP 层虽会合并 metadata（`langfuse_session_id` 等都在），
+        但**结构性没有** `user_question` 这个键；
+      - `question_id`：`_question_id()` 的三级优先里 1/2 只有子 run 才被注入、3（OTel
+        活跃 span）在主 run 链路上拿不到（见 `_current_otel_trace_id` docstring）。
+    实测后果：77 份 manifest 里这两个字段 **77/77 全空**，且 `_stem()` 因此退化成
+    只用 `sub_thread_id[:8]` ⇒ 同会话多问题的审计件无法按问题区分。
+
+    落盘当刻的权威来源是 `trace_bind` 的 `task_trace`（`langfuse_client` 在**派发
+    异步子任务**时登记）：`trace_id` 就是该问题主 run 的 trace id（与 `_question_id()`
+    的定义完全一致），`question` 是用户问题原文；键是子任务 id，即本函数的入参。
+
+    fail-open：`langfuse_span` 的两个读值函数本身不抛；查表失败/无行 ⇒ 只补不上的那个
+    字段（或原样返回），行为不劣于改动前。
+    """
+    qid = uq = ""
+    try:
+        from agent.middlewares.langfuse_span import _question_id, _user_question
+
+        qid = str(_question_id() or "")
+        uq = str(_user_question() or "")
+    except Exception as e:  # noqa: BLE001  读 config 不是错误路径（离线/测试）
+        _logger.debug("[check_progress] 读问题身份失败: %s", e)
+    if qid and uq:
+        return qid, uq
+    if thread_id:
+        try:
+            from agent.trace.trace_bind_store import get_store
+
+            hit = get_store().get_task(str(thread_id))
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[check_progress] 查 trace_bind 子任务绑定失败: %s", e)
+            hit = None
+        if hit:
+            # get_task 返回 (匹配到的完整 task_id, (main_thread, trace_id, obs, q, desc))
+            _key, _val = hit
+            _tid, _q = str(_val[1] or ""), str(_val[3] or "")
+            qid = qid or _tid
+            uq = uq or _q
+            _logger.info(
+                "[check_progress] 问题身份来自 trace_bind 兜底（续跑 run 的 metadata 没有）："
+                " task=%s trace=%s 问题=%s", str(thread_id)[:12],
+                (qid or "∅")[:16], (uq or "∅")[:20],
+            )
+    return qid, uq
 
 
 def _collect_dry_run_sqls(messages) -> set:
@@ -1282,19 +1418,18 @@ def apply_patch():
             # 的地方；工具边界一次只有一条工具消息，看不到全貌。
             # `write_process_artifacts` 自带 fail-open，异常只意味着没有审计件。
             try:
-                from agent.middlewares.langfuse_span import (
-                    _active_workspace_path,
-                    _question_id,
-                    _user_question,
-                )
+                from agent.middlewares.langfuse_span import _active_workspace_path
                 from agent.utils.process_audit import write_process_artifacts
+                # 问题身份走 `_question_identity`（metadata → trace_bind 子任务绑定）：
+                # 本处所在的是**续跑 run**，其 metadata 结构性没有 user_question（见该函数 docstring）
+                _qid, _uq = _question_identity(thread_id)
                 _ptrs = write_process_artifacts(
                     root=_active_workspace_path(),
                     session_thread_id=_session_thread_id(),
                     sub_thread_id=thread_id,
                     messages=messages,
-                    question_id=_question_id(),
-                    user_question=_user_question(),
+                    question_id=_qid,
+                    user_question=_uq,
                     db_name=_current_db_name(),
                     status="success",
                     producing_sql=sql,
@@ -1316,19 +1451,17 @@ def apply_patch():
             # status != "success" ⇒ 不写 routing / cube_summary（没有可判的路由结论）。
             # producing_sql 传空 ⇒ `sql_origin` 如实落 `unknown`，不猜。
             try:
-                from agent.middlewares.langfuse_span import (
-                    _active_workspace_path,
-                    _question_id,
-                    _user_question,
-                )
+                from agent.middlewares.langfuse_span import _active_workspace_path
                 from agent.utils.process_audit import write_process_artifacts
+                # 同成功路径：问题身份走 `_question_identity`（失败件也要能按问题归属）
+                _qid, _uq = _question_identity(thread_id)
                 _ptrs = write_process_artifacts(
                     root=_active_workspace_path(),
                     session_thread_id=_session_thread_id(),
                     sub_thread_id=thread_id,
                     messages=messages,
-                    question_id=_question_id(),
-                    user_question=_user_question(),
+                    question_id=_qid,
+                    user_question=_uq,
                     db_name=_current_db_name(),
                     status="error",
                     producing_sql="",

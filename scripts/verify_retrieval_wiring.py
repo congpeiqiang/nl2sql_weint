@@ -754,6 +754,94 @@ def run_db_name(ws: pathlib.Path, proj: pathlib.Path, backup: pathlib.Path) -> N
           "接线：mcp_tool.py 与 _wren_project_path 同处注入 _wren_db_name")
 
 
+def run_semantic_build_hook(ws: pathlib.Path, proj: pathlib.Path, backup: pathlib.Path) -> None:
+    """⑩ 语义库换入 mdl.json 后的索引钩子（`indexer.rebuild_project`）。
+
+    要证的是**自动修回新鲜**：mdl 一变索引就陈旧 ⇒ 检索静默回落全量（安全但白配）。
+    钩子必须能在换入后一次把 rev 对齐，且 `off` / 未注册 / 无 mdl 三种情况都要**不动**。
+    """
+    section("⑩ 构建钩子：rev 变 ⇒ 自动重建并清 30s 缓存；off/未注册/无 mdl 一律不动")
+    set_mode("fts")
+    idx_dir = S.index_dir_for(proj)
+
+    first = indexer.rebuild_project(proj)
+    check(first.get("ok") and not first.get("skipped") and int(first.get("items") or 0) > 0,
+          "钩子全量建出索引", str(first)[:160])
+    check((S.read_meta(idx_dir) or {}).get("db_name") == "demo",
+          "db_name 取自注册表（demo ≠ 目录名 demo_wrenai）", str((S.read_meta(idx_dir) or {}).get("db_name")))
+    check(adapters._index_fresh(proj) is True, "建完即判新鲜")
+
+    # 模拟语义库「重建/更新」：mdl.json 变了 ⇒ 索引立刻陈旧
+    mdl = proj / "target" / "mdl.json"
+    data = json.loads(mdl.read_text(encoding="utf-8"))
+    data["models"][0]["properties"]["displayName"] = "工时表（V2）"
+    mdl.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    adapters.forget_freshness(proj)
+    check(adapters._index_fresh(proj) is False,
+          "★ 负对照：mdl 一变 ⇒ 判陈旧（这就是「配了等于没配」的入口）")
+
+    again = indexer.rebuild_project(proj)
+    check(again.get("ok") and not again.get("skipped"), "钩子把陈旧索引重建（rev 变了 ⇒ 不 skipped）")
+    check(adapters._index_fresh(proj) is True,
+          "★ 关键：钩子之后立刻判新鲜 ⇒ 证明它清了 30s TTL 缓存（否则要等 30s 才生效）",
+          f"rev={str((S.read_meta(idx_dir) or {}).get('rev'))}")
+
+    third = indexer.rebuild_project(proj)
+    check(third.get("ok") and third.get("skipped"),
+          "★ 幂等：rev 未变 ⇒ skipped（「更新」只拉了 README 不白重建）", str(third)[:120])
+    # 负对照（2026-09-29 生产冒烟抓到）：skipped 的 result 里**没有 `vectors` 键**，
+    # `not result.get("vectors")` 恒真 ⇒ 会把「跳过」误报成「零向量」。跳过一次都没重建，
+    # 旧索引的向量原封不动，标 degraded 是假警报（每次构建都往日志写一行假的）。
+    check("vectors_degraded" not in third,
+          "★ 负对照：skipped 不得带 vectors_degraded（假警报 ⇒ 日志误导排查）", str(third)[:160])
+
+    # hybrid 下嵌入通道挂了（本脚本把通道钉在 127.0.0.1:9）= 索引照样建成，但**零向量**
+    # ⇒ 会覆盖掉上一版有向量的索引。这条是「看得见」的唯一保证（自动钩子没有人工看输出）。
+    set_mode("hybrid")
+    mdl.write_text(json.dumps({**data, "models": data["models"][:1]}, ensure_ascii=False), encoding="utf-8")
+    degraded = indexer.rebuild_project(proj)
+    check(degraded.get("ok") and not degraded.get("vectors") and degraded.get("vectors_degraded") is True,
+          "★ 嵌入不可用 ⇒ 索引仍建成（纯 FTS）但标出 vectors_degraded", str(degraded)[:200])
+    set_mode("fts")
+
+    # 未注册：绝不用目录名/空 db_name 硬建（空 db_name 会被搜索侧过滤掉 ⇒ 看起来像「永远没结果」）
+    unreg = indexer.rebuild_project(backup)
+    check(unreg.get("ok") is False and S.index_dir_for(backup).exists() is False,
+          "★ 负对照：未注册目录 ⇒ 拒绝建索引（不猜 db_name）", str(unreg)[:160])
+
+    # off：跳过，且**不创建索引目录**（「off 一键回退」必须是干净的）
+    shutil.rmtree(idx_dir, ignore_errors=True)
+    adapters.forget_freshness(proj)
+    for mode in ("off", None):
+        set_mode(mode)
+        off = indexer.rebuild_project(proj)
+        check(off.get("ok") and off.get("skipped") and not idx_dir.exists(),
+              f"★ 负对照：{mode or '不设 env（默认 off）'} ⇒ 跳过且不落盘任何索引目录",
+              str(off)[:160])
+    set_mode("fts")
+
+    # 无 mdl：`build=False` 的接管 / 构建失败都会走到这里
+    proj_nomdl = ws / "nomdl_wrenai"
+    make_project(proj_nomdl, examples={})
+    (proj_nomdl / "target" / "mdl.json").unlink()
+    cfg_path = ws / "db_config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg["databases"].append(
+        {"name": "nomdl", "db_type": "postgres", "wren_project": str(proj_nomdl), "status": "active"}
+    )
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")   # 注册 ⇒ 排除「未注册」这条更早的出口
+    res_nomdl = indexer.rebuild_project(proj_nomdl)
+    check(res_nomdl.get("ok") is False and "mdl" in str(res_nomdl.get("reason"))
+          and not S.index_dir_for(proj_nomdl).exists(),
+          "★ 负对照：没有 target/mdl.json ⇒ 拒绝建（不许写出零条目假索引）", str(res_nomdl)[:160])
+
+    # 接线：wren_semantic 的钩子在 `off` 下不 import indexer（保住「off 零加载」），
+    # 且四个换入点都挂上（结构性断言在 verify_semantic_staging_swap.py 里更细）
+    src = (_REPO / "src/api/wren_semantic.py").read_text(encoding="utf-8")
+    check("offload_long(indexer.rebuild_project" in src and src.count("_refresh_retrieval_index(") >= 5,
+          "接线：wren_semantic 共 4 个换入点 + 1 处定义都挂了钩子", str(src.count("_refresh_retrieval_index(")))
+
+
 def run_corpus_same_source(ws: pathlib.Path, proj: pathlib.Path) -> None:
     """⑧ R12：索引语料与「全量注入/核验」同源；新语义只做加法。"""
     section("⑧ 语料同源（R12）：knowledge/sql/*.md → example_sql，字段与 wren 逐字")
@@ -892,6 +980,7 @@ def main() -> int:
         run_store_query_refresh(ws, proj)
         run_db_name(ws, proj, backup)
         run_corpus_same_source(ws, proj)
+        run_semantic_build_hook(ws, proj, backup)
 
     run_lazy_import()
 

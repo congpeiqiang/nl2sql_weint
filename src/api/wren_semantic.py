@@ -14,6 +14,12 @@
 更新（git pull + context build）一直不需要重启：每次工具调用新起的 MCP 子进程会
 重新读 `target/mdl.json`。响应里的 `requires_restart` 恒为 `false`（保留字段兼容
 老前端），详情见 `mcp` 字段。原理见 `agent/middlewares/dynamic_mcp_tools.py`。
+
+**检索索引钩子**（`_refresh_retrieval_index`）：`mdl.json` 一变，`agent.retrieval` 那份
+索引就陈旧（读侧按 `sha256(target/mdl.json)[:16]` 判新鲜度）⇒ 检索静默回落全量注入。
+所以四个会写/换 `mdl.json` 的入口（重建 / 更新 / 接管 / 从 Git 新建）在换入**成功后**
+best-effort 重建索引：`NL2SQL_RETRIEVAL=off` 或没有 `mdl.json` 时跳过，失败只进文案。
+它把「运维记得重跑 `python -m agent.retrieval.indexer --all`」变成「自动做」。
 """
 from __future__ import annotations
 
@@ -438,6 +444,54 @@ def _build_with_profile(
     ok_build, out_build = _run_wren(project_path, "context", "build")
     steps.append("context build " + ("ok" if ok_build else f"失败({out_build})"))
     return ok_build, "；".join(steps)
+
+
+async def _refresh_retrieval_index(project: Path) -> dict:
+    """语义库换入 `target/mdl.json` 之后 **best-effort** 重建检索索引。**永不抛**。
+
+    为什么必须挂在这里：读侧的新鲜度看 `sha256(target/mdl.json)[:16]`（`retrieval` 的
+    `_index_fresh`）。构建 / 更新 / 接管 / 新建都会改动它 ⇒ 不重建的话索引**立刻陈旧**，
+    检索静默回落全量注入 —— 安全但等于白配。本函数把「运维记得重跑 CLI」变成「自动做」。
+
+    与上面 `memory index` 同级：**best-effort**，失败只写日志与文案，不影响换入结果。
+    四条约束：
+
+    - 进长任务池（`offload_long`）：带向量的全量重建在生产实测 ~40s（1213 条），
+      直接在事件循环里跑会把别人的 SSE / 子任务一起卡住（P1-14 同一理由）。
+    - 没有 `target/mdl.json` 就没什么可索引 ⇒ 直接跳过（`build=False` 的接管、
+      构建失败的场景都会走到这里）。
+    - `NL2SQL_RETRIEVAL=off` ⇒ 跳过，且**连索引目录都不建**。闸放在 `import indexer`
+      **之前**：`off` 时「零加载检索层」是既有性质（⑨ 段验证的），别在这里破掉。
+    - 幂等由 `build_index` 的 rev 闸负责 ⇒ 无条件调用安全（内容没变立刻返回 `skipped`）。
+    """
+    project = Path(project)
+    if not (project / "target" / "mdl.json").is_file():
+        return {"ok": True, "skipped": True, "reason": "还没有 target/mdl.json"}
+    try:
+        from agent.retrieval import schema as S   # 轻量模块；`indexer`/lancedb 留到闸后
+
+        if not S.is_enabled():
+            return {"ok": True, "skipped": True, "reason": "检索关闭", "mode": S.retrieval_mode()}
+        from agent.retrieval import indexer
+
+        result = await offload_long(indexer.rebuild_project, project)
+        _logger.info("[wren_semantic] 检索索引钩子 %s: %s", project.name, result)
+        return result
+    except Exception as e:  # noqa: BLE001 —— 钩子失败绝不许影响语义库构建
+        _logger.warning("[wren_semantic] 重建检索索引失败（忽略，不影响语义库）: %s", e)
+        return {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+def _index_tail(result: dict) -> str:
+    """`_refresh_retrieval_index` 的结果 → 一句人话（响应文案用，形状同 `memory index`）。"""
+    if result.get("ok") and result.get("skipped"):
+        return f"；检索索引跳过（{result.get('reason', '')}）"
+    if result.get("ok"):
+        tail = f"；检索索引已重建（{result.get('items')} 条，向量 {result.get('vectors')}）"
+        if result.get("vectors_degraded"):
+            tail += "⚠️ 本轮零向量（嵌入通道不可用？）⇒ 只剩 FTS 腿，通道恢复后请再点一次「构建」"
+        return tail
+    return f"；⚠️ 检索索引未重建：{result.get('reason', '')}（检索会回落全量注入）"
 
 
 def _invalidate_detector() -> None:
@@ -893,7 +947,7 @@ async def _adopt_git_into(
     整个流程持有该项目的写锁（`_project_lock`）：并发的「更新」/「重建」不会插进来。
     """
     async with _project_lock(str(project.resolve())):
-        return await _adopt_git_into_locked(
+        payload = await _adopt_git_into_locked(
             project,
             repo_url,
             ref,
@@ -902,6 +956,13 @@ async def _adopt_git_into(
             build=build,
             overwrite_connection=overwrite_connection,
         )
+        # 接管换入的是**整个目录**（带构建产物时 mdl.json 就是新的）⇒ 索引要跟上；接管前
+        # 这个目录还没有 `.git`、也没有索引。挂到既有的 `build_note` 上（那是这条路里
+        # 「构建类结论」的固定落点，不再新造一个前端不认的字段）。best-effort：失败只进文案。
+        if isinstance(payload, dict):
+            idx = await _refresh_retrieval_index(project)
+            payload = {**payload, "build_note": str(payload.get("build_note") or "") + _index_tail(idx)}
+        return payload
 
 
 async def _adopt_git_into_locked(
@@ -1254,6 +1315,10 @@ async def from_git(request: Request):
         _invalidate_detector()
         mcp = await _ensure_mcp_tools(target_db)  # 工具随即可用，无需重启
 
+    # 新建出来的库也要有检索索引（**必须在关联之后**：db_name 只从注册表取，没关联就没有
+    # 条目 ⇒ 索引会被跳过）。挂 `build_note`：与上面那条构建结论同处，前端已认这个字段。
+    build_note = str(build_note or "") + _index_tail(await _refresh_retrieval_index(project_root))
+
     return json_response(
         {
             "ok": True,
@@ -1320,6 +1385,11 @@ async def _rebuild_swapped(project: Path) -> tuple[bool, str]:
 
     async with _project_lock(str(project.resolve())):
         ok, payload = await _stage_build_replace(project, "build", _prepare)
+        if ok:
+            # 换入成功 ⇒ mdl 已变 ⇒ 顺手把检索索引跟上（**锁内**：与并发的「重建/更新」串行，
+            # 免得索引从别的 mdl 版本建出来又被下一个动作改掉的竞态）
+            idx = await _refresh_retrieval_index(project)
+            payload = {**payload, "message": "context build 完成" + _index_tail(idx)}
     return ok, str(payload.get("message", "构建失败"))
 
 
@@ -1351,9 +1421,8 @@ async def build_project(request: Request):
     # 关联库的工具重装一遍（免重启）：语义库**内容**更新本就不需要重载，但若该库
     # 此前加载失败（如建库时还没有 MDL），条目会卡在失败态，build 是重试的时机
     mcp = await _sync_mcp_tools_many(_associated_dbs(project))
-    return json_response(
-        {"ok": True, "message": "context build 完成" + tail, "mcp": mcp}
-    )
+    # `message` 里已含「context build 完成 + 检索索引钩子结论」（见 `_rebuild_swapped`）
+    return json_response({"ok": True, "message": message + tail, "mcp": mcp})
 
 
 async def validate_project(request: Request):
@@ -2423,6 +2492,14 @@ async def _pull_swapped(project: Path, ref: str, discard_local: bool) -> tuple[b
 
     async with _project_lock(str(project.resolve())):
         ok, payload = await _stage_and_swap(project, "pull", _prepare)
+        if ok:
+            # 拉取可能换掉了 target/mdl.json（仓库里提交了构建产物）⇒ 检索索引同样要跟上。
+            # 内容没变时 `build_index` 的 rev 闸会让它立刻返回 skipped，不白重建。
+            idx = await _refresh_retrieval_index(project)
+            payload = {
+                **payload,
+                "message": str(payload.get("message") or "") + _index_tail(idx),
+            }
     return ok, payload
 
 

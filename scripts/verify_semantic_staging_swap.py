@@ -558,6 +558,19 @@ def section_rebuild() -> None:
     check(backups_leftover(ws) == [], "并发后不留暂存残留", backups_leftover(ws))
     check(scan_like_scan_wren_projects(ws) == ["libC"], "并发后语义库列表仍然只有它自己")
 
+    # 检索索引钩子必须**纯增益**：开着检索（fts）且钩子必然失败（这个假项目不在注册表、
+    # 也没有真 mdl）时，构建仍须 ok=True，失败只体现为文案里的一句 —— 钩子绝不能把
+    # 「语义库构建成功」污染成失败。
+    stub_env(STUB_MARK="HOOK", STUB_FAIL="", STUB_SLEEP="0")
+    os.environ["NL2SQL_RETRIEVAL"] = "fts"
+    try:
+        ok_h, msg_h = asyncio.run(W._rebuild_swapped(proj))
+    finally:
+        os.environ.pop("NL2SQL_RETRIEVAL", None)
+    check(ok_h is True, "★ 钩子失败/跳过时构建仍成功（best-effort 不污染换入）", msg_h)
+    check("检索索引" in msg_h, "★ 文案里带上了索引结论（运维从响应就能看到）", msg_h)
+    check(backups_leftover(ws) == [] and backup_dirs(ws) == [], "挂钩子后仍不留暂存残留/备份目录")
+
 
 # ══ ④ 结构断言（端点必须走带锁的 helper）═══════════════════════
 def section_structure() -> None:
@@ -658,6 +671,63 @@ def section_structure() -> None:
     ) if body is not None else 0
     check(build_line < rename_line,
           "接管：构建（_build_with_profile）在第一次 os.rename 之前", (build_line, rename_line))
+
+    # ── 检索索引钩子（`_refresh_retrieval_index`）─────────────────────────────
+    # 换入 mdl.json 之后必须顺手把 `agent.retrieval` 的索引跟上，否则读侧 rev 闸判陈旧 ⇒
+    # 检索静默回落全量注入（配了等于没配）。四条结构性要求：挂满四个入口 / 在换入之后 /
+    # 在项目写锁内 / best-effort（长任务池 + 没有 mdl 就跳过）。
+    def _line_of(fn_name: str, name: str) -> int:
+        node = fns.get(fn_name)
+        if node is None:
+            return 10**9
+        lines = [
+            n.lineno
+            for n in ast.walk(node)
+            if (isinstance(n, ast.Name) and n.id == name)
+            or (isinstance(n, ast.Call) and getattr(n.func, "id", "") == name)
+        ]
+        return min(lines or [10**9])
+
+    def _hook_inside_lock(fn_name: str) -> bool:
+        """钩子调用点是否落在 `async with _project_lock(...)` 的**体内**。"""
+        node = fns.get(fn_name)
+        if node is None:
+            return False
+        for n in ast.walk(node):
+            if not isinstance(n, ast.AsyncWith):
+                continue
+            if not any("_project_lock" in ast.dump(it.context_expr) for it in n.items):
+                continue
+            if any(
+                isinstance(c, ast.Call) and getattr(c.func, "id", "") == "_refresh_retrieval_index"
+                for c in ast.walk(n)
+            ):
+                return True
+        return False
+
+    for fn, installer in (("_rebuild_swapped", "_stage_build_replace"), ("_pull_swapped", "_stage_and_swap")):
+        check("_refresh_retrieval_index" in calls(fn),
+              f"{fn} 挂检索索引钩子", sorted(calls(fn)))
+        check(_line_of(fn, installer) < _line_of(fn, "_refresh_retrieval_index"),
+              f"{fn}：钩子在换入（{installer}）**之后** ⇒ 建的是刚换入的 mdl",
+              (_line_of(fn, installer), _line_of(fn, "_refresh_retrieval_index")))
+        check(_hook_inside_lock(fn),
+              f"{fn}：钩子在项目写锁**内** ⇒ 不与并发的换入交叉（否则索引会同 mdl 版本错配）")
+    check("_refresh_retrieval_index" in calls("_adopt_git_into"),
+          "_adopt_git_into 挂检索索引钩子（接管/导入共用）", sorted(calls("_adopt_git_into")))
+    check(_hook_inside_lock("_adopt_git_into"), "_adopt_git_into：钩子在项目写锁内")
+
+    src = (ROOT / "src/api/wren_semantic.py").read_text(encoding="utf-8")
+    check("_refresh_retrieval_index(project_root)" in src,
+          "「从 Git 新建」也挂钩子（新库同样要有索引）")
+    check("build_note = str(build_note or \"\") + _index_tail" in src,
+          "新建那条把结论挂到 build_note（既是构造结论的落点，也免造前端不认的字段）")
+    check("offload_long(indexer.rebuild_project" in src,
+          "钩子走长任务池（带向量全量重建生产实测 ~40s，不许占事件循环）")
+    check("还没有 target/mdl.json" in src,
+          "钩子在没有 mdl.json 时直接跳过（build=False 的接管 / 构建失败）")
+    check("_logger.info(\"[wren_semantic] 检索索引钩子" in src,
+          "钩子结论进日志（运维从响应与日志两处都能看到）")
 
 
 def main() -> int:

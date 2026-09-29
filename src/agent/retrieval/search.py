@@ -28,6 +28,9 @@ search()  ← RRF 融合 + 结果形状 + 文本截断（本文件）
 - **读侧永不抛**：索引缺失 / 损坏 / 嵌入通道挂了 ⇒ 返回 `[]`，调用方回落全量注入（L2）。
 - **`hybrid` 缺嵌入 ⇒ 自动降级 `fts`**：索引里一条向量都没有就直接不试嵌入（连那 2.5s
   超时都不花）。
+- **`hybrid` 但索引与嵌入配置不是同一套 ⇒ 也只走 FTS 腿**：`_embed_cfg_matches` 拿
+  索引 meta 的 `embed_model`/`embed_dim` 与当前配置对（**配置改了没重建索引**这条路径，
+  `embedder` 侧的响应模型名闸抓不到，因为服务端报告的正是新名字）。
 - 返回条目 `text` **截断**（默认 600 字符）：调用方要拼进 prompt，不能让一条巨型知识
   文档把预算吃光。
 """
@@ -38,6 +41,7 @@ import logging
 from pathlib import Path
 
 from agent.retrieval import backends
+from agent.retrieval import embedder
 from agent.retrieval import schema as S
 
 _log = logging.getLogger(__name__)
@@ -75,6 +79,49 @@ def _hydrate(row: dict, *, score: float, legs: list[str], text_cap: int) -> dict
     return out
 
 
+def _embed_cfg_matches(index_dir: Path) -> bool:
+    """索引 meta 记的 `embed_model`/`embed_dim` 是否仍与**当前配置**一致。
+
+    这是 `embedder._model_matches`（看响应体报告的模型名）的**另一半**，抓的正是
+    它抓不到的那条路径：**配置改了、索引没重建**。换 `.env` 的 `NL2SQL_EMBED_MODEL`
+    之后，服务端如实报告的是**新**模型名 ⇒ 响应闸放行，于是新查询向量与旧索引向量
+    **同维数静默混用**（不报错，只是排序变垃圾）。meta 里记的是**建索引那一刻**的真相，
+    所以只有它能判「配置与索引是不是同一套」。
+
+    不一致 ⇒ 只做 FTS（§8.1 的 L1），**不**整体拒绝索引：FTS 腿的召回完全不受影响。
+    `embed_model` 为空（`--no-vectors` 建的纯 FTS 索引）⇒ 放行 —— 那种索引一条向量都
+    没有，「vectors==0」那条短路自会接管，不必在这里判。
+    """
+    meta = S.read_meta(index_dir)          # 读不到 ⇒ {}（永不抛）
+    built = str(meta.get("embed_model") or "").strip()
+    if not built:
+        return True
+    if not embedder.same_model(built, embedder.model_name()):
+        _log.warning(
+            "[retrieval] 索引按 %r 建的，当前配置是 %r ⇒ 本次只用 FTS 腿；"
+            "两者同维数也会把向量静默混用（排序变垃圾但不报错），"
+            "要么改回配置，要么**重建索引** %s",
+            built,
+            embedder.model_name(),
+            index_dir,
+        )
+        return False
+    want_dim = embedder.dim()
+    try:                                   # meta 被手改坏 ⇒ 当「没记」，绝不让它抛出去
+        got_dim = int(meta.get("embed_dim") or 0)
+    except (TypeError, ValueError):
+        got_dim = 0
+    if got_dim and got_dim != want_dim:
+        _log.warning(
+            "[retrieval] 索引向量维数 %d ≠ 当前配置 %d ⇒ 本次只用 FTS 腿（重建索引 %s）",
+            got_dim,
+            want_dim,
+            index_dir,
+        )
+        return False
+    return True
+
+
 def search(
     index_dir: Path,
     query: str,
@@ -108,7 +155,7 @@ def search(
     if fts_hits:
         legs.append(fts_hits)
         names.append("fts")
-    if S.vector_enabled():
+    if S.vector_enabled() and _embed_cfg_matches(index_dir):
         vec_hits = backend.vector(query, limit=fetch, kinds=kinds, db_name=db_name)
         if vec_hits:
             legs.append(vec_hits)

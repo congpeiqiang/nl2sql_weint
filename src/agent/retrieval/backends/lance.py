@@ -164,7 +164,10 @@ class LanceBackend:
             table = self._table()
             if table is None:
                 return []
-            q = table.search(query, query_type="fts").select(list(COLS))
+            # `_score` 必须**显式**列进 select：lancedb 0.37.1 现在会自动投影它（每次都打
+            # Deprecation warning），官方明说将来不再投影 ⇒ 不显式要，`r.get("_score")` 会变
+            # None ⇒ 上报分数静默全 0（召回与排序不受影响：腿内次序由 LanceDB 给、融合只吃名次）。
+            q = table.search(query, query_type="fts").select(list(COLS) + ["_score"])
             where = self._where(kinds, db_name)
             if where:
                 q = q.where(where)
@@ -189,7 +192,9 @@ class LanceBackend:
             if table is None:
                 return []
             where = self._where(kinds, db_name, "vector IS NOT NULL")
-            rows = table.search(qvec).where(where).select(list(COLS)).limit(limit).to_list()
+            # 同 fts 腿：`_distance` 靠自动投影只是**暂时**的（见上面 fts 腿的注释）
+            rows = (table.search(qvec).where(where)
+                    .select(list(COLS) + ["_distance"]).limit(limit).to_list())
         except Exception as e:  # noqa: BLE001
             _log.warning("[retrieval] lance 向量腿失败 %s: %s", self.dir, e)
             return []
