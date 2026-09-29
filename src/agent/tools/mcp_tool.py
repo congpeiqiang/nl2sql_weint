@@ -103,9 +103,11 @@ def _load_mcp_servers(servers: Dict[str, Any], server_type: str = "unknown") -> 
                             )
                         )
 
-                    # Wren 语义层工具注入 project_path，供 wrap_tool 快速路径使用
+                    # Wren 语义层工具注入 project_path / db_name，供 wrap_tool 快速路径使用
                     # （get_context / recall_queries 在主进程直接调用 wren API，
                     #  绕过 MCP 子进程 + MemoryStore 420MB 嵌入模型加载）
+                    # db_name 与 project_path **同源**（同一个探测器的 discover 结果，也就是
+                    # db_config.json 里的 name）—— 检索层据此给条目分桶，绝不许按目录名拼。
                     if name.startswith("wrenai_"):
                         try:
                             from agent.utils.semantic_db import get_detector, wrenai_server_name
@@ -116,6 +118,7 @@ def _load_mcp_servers(servers: Dict[str, Any], server_type: str = "unknown") -> 
                                     _proj = _det.project_path_for(_db)
                                     if _proj and name == wrenai_server_name(_db):
                                         _t._wren_project_path = str(_proj)
+                                        _t._wren_db_name = str(_db)
                                         _injected += 1
                                         break
                             if _injected > 0:

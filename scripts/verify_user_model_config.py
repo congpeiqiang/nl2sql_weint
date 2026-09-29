@@ -218,6 +218,9 @@ def case_middleware() -> None:
         text = resp.result[0].content
         check("尚未配置可用的大模型" in text, "同步：返回友好文案", text[:34] + "…")
         check(text == NO_MODEL_MESSAGE, "同步：文案即 NO_MODEL_MESSAGE")
+        from agent.utils.failure_signal import KIND_MODEL_REQUIRED, failed_mark
+        check((failed_mark(resp.result[0]) or {}).get("kind") == KIND_MODEL_REQUIRED,
+              "同一条消息带失败戳（零执行=失败，前端给「执行失败+重试」而不是当正常回答）")
 
         calls["async"] = 0
         aresp = asyncio.run(mw.awrap_model_call(req, async_handler))

@@ -6,8 +6,10 @@ exhausted" / "insufficient_quota" / "Insufficient Balance"），后端原始异�
 只把 error 放进 stream.error 状态，聊天界面不渲染它——表现为「卡住、无提示」。
 
 因此本中间件**不抛异常**，而是在捕获额度类错误后返回一条带友好中文文案的
-AIMessage（ModelResponse）：agent 正常结束、消息写入 checkpoint、前端 SDK
-按普通 AI 回复渲染 → 用户直接看到「模型额度已用完…」提示，界面不卡。
+AIMessage（ModelResponse）：agent 正常结束、消息写入 checkpoint → 用户直接看到
+「模型额度已用完…」提示，界面不卡。该消息**同时盖失败戳**
+（`agent/utils/failure_signal.py`，与 `model_timeout` 同款）：额度耗尽也是「什么都没
+执行」，不盖戳会被下游当正常终稿（`check_async_task` 报 success），文案本身不改。
 
 约束（P1-9 配置权威性）：本中间件**只翻译错误文案**，不读取/回退 .env 的
 LLM_*——模型配置唯一来源仍是前端 CRUD 的 model_config.json。
@@ -22,6 +24,8 @@ from typing import Any, Callable, TypeVar
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage
+
+from agent.utils.failure_signal import KIND_QUOTA_EXHAUSTED, mark_failed
 
 _logger = logging.getLogger(__name__)
 
@@ -100,14 +104,21 @@ def _translate_quota_error(exc: BaseException) -> BaseException | None:
 
 
 def _friendly_response(request: ModelRequest[ContextT]) -> ModelResponse:
-    """构造一条带友好文案的 AIMessage 作为模型响应（agent 正常结束，前端按普通回复渲染）。
+    """构造一条带友好文案的 AIMessage 作为模型响应（agent 正常结束，前端渲染这张卡片）。
 
     注意：AIMessage 不带 tool_calls → 模型节点后直接走 END，不会触发工具节点，
     也就不会因「缺工具结果」再抛错。消息会经 add_messages reducer 写入 checkpoint，
     刷新页面后仍可见。
+
+    同时盖失败戳（`agent/utils/failure_signal.py`）：额度耗尽同样是「什么都没执行」，
+    不盖戳时下游会把它当正常终稿（`check_async_task` 报 success、CaliberGate 还可能
+    拿它当终稿去打回重写）。**文案一个字符都不改。**
     """
-    msg = AIMessage(content=QUOTA_EXHAUSTED_MESSAGE)
-    # 保留请求里的 id 前缀，便于前端按消息顺序渲染（可选）
+    msg = mark_failed(
+        AIMessage(content=QUOTA_EXHAUSTED_MESSAGE),
+        KIND_QUOTA_EXHAUSTED,
+        QUOTA_EXHAUSTED_MESSAGE,
+    )
     return ModelResponse(result=[msg], structured_response=None)
 
 

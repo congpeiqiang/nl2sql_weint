@@ -48,6 +48,13 @@ but you passed deepseek-v4.1-flash.`），线程里只有一条 human 消息、`
 原因文本取自 `state.tasks[].error`：run 对象的 `error` 字段在本环境恒为 None
 （列表与单 run GET 都实测过），只有 checkpoint 里的 task 保留了异常。
 
+**判据 5 的第二个来源（2026-09-28）**：`run.status == "success"` 但**末条 AI 消息
+带失败戳**（`agent/utils/failure_signal.py`）—— 超时/额度耗尽/未配模型被中间件吞成一条
+友好 AIMessage，图照常 END ⇒ SDK 报 success，而这一轮**什么都没执行**。此前它被当成
+一段正常回答显示给用户（用户以为答完了）。戳是机器可读的，比文本匹配可靠（主 agent
+向用户解释失败时正文里也会出现「模型调用超时」几个字）。此时 `last_error` 回落到戳里的
+`detail`。
+
 已知边界：若历史上有 run 卡成 `running` 僵尸（.langgraph_ops.pckl 复活，
 见 langgraph-inmem-pckl-zombie-runs），判据 2 恒不成立、本端点不会提示——
 那种情况要清 pckl 重启，属于另一条链路。
@@ -65,6 +72,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Route
 
+from agent.utils.failure_signal import detail_of, last_failed_mark
 from api._common import json_response
 
 _logger = logging.getLogger(__name__)
@@ -198,11 +206,14 @@ def classify(state: dict, runs: list) -> dict:
     next_nodes = list(state.get("next") or [])
     awaiting = _has_interrupt(state)
     is_final = _last_message_is_final(state.get("values") or {})
-    # 判据 5：最后一轮 run 终态失败 → 是「跑过但挂了」，不是「被外部打断」。
-    # 无活跃 run / 无审批是前提（有活跃 run 时 last_run 就是那条 run，本也命不中）。
+    # 末条 AI 上的失败戳（超时/额度耗尽/未配模型被中间件吞成友好文案，见 failure_signal）：
+    # 这类 run 的 status 是 success（图照常 END），只有内容知道它其实什么都没执行。
+    mark = last_failed_mark((state.get("values") or {}).get("messages") or [])
+    # 判据 5：最后一轮 run 终态失败 **或** 末条带失败戳 → 是「跑过但挂了」，
+    # 不是「被外部打断」。无活跃 run / 无审批是前提（有活跃 run 时 last_run 就是那条
+    # run，本也命不中）。
     turn_failed = bool(
-        last_run
-        and last_run.get("status") in _FAILED_STATUSES
+        ((last_run and last_run.get("status") in _FAILED_STATUSES) or mark)
         and not active
         and not awaiting
     )
@@ -222,7 +233,10 @@ def classify(state: dict, runs: list) -> dict:
             else None
         ),
         "turn_failed": turn_failed,
-        "last_error": _last_task_error(state, next_nodes) if turn_failed else "",
+        # 优先 checkpoint 里的 task.error（真异常），没有则回落到失败戳的 detail
+        "last_error": (
+            _last_task_error(state, next_nodes) or detail_of(mark)
+        ) if turn_failed else "",
         "turn_incomplete": bool(next_nodes)
         and not active
         and not awaiting

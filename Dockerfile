@@ -35,6 +35,17 @@ RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/ && 
 RUN uv pip install --python /app/.venv/bin/python langchain-qwq \
     --extra-index-url https://pypi.org/simple/
 
+# 混合检索的默认后端：LanceDB（本地索引走 on-disk mmap，进程不物化语料 —— 自写 Python
+# 方案在 20k 条时 776MB/进程）。同样单独装、不进 pyproject/uv.lock。
+# ⚠️ 装不上不影响启动：`backends.lance_available()` 是惰性探测，失败自动退回 jsonl 后端
+# （见 src/agent/retrieval/backends/__init__.py 的铁律 3）。
+# 预检（2026-09-28）：lancedb 的运行时依赖 deprecation/pyarrow/pydantic/tqdm/packaging/
+# numpy/lance-namespace **全部已在 uv.lock 里且满足下限**，overrides 只对 py<3.12 生效 ⇒
+# 本次 install 只新增 lancedb 一个发行版，不会推动既有锁定版本。
+# 平台：lancedb-0.37.1-cp310-abi3-manylinux_2_28_x86_64.whl（abi3 ⇒ py3.13 可用）。
+RUN uv pip install --python /app/.venv/bin/python "lancedb==0.37.1" \
+    --extra-index-url https://pypi.org/simple/
+
 # ── Stage 2: 运行时 ──
 FROM python:3.13-slim
 ARG DEBIAN_MIRROR

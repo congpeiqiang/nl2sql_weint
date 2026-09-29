@@ -24,6 +24,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.tools import InjectedToolArg
 from pydantic import BaseModel, Field
 
+from agent.utils.failure_signal import detail_of, last_failed_mark, run_status_for
 from agent.utils.offload import offload
 from agent.utils.query_tools import is_data_tool
 from agent.utils.wren_plan import (
@@ -1144,6 +1145,28 @@ def apply_patch():
             if isinstance(thread_values, dict)
             else []
         )
+        # 终态改判（2026-09-28 生产事故）：run 级 status 是 SDK 的事，**内容**里可能躺着
+        # 一条失败终局（超时/额度耗尽/未配模型被中间件吞成友好文案后，图照常 END ⇒
+        # run 报 success）。不读戳的话，主 agent 会拿到 `status: "success"` + 一段超时
+        # 文案，只能在自己的推理里写「marked as success, but the result is actually a
+        # timeout error」——契约错，不是模型的错。判定链见 agent/utils/failure_signal.py。
+        #
+        # ⚠️ 只在 run 已经 success 时读戳：running 时绝不降级（戳可能是上一轮遗留的，
+        # 把在跑的 run 判失败会制造新事故）。
+        if result["status"] == "success":
+            _mark = last_failed_mark(messages)
+            if _mark:
+                _st = run_status_for(_mark["kind"])
+                _detail = detail_of(_mark)
+                _logger.warning(
+                    "[check_progress] 子 run success 但末条是失败终局（kind=%s）→ 改判 %s",
+                    _mark["kind"], _st,
+                )
+                run = {**run, "status": _st, "error": _detail or run.get("error")}
+                result["status"] = _st
+                result["error_kind"] = _mark["kind"]
+                if _detail:
+                    result["error"] = _detail
         if run["status"] == "success":
             sql = ""  # 无消息时保持未定义安全（下面 if messages 分支才赋值）
             if messages:
@@ -1326,9 +1349,9 @@ def apply_patch():
                 "will resume automatically. Do NOT cancel or re-delegate; check "
                 "again later."
             )
-        # running / 其他中间态：提取进度
-        if messages:
-            _extract_progress(result, messages)
+        # running / 其他中间态：提取进度（thread_values 一并传入 → 权威源 state.todos 优先）
+        if messages or (isinstance(thread_values, dict) and thread_values.get("todos")):
+            _extract_progress(result, messages, thread_values)
         return result
 
     _mod._build_check_result = _enhanced_build_check_result
@@ -1355,6 +1378,13 @@ def apply_patch():
         # M-T5c：保留 description（_tasks_reducer 整条替换，不补会被抹掉）
         if task.get("description"):
             updated_task["description"] = task["description"]
+        # 同款：这几个键是 watcher（sync_subagent_todos）写在 async_tasks 里的，本函数
+        # 重建整条 → 不显式带上就被主 agent 的一次轮询抹掉。`error` 是失败原因（前端与
+        # 失败汇报读它），`failure_reported` 是跨线程/重启的去重标记（抹掉会导致同一条
+        # 失败被再汇报一次）。
+        for _k in ("error", "error_kind", "failure_reported"):
+            if task.get(_k) is not None and _k not in updated_task:
+                updated_task[_k] = task[_k]
         return Command(
             update={
                 "messages": [ToolMessage(
@@ -1664,9 +1694,37 @@ def _compute_step_durations(step_history: list, now: float) -> dict[str, str]:
 # ── 进度提取 ──────────────────────────────────────────────────────────
 
 
-def _extract_progress(result: dict, messages: list):
-    """从 thread messages 和本地进度文件提取精简进度信息。"""
-    todos = []
+def _todos_from_state(thread_values: dict | None) -> list:
+    """子线程 `state.todos` → `[{"content","status"}]`（**权威进度源**；拿不到返回空）。
+
+    只取 content/status 两个键：下游只认这两个（渲染 + `_extract_timing_from_messages`
+    的计时 key 就是 content），多带的键没有读者。非法项（非 dict / content 全空白）
+    直接跳过，绝不抛异常。
+    """
+    if not isinstance(thread_values, dict):
+        return []
+    out = []
+    for item in thread_values.get("todos") or []:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        out.append({"content": content, "status": str(item.get("status") or "pending")})
+    return out
+
+
+def _extract_progress(result: dict, messages: list, thread_values: dict | None = None):
+    """从**子线程 state.todos（权威）**/ thread messages / 本地进度文件提取精简进度。
+
+    ⚠️ 权威源优先（2026-09-28 生产事故）：任务卡（`subagent_steps_map`）读的是
+    `state.todos`（由 `ProgressBoundaryMiddleware` 按工具里程碑确定性推进，见
+    `sync_subagent_todos._extract_subagent_todos`），而本函数原来只反扫 messages 里的
+    `write_todos` ⇒ **两个源会打架**：事故那轮卡片已经停在第 2 步「Schema 提取与裁剪」
+    计时 8 分钟，主 agent 却被告知 `0/6 (0%) / current_step=理解建模-清晰度与知识`，
+    它据此反复盘问子任务。messages 反扫现在只在拿不到 `state.todos` 时兜底（旧行为不变）。
+    """
+    todos = _todos_from_state(thread_values)
     latest_ai = ""
     last_tool = ""
 
@@ -1688,7 +1746,8 @@ def _extract_progress(result: dict, messages: list):
             name = msg.get("name", "")
             content = msg.get("content", "")
             content_str = content if isinstance(content, str) else str(content)
-            if name == "write_todos":
+            # `and not todos`：权威源已有进度时，不让过时的 write_todos 回声盖掉它
+            if name == "write_todos" and not todos:
                 items = re.findall(
                     r"\{'content':\s*'([^']*)',\s*'status':\s*'([^']*)'\}",
                     content_str,

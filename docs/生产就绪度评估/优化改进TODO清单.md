@@ -160,7 +160,8 @@
     5. **Cookie `Secure`** 按 scheme / `X-Forwarded-Proto` 判定，另有 `NL2SQL_COOKIE_SECURE` 显式覆盖
     6. 登录/改密的口令校验走 `asyncio.to_thread`（PBKDF2 260k 轮是 CPU 活，同步做会卡住事件循环 —— 这条顺带把 P1-14 里"每请求都走"的两处之一先灭了）
   - **决策与偏离（都与条目原文不同，逐条记）**：
-    - **选 PBKDF2 而不是条目写的 bcrypt**：bcrypt/argon2 需要装包，而生产发版是**镜像离线搬运**（`docker save | load`，目标机无外网）→ 不能加依赖。PBKDF2 是 stdlib（`hashlib.pbkdf2_hmac`）、也是 Django 的默认。自描述格式的意义：将来真要换算法，是**逐条升级**而不是"全体改密"
+    - **选 PBKDF2 而不是条目写的 bcrypt**：PBKDF2 是 stdlib（`hashlib.pbkdf2_hmac`），**零新依赖**——`bcrypt`/`argon2-cffi` 要装包就意味着改 lock、重建镜像、多发一次版；PBKDF2 也是 Django 的默认，对标与迁移都省事。自描述格式的意义：将来真要换算法，是**逐条升级**而不是"全体改密"
+    - > ⚠️ **本条原始理由作废（2026-09-28 更正）**：原文写的是「生产发版是**镜像离线搬运**（`docker save | load`，目标机无外网）→ 不能加依赖」。**部署服务器（weint 192.168.25.64）实际有外网**（运行期配置本身就在打公网 API：active provider `https://api.deepseek.com/v1`，六个 provider 全是公网 URL），所以「不能加依赖」这个理由**不成立**——那条断言真正适用的环境是 **dev 34**（见 `docs/dev环境/`：34 无外网、DNS 不可用）。**决策（PBKDF2）维持不变**，因为上面「零新依赖 + 与 Django 默认一致」本身就够；但若将来重新评估凭据算法，判据应当是**是否需要 memory-hard KDF（argon2id）**，而不是"能不能装包"——**别再用网络限制当理由**（本仓已有多处台账因此写错，教训见 `docs/agent优化记录/混合检索方案.md` §2.3）
     - **"登录即失效"改成"登录不吊销"**：条目原文写"登录/改密/删用户即失效"。**登录不吊销** —— 会把同一个人其它设备一起踢掉，而登录是"取得凭据"、不是"凭据失效"事件。改密 / 删号 / 显式吊销三处生效
     - **"首登必须改密"退成"只标记 + 一个默认关的开关"**：前端 `src/lib/authApi.ts` 等 ~20/96 个 `.ts*` 文件是 DLP 密文、`next build` 被挡 → 前端加不了改密页面。后端**拦了也没有自助入口 = 把人锁在门外**，所以做的是：默认管理员打标记 + `/api/auth/me` 与登录响应里带上该字段（前端将来直接用）+ 强制拦截逻辑写好但由 `NL2SQL_FORCE_PASSWORD_CHANGE` 控制（**默认 off**）。真打开时白名单放行 `/api/auth/me`、`/api/auth/change-password`、`/api/auth/logout`（留自助脱困路径），403 body 里直接给出可复制的 curl 命令。**前端一落地就把开关打开**
     - `Secure` 的**真修法**是 nginx 终止 TLS（明文 HTTP 上无条件加 `Secure` = 浏览器直接丢弃 cookie = 登录"成功"但每个请求都 401），当前的探测只是让明文环境可用

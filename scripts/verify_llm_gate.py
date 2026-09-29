@@ -443,6 +443,9 @@ def verify_middleware() -> None:
     check(getattr(r, "result", None) and r.result[0].content == MODEL_TIMEOUT_MESSAGE,
           "超时 → 仍是那条友好文案（P2-3 的语义没被这次改造动过）")
     check(calls["n"] == 1, "**超时不重试**（对端只是慢，再等一个 60s 只会更难看）", f"calls={calls['n']}")
+    from agent.utils.failure_signal import KIND_MODEL_TIMEOUT, failed_mark
+    check((failed_mark(r.result[0]) or {}).get("kind") == KIND_MODEL_TIMEOUT,
+          "同一条消息带失败戳（2026-09-28：终局失败必须机器可读，见 verify_failure_signal.py）")
 
     # 连接类：重试到用尽 → 原样上抛
     use(NL2SQL_LLM_MAX_CONCURRENCY="4", NL2SQL_LLM_RETRY_ATTEMPTS="1",

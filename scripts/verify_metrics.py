@@ -694,6 +694,9 @@ async def verify_llm_meters() -> None:
     check(getattr(friendly, "result", None) and "超时" in friendly.result[0].content,
           "超时 → 友好 AIMessage（原有语义不变）")
     check((sample_value("nl2sql_llm_calls_total", {"outcome": "timeout"}) or 0.0) >= 1, "timeout 计数 +1")
+    from agent.utils.failure_signal import KIND_MODEL_TIMEOUT, failed_mark
+    check((failed_mark(friendly.result[0]) or {}).get("kind") == KIND_MODEL_TIMEOUT,
+          "同一条消息带失败戳（2026-09-28：终局失败必须机器可读，见 verify_failure_signal.py）")
     check(llm_failure_count() == fail_before + 1, "失败账 +1（告警规则读的就是它）")
 
     raised = False

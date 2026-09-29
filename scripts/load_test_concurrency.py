@@ -15,6 +15,21 @@
     `turn_settled`）——它把**自动续跑那一轮**也算进延迟里，否则会系统性低估真实用户的
     等待时间。**不再要求 `next` 为空**：那会把「答复已终稿但图头挂着一个没人推进的幽灵
     节点」误报成卡死（P2-12）。
+  * ⚠️ **光有 `turn_settled` 还不够**（2026-09-28 实测纠正）：主 run 派完子任务后会先说一句
+    「查询已提交（任务ID: …），请稍候。」。这句是普通 AI 消息、子 agent 又跑在**自己的
+    thread** 里（主线程 `has_active_run=False`）⇒ 端点**完全合法地**在 ack 处报"这一轮结束"。
+    实测那次 ack 在 ~5s 出现、真答案在 **+151s** 的自动续跑轮（runs 1→2）里到 —— 只看端点
+    会把 ack 延迟当成 `latency_turn`，**系统性低估 2 个数量级**。因此判据加一条：末条 AI
+    消息命中 `ACK_MARK` 就不算结束，继续等续跑；等不到则记为 `ack_only_no_continuation`
+    （**独立结局**，绝不冒充成功，也不与"超时"混为一谈）。`latency_ack` 单独记
+    （"提交后多久给回执"本身是个有用的数）。
+  * ack 窗口的时长 = 子 agent 流水线时长（~150s），所以**光靠时间分不出**「子会话还在跑」
+    与「子会话完了但续跑没来」—— 后者才是真问题。ack 里那句「任务ID: …」就是子会话的
+    thread_id，于是额外探一次它的 `run-status`：`working` → 长尾，继续等（`--ack-grace`
+    默认 300s 兜底）；`done` 却仍无续跑 → **自终稿起**再等 60s 才判断链；读不到 → `unknown`，
+    退回纯时间判据（宁可等，也不把读不到的会话误报成断链）。
+    计时口径必须钉在"自 done 起"（不是"自 ack 起"）：子会话自己就能跑 4 分钟（口径核验
+    打回重跑），按 ack 起算会在它刚完成的那一刻立刻误判成断链 —— 2026-09-28 实测踩过一次。
 
 跑法（本机 Git Bash；脚本不进仓库镜像、用 stdin 灌进容器）：
     ssh -o BatchMode=yes weint@192.168.25.64 \
@@ -30,16 +45,19 @@
     绝不能让压测把槽位挂住）；
   * 收尾：取消所有没正常结束的 run，并按 `--keep-threads` 决定是否删掉本次造的会话。
 
-⚠️ 「账号数 ≠ 并发数」的说明：生产只有 2 个账号（admin / Z0051），所以**并发轴是"并发问数"**
-（每个并发单元 = 一个独立会话 + 一次真实问数），两个账号轮转着发。run 槽位是**全局**池、
-与会话/账号无关，因此这对容量曲线没有影响；受影响的是"多账号各自的授权/归属路径"那部分
-（两条路径本来也都覆盖到了）。
+⚠️ 「账号数 ≠ 并发数」的说明：**并发轴是"并发问数"**（每个并发单元 = 一个独立会话 + 一次
+真实问数），账号只是发问的马甲。run 槽位是**全局**池、与会话/账号无关，因此这对容量曲线
+没有影响；受影响的是"多账号各自的授权/归属路径"那部分。默认会用生产里所有账号（含真人
+admin / Z0051）⇒ **多用户测试必须显式 `--accounts load01,…,load06`**，把并发轴钉在一次性
+测试账号上：既保住「多用户」这个口径（不同账号 = 不同身份、各自 provider 与 grants），
+也不去消耗真人账号的配额（它们配的是另一个 provider，会把模型链也搅进来）。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import re
 import statistics
 import sys
 import threading
@@ -65,6 +83,58 @@ DEFAULT_QUESTIONS = [
     "有多少张表？",
     "列出人数最多的前 10 个部门",
 ]
+
+# 主 run 派完子任务后的那句 ack（`start_async_task` 之后必然出现）。
+# ⚠️ 它不是"这一轮的结束" —— 真答案在**自动续跑那一轮**，见 one_query 的结算注释。
+ACK_MARK = "查询已提交"
+
+
+def _last_ai_text(client: httpx.Client, tid: str) -> str:
+    """末条 AI 消息的文本（只用来识别 ack）。读不到 → 空串 = 当作"不是 ack"，
+    退回端点的结论字段（宁可少管，也不要因为多打一次 /state 失败就把成功算成失败）。"""
+    try:
+        st = client.get(f"/threads/{tid}/state")
+        if st.status_code != 200:
+            return ""
+        msgs = ((st.json() or {}).get("values") or {}).get("messages") or []
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("type") == "ai":
+                c = m.get("content")
+                if isinstance(c, list):
+                    c = "".join(p.get("text", "") for p in c if isinstance(p, dict))
+                return str(c or "")
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+# ack 里那句「任务ID: xxx」就是**子 agent 会话自己的 thread_id**（start_async_task 建的新 thread）。
+ACK_TASK_RE = re.compile(r"任务\s*ID\s*[:：]\s*([0-9a-fA-F][0-9a-fA-F-]{7,})")
+
+
+def _subagent_state(client: httpx.Client, ack_text: str) -> tuple[str, str]:
+    """子会话三态：`("working"|"done"|"unknown", sub_tid)`。
+
+    为什么值得在 ack 窗口里多打这一次请求：ack 窗口的时长**就是子 agent 流水线的时长**
+    （实测 ~151s，报告类问数还要走口径打回更久）。只看时间没法把两件性质完全不同的事分开：
+      · 子会话还在跑    → 只是长尾，等下去就有答案（**正常**）；
+      · 子会话已终稿却等不来续跑 → 通知/续跑断链（**真问题**，P2-7 要的结论）。
+    读不到（id 提不出 / 401 / 网络）一律 "unknown" ⇒ 退回纯时间判据，绝不当成断链。
+    """
+    m = ACK_TASK_RE.search(ack_text or "")
+    if not m:
+        return "unknown", ""
+    sub = m.group(1)
+    try:
+        g = client.get(f"/api/threads/{sub}/run-status")
+        if g.status_code != 200:
+            return "unknown", sub
+        j = g.json() or {}
+        if j.get("has_active_run") or j.get("turn_incomplete"):
+            return "working", sub
+        return "done", sub
+    except Exception:  # noqa: BLE001
+        return "unknown", sub
 
 
 # ── 指标解析 ────────────────────────────────────────────────────────
@@ -237,6 +307,7 @@ def one_query(
     run_timeout: float,
     settle_timeout: float,
     poll: float,
+    ack_grace: float = 90.0,
 ) -> dict[str, Any]:
     """一个并发单元：新建会话 → 提问 → 等到"这一轮真的结束"。返回可入表的原始记录。"""
     out: dict[str, Any] = {"question": question, "t_submit": time.time()}
@@ -284,12 +355,28 @@ def one_query(
             return out
 
         # ② 等**整轮**结束（自动续跑也跑完）。判据=生产端点 run-status 的结论字段
-        #    （见 turn_settled）；审批态单独识别（要立刻取消）。
+        #    （见 turn_settled）**外加一条「末条不是 ack」**；审批态单独识别（要立刻取消）。
+        #
+        # ⚠️ 为什么必须加那条（2026-09-28 实测，P2-7 的延迟表受同一问题影响）：
+        #    主 run 派完子任务会立刻以一句 ack 收尾（「查询已提交（任务ID…），请稍候。」），
+        #    而子 agent 跑在**它自己的会话**上 ⇒ 本会话 `has_active_run=False`；ack 又是
+        #    无 tool_calls 的纯 AI 消息 ⇒ `last_message_is_final=True` ⇒ 端点按自己的定义
+        #    （正确地）判「这一轮结束」。但真答案在**自动续跑那一轮**才出现 —— 实测同一问数
+        #    `runs 1→2`、真答案比 ack 晚 **151s**（报告类问数要走完流水线 + 口径打回）。
+        #    ⇒ 在 ack 处 break 会记下 ack 延迟（4~8s）并把答案记成那句 ack：测的不是用户等待。
         t0 = time.time()
         settle: dict = {}
         converged = False
         rs_http = 0
         rs_fail_run = 0
+        ack_ts: float | None = None
+        # 子会话状态：未探到之前一律按 "unknown"（= 只按时间兜底），绝不当成"断链"
+        sub_state = "unknown"
+        sub_probe_ts = 0.0
+        # 第一次采到子会话 `done` 的时刻。**必须按"自 done 起"计时**，不能用 ack 以来的时长：
+        # 子会话自己可能跑 4 分钟（口径核验打回重跑），那样一探到 done 就会立刻判死 ——
+        # 2026-09-28 实测正是如此（子会话 255s 完成，脚本在 253s 就报了 ack_only，误判）。
+        sub_done_ts: float | None = None
         while time.time() - t0 < settle_timeout:
             g = client.get(f"/api/threads/{tid}/run-status")
             rs_http = g.status_code
@@ -304,8 +391,41 @@ def one_query(
                     out.update(outcome="turn_failed", last_error=settle.get("last_error", ""))
                     return out
                 if turn_settled(settle):
-                    converged = True
-                    break
+                    last_ai = _last_ai_text(client, tid)
+                    if ACK_MARK not in last_ai:
+                        converged = True
+                        out["answer"] = last_ai
+                        break
+                    # 还是 ack ⇒ 续跑还没来（或不会来）。ack 延迟单独记一笔，它本身是个有用
+                    # 的数（"提交后多久给出回执"），但**不能**冒充 latency_turn。
+                    if ack_ts is None:
+                        ack_ts = time.time()
+                        out["latency_ack"] = round(ack_ts - out["t_submit"], 1)
+                    ack_wait = time.time() - ack_ts
+                    # 子会话三态决定这是"长尾"还是"断链"（见 _subagent_state）。节流：每
+                    # 8s 才探一次，别让判据自己变成压测负载。
+                    if time.time() - sub_probe_ts > 8.0:
+                        sub_probe_ts = time.time()
+                        sub_state, sub_tid = _subagent_state(client, last_ai)
+                        # 名字带 `_at_ack`：这是**ack 窗口内**最后一次观测，收敛后不再刷新，
+                        # 免得报告把它读成"这一轮结束时子会话是什么状态"（那是另一件事）。
+                        out["subagent_at_ack"] = sub_state
+                        if sub_tid:
+                            out["subagent_thread"] = sub_tid
+                        if sub_state == "done" and sub_done_ts is None:
+                            sub_done_ts = time.time()
+                    # 两条独立的退出线（任一命中即判"续跑没来"）：
+                    #   · 子会话已终稿 **且自终稿起又等了 60s** → 续跑本该几秒内到，这是断链；
+                    #   · 子会话一直在跑/读不到 → 按 ack_grace 兜底（不能无限等，会有僵住的任务）。
+                    done_wait = None if sub_done_ts is None else time.time() - sub_done_ts
+                    if (done_wait is not None and done_wait > 60.0) or ack_wait > ack_grace:
+                        out.update(
+                            outcome="ack_only_no_continuation",
+                            answer=last_ai,
+                            ack_wait=round(ack_wait, 1),
+                            sub_done_wait=None if done_wait is None else round(done_wait, 1),
+                        )
+                        return out
             else:
                 # run-status 打不开（例如它依赖的 /state 挂了）→ 连着几次就别空等满 settle_timeout，
                 # 否则会把「诊断链路坏了」伪装成「这一轮跑了 4 分钟」。
@@ -435,6 +555,7 @@ def run_level(
                 run_timeout=args.run_timeout,
                 settle_timeout=args.settle_timeout,
                 poll=args.poll,
+                ack_grace=args.ack_grace,
             )
             r["account"] = uid
             r["slot"] = slot
@@ -491,6 +612,8 @@ def run_level(
         # 答复已终稿但图头挂着幽灵 `next` 的问数（P2-12）。它是**正常**形态，不是失败；
         # 单独计数只为了盯住发生率（旧判据会把这些全报成 settle_timeout）。
         "phantom_next": sum(1 for r in per_query if r.get("phantom_next")),
+        # ack 到手后**续跑没来**（通知丢 / 子任务卡死）：独立结局，既不算成功也不算超时
+        "ack_only": sum(1 for r in per_query if r.get("outcome") == "ack_only_no_continuation"),
         "outcomes": {
             o: sum(1 for r in per_query if r.get("outcome") == o)
             for o in {r.get("outcome") for r in per_query}
@@ -535,10 +658,13 @@ def main() -> int:
     ap.add_argument("--poll", type=float, default=2.0, help="轮询间隔秒")
     ap.add_argument("--run-timeout", type=float, default=600.0, help="等主 run 终态的上限秒")
     ap.add_argument("--settle-timeout", type=float, default=240.0, help="等整轮结束（含续跑）的上限秒")
+    ap.add_argument("--ack-grace", type=float, default=300.0,
+                    help="ack 后等续跑的上限秒（子会话已终稿时改用 min(本值,60)）")
     ap.add_argument("--quiet-timeout", type=float, default=300.0, help="档位之间等队列清零的上限秒")
     ap.add_argument("--max-seconds", type=float, default=2400.0, help="全局墙钟上限")
     ap.add_argument("--budget-queries", type=int, default=60, help="总问数上限")
     ap.add_argument("--lag-abort", type=float, default=5.0, help="事件循环延迟超此值即停止后续档位")
+    ap.add_argument("--accounts", default="", help="只用这些账号（逗号分隔；默认用全部）")
     ap.add_argument("--keep-threads", action="store_true", help="保留本次造的会话（默认删掉）")
     ap.add_argument("--json-out", default="", help="把完整结果写到该路径（默认只打到 stdout）")
     args = ap.parse_args()
@@ -561,6 +687,16 @@ def main() -> int:
 
     accounts = [(u.get("user_id") or "", bool(u.get("is_admin"))) for u in load_users()]
     accounts = [(uid, adm) for uid, adm in accounts if uid]
+    # --accounts：把并发轴钉在指定账号上。不限定的话会把**真人账号**（admin/Z0051，
+    # 配的是另一个 provider）也拉进来 —— 既污染「多用户」口径，也白白消耗真人的配额。
+    if args.accounts:
+        want = [x.strip() for x in args.accounts.replace(" ", "").split(",") if x.strip()]
+        by_id = dict(accounts)
+        missing = [u for u in want if u not in by_id]
+        if missing:
+            print(f"✗ --accounts 里有不存在的账号：{missing}")
+            return 2
+        accounts = [(u, by_id[u]) for u in want]
     if not accounts:
         print("✗ 读不到账号，退出")
         return 2
@@ -585,7 +721,8 @@ def main() -> int:
             rep = run_level(lv, args.rounds, clients, args, sampler, created)
             level_reports.append(rep)
             print(
-                f"  → 峰值在跑 {rep['peak_running']} / 排队 {rep['peak_pending']} / "
+                f"  → 成功 {rep['ok']}/{rep['queries']}（ack-only {rep['ack_only']}）"
+                f" / 峰值在跑 {rep['peak_running']} / 排队 {rep['peak_pending']} / "
                 f"余槽 {rep['min_available']} / 每问数吃槽 {rep['runs_per_query_peak']} / "
                 f"lag峰值 {rep['peak_lag']} / RSS峰值 {rep['peak_rss_mb']}MB / "
                 f"子进程峰值 {rep['peak_children']}",

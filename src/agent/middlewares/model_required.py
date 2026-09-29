@@ -14,8 +14,10 @@
 
 拦截方式：**图的最外层**，有登录身份但该账号没有可用模型时直接返回一条友好中文
 AIMessage，**连 handler 都不调用**（不构造模型实例、不发任何请求）。范式与
-`QuotaErrorMiddleware` 完全一致（不抛异常 ⇒ agent 正常结束、消息进 checkpoint、
-前端按普通 AI 回复渲染，界面不卡不空转）。
+`QuotaErrorMiddleware` 完全一致（不抛异常 ⇒ agent 正常结束、消息进 checkpoint，
+界面不卡不空转）；该消息**同时盖失败戳**（`agent/utils/failure_signal.py`）——
+「没配模型」确实是失败（零执行），盖戳后前端给的是「上一轮执行失败 + 重试」，
+而不是把这段提示当一段正常回答。文案本身不改。
 
 判据只有一份：`agent.llms.model.has_usable_model(user_id)`（与 `create_model`
 同一条解析链），判据函数内部已吞掉一切读取异常（→ 视为「无模型」= fail-closed）。
@@ -38,6 +40,8 @@ from typing import Any, Callable, TypeVar
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage
+
+from agent.utils.failure_signal import KIND_MODEL_REQUIRED, mark_failed
 
 _logger = logging.getLogger(__name__)
 
@@ -102,9 +106,19 @@ def _friendly_response() -> ModelResponse:
 
     与 `quota_error._friendly_response` 同款：AIMessage **不带 tool_calls** ⇒
     模型节点后直接走 END，不触发工具节点。返回值即「模型回复」，由 run 正常收尾。
+
+    同时盖失败戳（`agent/utils/failure_signal.py`）：账号没配模型同样是「什么都没
+    执行」，只是可自愈 —— 盖戳后前端会给出「上一轮执行失败 + 重试」而不是把它当
+    一段正常回答（配好模型后重试正是用户想点的那个按钮）；**文案一个字符都不改。**
     """
     return ModelResponse(
-        result=[AIMessage(content=NO_MODEL_MESSAGE)],
+        result=[
+            mark_failed(
+                AIMessage(content=NO_MODEL_MESSAGE),
+                KIND_MODEL_REQUIRED,
+                NO_MODEL_MESSAGE,
+            )
+        ],
         structured_response=None,
     )
 

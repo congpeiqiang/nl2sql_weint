@@ -306,6 +306,9 @@ nl2sql/
 | 中间件 | 目的（一句话） | 挂载 | 文件 |
 |---|---|---|---|
 | `QuotaError` | LLM 额度耗尽(402/403) → 友好中文提示，不抛异常 | 主+子，最外层 | [middlewares/quota_error.py](src/agent/middlewares/quota_error.py) |
+| `ModelRequired` | 当前用户没配可用模型 → 友好提示 + **打失败戳**（零执行=失败，不当作正常回答） | 主+子，最外层 | [middlewares/model_required.py](src/agent/middlewares/model_required.py) |
+| `ModelTimeout` | 模型调用超时/连接失败 → 友好中文提示 + **打失败戳**；**不重试**（SDK 侧 `timeout=60×3` 已是四连击≈240s，再加会撞工具超时 300s） | 主+子，最外层 | [middlewares/model_timeout.py](src/agent/middlewares/model_timeout.py) |
+| `CaliberGate` | 口径执法：终稿缺 `## 业务口径` 块 / 无知识证据 → `jump_to="model"` 打回；**末条是失败终局则放行**（否则超时文案被当"没写完的终稿"，再烧一次 240s） | 子 | [middlewares/caliber_gate.py](src/agent/middlewares/caliber_gate.py) |
 | `ExecuteGuard` | execute(shell) 护栏：拦破坏性命令/工作区外路径（护栏非安全边界） | 主 | [middlewares/execute_guard.py](src/agent/middlewares/execute_guard.py) |
 | `SkillsMiddleware` | 扫描 SKILL.md 注入 `load_skill` 工具 | 主(sources=main/)+子(nl2sql/) | deepagents 内置 |
 | `QueryKeywords` | 把前端关键词注入 system prompt 的【数据查询】标记行 | 主 | [middlewares/query_keywords.py](src/agent/middlewares/query_keywords.py) |
@@ -320,6 +323,8 @@ nl2sql/
 | `ToolFilter` | 按 db_name 过滤 wrenai 工具（只暴露当前库） | 子 | [middlewares/tool_filter.py](src/agent/middlewares/tool_filter.py) |
 | `SqlReadOnly` | run_sql 只读硬拦截：写/DDL 直接拒绝（不执行、不弹审批） | 子 | [middlewares/sql_approval.py](src/agent/middlewares/sql_approval.py) |
 | `WriteTodosProtocol` | 追加 write_todos 分级协议（压过 deepagents 默认「简单任务可跳过」） | 子，最内 | [middlewares/write_todos.py](src/agent/middlewares/write_todos.py) |
+
+> ⚠️ **失败终局必须机器可读**（[utils/failure_signal.py](src/agent/utils/failure_signal.py)）：上面三个中间件把 provider 失败吞成「友好的普通 `AIMessage`」，图照常 END ⇒ SDK 报 `success`，而这一轮**什么都没执行**。因此它们在写文案的**同一条消息**上打戳 `additional_kwargs["nl2sql_failure"]={"kind","detail","at"}`（kind ∈ `model_timeout`/`quota_exhausted`/`model_required`）。消费者：`CaliberGate`（见戳即放行）、子图 watcher `sync_subagent_todos`（success → `timeout`/`error` 改判）、`check_async_task`（终态降级）、主图 `/api/threads/{tid}/run-status`（`turn_failed` → 前端「上一轮执行失败」+ 重试）。**判据只许用戳，不许文本匹配**——文案是可调项，且主 agent 解释失败时正文里也会出现「模型调用超时」几个字。**无戳 = 今天的旧行为**（由 `scripts/verify_failure_signal.py` 的负对照锁住）。
 
 > 另有 **不是中间件** 的全局 monkey-patch：`deepagents_async_config_patch`（[main_agent.py:10](src/agent/main_agent.py#L10) 导入即生效）在 `runs.create` 层把主 run 的 `configurable` 透传给子 run（过滤 `__pregel_*`/`langgraph_*` 内部键，否则 orjson 序列化失败），并登记 task→trace 映射。
 

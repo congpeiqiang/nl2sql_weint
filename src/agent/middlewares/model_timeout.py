@@ -6,8 +6,13 @@
 「卡住、无提示」（trace ef83792 实证：model 节点 4×60s 重试后超时，界面空白）。
 
 因此本中间件与 QuotaErrorMiddleware 同构：**不抛异常**，捕获超时类错误后返回
-一条带友好中文文案的 AIMessage。agent 正常结束、消息写入 checkpoint、前端按
-普通 AI 回复渲染 → 用户直接看到「模型调用超时…」，界面不卡。
+一条带友好中文文案的 AIMessage。agent 正常结束、消息写入 checkpoint → 用户直接
+看到「模型调用超时…」，界面不卡。
+
+⚠️ 2026-09-28 补：这条消息**同时盖失败戳**（`agent/utils/failure_signal.py`）。
+「不抛异常」的代价是这条消息与正常回答无法区分，曾导致下游三处各自猜错（CaliberGate
+把超时当没写完的终稿打回模型、白烧第二个 240s，`check_async_task` 报 `success`）。
+戳是附加信息，**文案一字符不改**。
 
 边界：
 - 只翻译「模型调用超时」，其他错误原样上抛（保持原有失败语义）。
@@ -49,6 +54,7 @@ from typing import Any, Callable, TypeVar
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage
 
+from agent.utils.failure_signal import KIND_MODEL_TIMEOUT, mark_failed
 from agent.utils.llm_gate import (
     backoff_seconds,
     describe_exception_chain,
@@ -74,13 +80,27 @@ MODEL_TIMEOUT_MESSAGE = (
 
 
 def _friendly_response(request: ModelRequest[ContextT]) -> ModelResponse:
-    """构造一条带友好文案的 AIMessage 作为模型响应（agent 正常结束，前端按普通回复渲染）。
+    """构造一条带友好文案的 AIMessage 作为模型响应（agent 正常结束，前端渲染这张卡片）。
 
     注意：AIMessage 不带 tool_calls → 模型节点后直接走 END，不会触发工具节点，
     也就不会因「缺工具结果」再抛错。消息会经 add_messages reducer 写入 checkpoint，
     刷新页面后仍可见。
+
+    ⚠️ 同时要盖 `failure_signal` 的失败戳（2026-09-28 生产事故的根因）：不盖戳时，
+    这条消息与「模型真的答完了」在数据上无法区分，下游会各自猜错 ——
+    `CaliberGateMiddleware` 把它当成「终稿缺业务口径块」打回模型（白烧第二个 240s）、
+    `check_async_task` 把它当 `status: "success"` 报给主 agent、watcher 与 run 各记一套
+    终态。**文案本身一个字符都不改**（既有断言按内容比较，文案是用户可见契约）。
+
+    消费入口（语义一致、入口不同）：子图由 watcher + `check_async_task` 读戳
+    （`async_tasks.status` 落失败态、走失败汇报）；主图由 `/api/threads/{tid}/run-status`
+    读戳（`turn_failed` ⇒ 前端「上一轮执行失败」横幅 + 重试按钮）。
     """
-    msg = AIMessage(content=MODEL_TIMEOUT_MESSAGE)
+    msg = mark_failed(
+        AIMessage(content=MODEL_TIMEOUT_MESSAGE),
+        KIND_MODEL_TIMEOUT,
+        MODEL_TIMEOUT_MESSAGE,
+    )
     return ModelResponse(result=[msg], structured_response=None)
 
 

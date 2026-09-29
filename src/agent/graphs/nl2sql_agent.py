@@ -24,6 +24,7 @@ from agent.middlewares.tool_filter import ToolFilterMiddleware
 from agent.middlewares.dynamic_mcp_tools import DynamicMCPToolsMiddleware
 from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
 from agent.middlewares.message_slimmer import MessageSlimmerMiddleware
+from agent.middlewares.knowledge_trim import KnowledgeTrimMiddleware
 from agent.middlewares.query_result_offload import QueryResultOffloadMiddleware
 from agent.middlewares.write_todos import WriteTodosProtocolMiddleware
 from agent.middlewares.progress_boundary import ProgressBoundaryMiddleware
@@ -264,6 +265,11 @@ _middleware = [
     # 本层直接放行），read_file/grep 等非 run_sql 大结果由本层统一截断
     # head+tail+文件指针，落 /workspace/large_tool_results/<tool_call_id>。
     MessageSlimmerMiddleware(backend=composite_backend),
+    # 知识料按问题裁剪（P1-2；默认受 NL2SQL_RETRIEVAL 总开关约束，关时零动作）：
+    # 必须放在 MessageSlimmer **内层**（列表更靠后）——wrap_tool_call 链 first=outermost、
+    # 内层后处理先跑，Slimmer 的体积判据/md5 去重才会作用在**最终进 state**的那份文本上
+    # （否则出现「按未裁版本去重、按已裁版本进 state」的两套账）。
+    KnowledgeTrimMiddleware(),
     # 大结果表落盘 + 消息瘦身（431 部门人数 228s 静默治本）：
     # 必须在 LangfuseSpan 之前（外层）——langchain wrap_tool_call 链 first=outermost，
     # 外层在 handler 返回后做后处理，故 LangfuseSpan 的 span output / LLM-judge /

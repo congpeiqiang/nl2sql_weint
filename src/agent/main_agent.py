@@ -26,6 +26,7 @@ from agent.settings.file_permissions import FILE_PERMISSIONS
 from agent.middlewares.query_keywords import QueryKeywordsMiddleware
 from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
 from agent.middlewares.message_slimmer import MessageSlimmerMiddleware
+from agent.middlewares.knowledge_trim import KnowledgeTrimMiddleware
 from agent.middlewares.current_db_context import CurrentDbContextMiddleware
 from agent.middlewares.dangling_tool_calls import DanglingToolCallsMiddleware
 from agent.middlewares.token_meter import TokenMeterMiddleware, _accumulate_token_stats
@@ -180,6 +181,9 @@ thinking_toggle_middleware = ThinkingToggleMiddleware()
 # 完全重复结果去重为小占位。阈值由 MessageSlimmerMiddleware 从环境变量
 # LARGE_RESULT_TRUNCATE_CHARS 读取（默认 8000；传 None 显式关闭截断）。
 message_slimmer = MessageSlimmerMiddleware(backend=composite_backend)
+# 知识料按问题裁剪（P1-2）。⚠️ 主 agent 的 MCP 工具只有 echarts，**没有 wren 知识工具**
+# ⇒ 这里当前是 no-op；挂上只为与 nl2sql 组合根同构（将来主 agent 拿到 wren 工具即自动生效）。
+knowledge_trim = KnowledgeTrimMiddleware()
 # 把当前库名（configurable.db_name）注入最新用户消息，作为当轮最高优先级信号，
 # 防止 LLM 被对话历史/总结里过时的库名误导（切库后仍按旧库委派）。
 db_context_middleware = CurrentDbContextMiddleware()
@@ -261,7 +265,7 @@ agent = create_deep_agent(
     memory=["/shared/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
     # vfs_path_resolver 放列表末尾（最内层、紧贴模型）：后处理在 langfuse_span /
     # trace_recorder 等外层记录之前完成，保证 trace、checkpoint、前端看到同一份真实路径。
-    middleware=[ModelRequiredMiddleware(), QuotaErrorMiddleware(), ModelTimeoutMiddleware(), execute_guard, chart_owner, skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, db_context_middleware, DanglingToolCallsMiddleware(), dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent"), vfs_path_resolver],
+    middleware=[ModelRequiredMiddleware(), QuotaErrorMiddleware(), ModelTimeoutMiddleware(), execute_guard, chart_owner, skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, knowledge_trim, db_context_middleware, DanglingToolCallsMiddleware(), dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent"), vfs_path_resolver],
     backend=composite_backend,
     permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写
     system_prompt=SYSTEM_PROMPT,

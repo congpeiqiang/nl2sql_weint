@@ -16,7 +16,10 @@ import re
 import threading
 import time as _time_module
 from pathlib import Path
+from datetime import UTC, datetime
 from typing import Optional
+
+from agent.utils.failure_signal import detail_of, last_failed_mark, run_status_for
 
 _logger = logging.getLogger(__name__)
 # sync 运行在守护线程，start_server 的 logging 配置不覆盖它；
@@ -308,6 +311,13 @@ async def _async_sync_loop(
 
     wait_for_run_cycles = 0  # 等待 run 出现的周期数
     loop_start = time.monotonic()  # 本任务开始时间（用于运行时长保护）
+    # 卡死预算的计时起点：**当前 run 的 created_at**（惰性取一次，取不到退回 loop_start）。
+    # 用 loop_start 是错的口径（它含 watcher 自己的起跑开销，而 run 可能排队后才创建），
+    # 且与 run 的真实执行时长是两个时钟（2026-09-28 事故：run 实际 620.8s、预算 600s，
+    # 于是「强制 timeout 收尾」与「run 自己 success 收尾」各记一套账）。
+    # ⚠️ 必须取**当前 run**的 created_at，不能用 `task["created_at"]` ——
+    # `update_async_task` 重派发时原样保留它，用 task 字典会让重派发的任务一开局就被误杀。
+    stale_base: Optional[float] = None
 
     # ── P2b 单调基线：本任务上一次已渲染过的 steps 快照 ──
     # 子 run 被 update_async_task 重派发（或模型重写 todo）时，子线程 todos 会从
@@ -553,8 +563,16 @@ async def _async_sync_loop(
                 # 强制按 timeout 处理（P1-7 失败分类：不再冒充 error），
                 # 确保 active_queries 最终翻转、前端恢复。
                 # （正常情况下 run_sql 等工具自身有超时，不会走到这一步，这是兜底。）
+                if run_status == "running":
+                    if stale_base is None:
+                        # 预算只按**这条 run 自己的执行时长**算（见 stale_base 注释）
+                        _cur_run = await _get_latest_run(client, sub_thread_id)
+                        stale_base = (
+                            _monotonic_from_iso(str((_cur_run or {}).get("created_at") or ""))
+                            or loop_start
+                        )
                 if run_status == "running" and (
-                    time.monotonic() - loop_start
+                    time.monotonic() - (stale_base or loop_start)
                 ) > STALE_RUN_TIMEOUT:
                     _logger.warning(
                         "[sync] 子 run 运行超过 %ds，视为卡死，强制结束（分类为 timeout）",
@@ -573,6 +591,23 @@ async def _async_sync_loop(
                             )
                     except Exception as e:  # noqa: BLE001
                         _logger.warning("[sync] 取消超时子 run 失败: %s", e)
+                # ── 终态改判（2026-09-28 生产事故）──
+                # SDK 说 success 不代表子任务真答完了：中间件把超时/额度耗尽/未配模型
+                # 吞成一条友好 AIMessage 后，图照常 END ⇒ run 报 success，而用户看到的是
+                # 「一 SQL 未执行」。不读戳的后果是**同一任务两套账**（watcher 写 timeout、
+                # runs.get 说 success），主 agent 拿到自相矛盾的结果还得自己推理。戳来自
+                # `agent/utils/failure_signal.py`，只在**终态那一刻**读一次。
+                # 改判后下面两个门自动正确：success 续跑门不再成立（不发「已完成」通知），
+                # 失败门成立（发 `[系统自动通知]` 且带原因），卡片与侧边栏也据此收尾。
+                if run_status == "success":
+                    _mark = await _last_failed_mark_of(client, sub_thread_id)
+                    if _mark:
+                        run_status = run_status_for(_mark["kind"])
+                        _logger.warning(
+                            "[sync] 子 run success 但末条是失败终局（kind=%s）→ 改判 %s："
+                            "不发「已完成」续跑，走失败汇报",
+                            _mark["kind"], run_status,
+                        )
                 if run_status in _RUN_DONE_STATUSES:
                     sub_agent_done = True
                     # P3：记下本 watcher 盯的 run_id —— 后续「子线程出现另一个未完成
@@ -1092,6 +1127,42 @@ async def _get_latest_run(client, thread_id: str) -> Optional[dict]:
         return None
 
 
+async def _last_failed_mark_of(client, thread_id: str) -> Optional[dict]:
+    """子线程**末条 AI 消息**上的失败戳（`failure_signal`）；读不到/没有 → None。
+
+    **fail-open**：任何异常都按"没有戳"处理（下游维持 success 旧语义）。绝不能因为
+    读一次 state 失败就把一次成功的子任务判成失败。
+    """
+    try:
+        state = await client.threads.get_state(thread_id=thread_id)
+        messages = ((state or {}).get("values") or {}).get("messages") or []
+        return last_failed_mark(messages)
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[sync] 读失败戳失败（按成功处理）: %s", e)
+        return None
+
+
+def _monotonic_from_iso(ts: str) -> Optional[float]:
+    """ISO 时间串 → 等效的 monotonic 时刻（用于与 `time.monotonic()` 相减）。
+
+    monotonic 与 wall clock 是两个基准，**只能算差**：这里用「现在 - (now - ts)」把
+    墙上时间换算成 monotonic 坐标。非法/空串返回 None（调用方退回自己的起点）。
+    """
+    if not ts:
+        return None
+    try:
+        text = str(ts).strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - dt).total_seconds()
+        # 模块级 `time` 被导入为 `_time_module`（`import time` 只在 _async_sync_loop
+        # 内部是局部的），本函数在模块作用域 ⇒ 必须用别名。
+        return _time_module.monotonic() - age
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def _terminal_error(client, thread_id: str, run_status: str) -> Optional[str]:
     """取终态 run 的错误详情（压平空白 + 截断 500），供 async_tasks 终态写入。
 
@@ -1099,12 +1170,19 @@ async def _terminal_error(client, thread_id: str, run_status: str) -> Optional[s
     方案2（2026-09-01）：此前 async_tasks 终态恒不带 error，前端侧边栏只能看到
     「执行失败」看不到具体原因；此处把 run["error"]（如 APITimeoutError: Request timed out.）
     透传出去。
+
+    2026-09-28 补：生产上 `run["error"]` **恒为 None**（超时被中间件吞成一条友好
+    AIMessage，run 照常 END ⇒ 无错误），所以侧边栏长期只有「执行失败」没有原因。现在
+    回落到失败戳里的 `detail`（超时/额度/未配模型三类都有），失败汇报因此能带上原因。
     """
     if run_status == "success":
         return None
     try:
         run = await _get_latest_run(client, thread_id)
         raw = (run or {}).get("error") or None
+        if not raw:
+            _mark = await _last_failed_mark_of(client, thread_id)
+            raw = detail_of(_mark) if _mark else None
         if not raw:
             return None
         return " ".join(str(raw).split())[:500]

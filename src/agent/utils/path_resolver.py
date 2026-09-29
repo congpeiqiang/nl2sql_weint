@@ -889,6 +889,23 @@ def _get_tool_pool() -> _SyncToolPool:
     return _TOOL_POOL
 
 
+def _retrieval_adapters() -> Any | None:
+    """惰性取检索适配层：**关闭时返回 None 且一个字节都不 import**（模块 docstring 的
+    「`off` ＝ 零成本零行为差异」不是靠自觉，是靠这里先判开关再 import）。
+
+    注意 **绝不改 `WREN_MEMORY_BACKEND`**：那是下面四道门的公共前置条件，改成非 grep
+    会让四个 fast-path 全部失效（get_context 退回 MCP 子进程里建 420MB 嵌入模型）。
+    这里用的是检索层自己的开关 `NL2SQL_RETRIEVAL`。
+    """
+    from agent.retrieval import schema as S
+
+    if not S.is_enabled():
+        return None
+    from agent.retrieval import adapters
+
+    return adapters
+
+
 def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
     """Wren memory 工具快速路径——绕过 MCP 子进程和 MemoryStore。
 
@@ -897,6 +914,12 @@ def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
     120s 超时。此函数在主进程中直接调用 wren Python API，毫秒级返回。
 
     前置条件：工具对象上需有 ``_wren_project_path`` 属性（由 mcp_tool.py 注入）。
+
+    `NL2SQL_RETRIEVAL`（默认 off）打开时，`get_context` / `recall_queries` / `store_query`
+    三处会**先试检索层**（`agent.retrieval.adapters`）；返回 `None`（关闭/索引缺失/陈旧/
+    无命中/异常）就原样走下面的分支，逐字一致。⚠️ 每处都要自带 try/except 且**继续往下走**：
+    本函数最外层的 `except: return None` 语义是「回落 MCP 子进程」——那正是本层要绕开的
+    120s hang，异常冒到那一层等于把「检索挂了」升级成「拿全量子进程」。
 
     Returns:
         快速路径结果（与 MCP 返回格式一致），或 None 表示走原始 MCP 路径。
@@ -913,6 +936,26 @@ def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
 
     # ── get_context：小 schema 返回全文，跳过 MemoryStore ──
     if tool.name.endswith("_get_context"):
+        # 检索版：命中则用 top-k 片段替代整份 schema。`None`/异常一律**继续往下走**到
+        # 今天的 full 分支（绝不 return None —— 见函数 docstring 的 120s 说明）。
+        try:
+            if (adt := _retrieval_adapters()) is not None:
+                artifact = adt.context_artifact(
+                    Path(project_path),
+                    kwargs.get("question", ""),
+                    limit=int(kwargs.get("limit") or 5),
+                    item_type=kwargs.get("item_type"),
+                    model_name=kwargs.get("model_name"),
+                    db_name=adt.db_name_for(tool, Path(project_path)),
+                )
+                if artifact is not None:
+                    _log.info(
+                        "[WREN FAST-PATH] %s → retrieval schema (%d chars)",
+                        tool.name, len(str(artifact.get("schema") or "")),
+                    )
+                    return (json.dumps(artifact, ensure_ascii=False), artifact)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("[WREN FAST-PATH] %s 检索失败，回落 full schema: %s", tool.name, e)
         try:
             from wren.context import build_json
             from wren.memory.schema_indexer import describe_schema
@@ -936,6 +979,24 @@ def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
 
     # ── recall_queries：空知识库短路返回 [] ──
     if tool.name.endswith("_recall_queries"):
+        # 检索版：索引新鲜时**必须**由它给结果，零命中也是 `{"matches": []}`（不是 None）
+        # —— 那时回落 MCP 就是白花 120s。只有「检索不可用」才继续往下走。
+        try:
+            if (adt := _retrieval_adapters()) is not None:
+                artifact = adt.matches_artifact(
+                    Path(project_path),
+                    kwargs.get("question", ""),
+                    limit=int(kwargs.get("limit") or 3),
+                    db_name=adt.db_name_for(tool, Path(project_path)),
+                )
+                if artifact is not None:
+                    _log.info(
+                        "[WREN FAST-PATH] %s → retrieval matches=%d",
+                        tool.name, len(artifact.get("matches") or []),
+                    )
+                    return (json.dumps(artifact, ensure_ascii=False), artifact)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("[WREN FAST-PATH] %s 检索失败，回落 MCP: %s", tool.name, e)
         try:
             from wren.memory.markdown import load_query_pairs
 
@@ -953,6 +1014,8 @@ def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
         return None
 
     # ── list_stored_queries：直接读 markdown，跳过 MemoryStore ──
+    # **有意不接检索层**：它的语义就是「枚举全部」（wren 自己的 docstring 写明它区别于
+    # recall_queries 的语义 top-k），窄化会破坏「列全量/核对来源」这个用途。
     if tool.name.endswith("_list_stored_queries"):
         try:
             from wren.memory.markdown import load_query_pairs
@@ -1006,6 +1069,22 @@ def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
                 "[WREN FAST-PATH] %s → wrote %s, 跳过 LanceDB 索引",
                 tool.name, md_path,
             )
+            # 检索层显式刷新：`upsert_items` 不改 rev（rev 只看 mdl），不推这一把，新范例
+            # 会被下一次全量构建的幂等判断跳过。**返回值恒为 `{"path": ...}`**（MCP 契约
+            # 形状不许被污染），刷新结果只进日志；失败也绝不影响「写 markdown 成功」。
+            try:
+                if (adt := _retrieval_adapters()) is not None:
+                    _log.info(
+                        "[WREN FAST-PATH] %s → 索引刷新 %s",
+                        tool.name,
+                        adt.refresh_examples(
+                            Path(project_path),
+                            adt.db_name_for(tool, Path(project_path)),
+                            md_path,
+                        ),
+                    )
+            except Exception as e:  # noqa: BLE001
+                _log.warning("[WREN FAST-PATH] %s 索引刷新失败（忽略）: %s", tool.name, e)
             artifact = {"path": str(md_path)}
             return (json.dumps(artifact, ensure_ascii=False), artifact)
         except Exception as e:

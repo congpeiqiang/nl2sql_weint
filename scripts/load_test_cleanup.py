@@ -19,6 +19,10 @@ thread_id 即 task_id）。压测脚本只删自己 `POST /threads` 建的主会
       < scripts/load_test_cleanup.py
     # 确认台账无误后再加 --confirm 真删
 
+**多用户压测请加 `--accounts load01,…,load06`**：admin 视图下 `classify` 只看 graph_id，
+真人派出的子 agent 会话会被一起归类成待删；`--accounts` 改成**每个账号用自己的身份**搜自己的
+会话（服务端归属过滤 ⇒ 结构性碰不到别人），且老形态（无 graph_id 且无 title）只列不删。
+
 ⚠️ 子会话的判据 = **`metadata.graph_id`**（2026-09-24 实测修正）：老判据写成「无 graph_id
 且无 title」是**假阴性** —— 子会话其实**带** `graph_id='nl2sql_agent'`（主会话是 `'chat_agent'`
 且带 title），结果 22 个压测子会话被误算成「真人会话」、台账报「疑似子 agent: 0」。
@@ -122,6 +126,22 @@ def classify(t: dict) -> str:
     return "其他（真人会话）"
 
 
+def user_client(uid: str) -> httpx.Client | None:
+    """用**账号自己的身份**建 client（容器内手签）。归属过滤在服务端 ⇒ 天然只看得见自己的会话。"""
+    from agent.auth.users import find_user, token_version_of
+
+    rec = find_user(uid)
+    if rec is None:
+        return None
+    token = sign_token(uid, uid, bool(rec.get("is_admin")), token_version=token_version_of(rec))
+    return httpx.Client(
+        base_url=BASE,
+        headers={"Cookie": f"nl2sql_token={token}"},
+        timeout=60.0,
+        limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
+    )
+
+
 def runs_of(client: httpx.Client, tid: str) -> list[dict] | None:
     r = client.get(f"/threads/{tid}/runs")
     if r.status_code >= 300:
@@ -135,18 +155,111 @@ def runs_of(client: httpx.Client, tid: str) -> list[dict] | None:
     return None
 
 
+def scoped_kind(t: dict) -> str:
+    """`--accounts` 模式下的归类。**不能复用 `classify`**：它把「无 graph_id 且无 title」的老形态
+    也归进「子 agent 会话」，于是老形态与真子会话混在一个桶里 —— 而这两者在收尾时的处置相反
+    （前者只列不删）。这里的判据是**正面**的，认不出就单独一个桶。"""
+    md = t.get("metadata") or {}
+    title = str(md.get("title") or "")
+    graph = str(md.get("graph_id") or "")
+    if title.startswith("[压测]"):
+        return "压测主会话"
+    if graph == SUB_AGENT_GRAPH:
+        return "子 agent 会话"
+    if not graph and not title:
+        return "老形态（只列不删）"
+    return "真人/其他（不动）"
+
+
+def sweep_scoped(uids: list[str], since: float, args: argparse.Namespace) -> int:
+    """按账号收尾：每个账号**用自己的身份**搜自己的会话（服务端归属过滤 ⇒ 碰不到别人）。
+
+    为什么多用户压测必须走这条：admin 视图能看到**所有人**的会话，而 `classify` 只看
+    `metadata.graph_id` —— 真人会话里派出的子 agent 会话同样是 `nl2sql_agent`，落在时间窗内
+    就会被一起删。子会话是内部草稿，但那是别人的数据，不该由压测脚本处置。
+
+    另一处收紧：老形态兜底（无 graph_id 且无 title）在这里**不自动删**，只列出来等人确认 ——
+    兜底判据本身就承认"认不出"，配上删除动作太危险（本仓的会话删除是不可逆的硬删）。
+    """
+    ok = dele = skip = 0
+    ledger: dict[str, dict] = {}
+    for uid in uids:
+        cli = user_client(uid)
+        if cli is None:
+            print(f"[{uid}] ✗ 账号不存在，跳过")
+            continue
+        threads = [t for t in list_threads(cli, args.limit) if parse_ts(t.get("created_at")) >= since]
+        buckets: dict[str, list[dict]] = {}
+        for t in threads:
+            buckets.setdefault(scoped_kind(t), []).append(t)
+        ledger[uid] = {k: len(v) for k, v in buckets.items()}
+        print(f"\n[{uid}] 时间窗内会话 {len(threads)}："
+              + " / ".join(f"{k} {len(v)}" for k, v in buckets.items()))
+        for t in threads[:4]:
+            md = t.get("metadata") or {}
+            print(f"    · {str(t.get('thread_id',''))[:8]} graph_id={str(md.get('graph_id') or '')!r} "
+                  f"title={str(md.get('title') or '')[:28]!r}")
+
+        targets = (buckets.get("压测主会话") or []) + (buckets.get("子 agent 会话") or [])
+        for t in buckets.get("老形态（只列不删）") or []:
+            skip += 1
+            print(f"  [{uid}] 跳过 {str(t.get('thread_id',''))[:8]}：老形态（无 graph_id 且无 title），需人工确认")
+        for t in targets:
+            tid = t.get("thread_id") or ""
+            runs = runs_of(cli, tid)
+            if runs is None:
+                skip += 1
+                print(f"  [{uid}] 跳过 {tid[:8]}：读不到 runs")
+                continue
+            live = [r for r in runs if (r.get("status") or "") not in TERMINAL_RUN]
+            if live:
+                skip += 1
+                print(f"  [{uid}] 跳过 {tid[:8]}：还有活跃 run {[str(r.get('run_id',''))[:8] for r in live]}")
+                continue
+            if not args.confirm:
+                dele += 1
+                continue
+            d = cli.delete(f"/threads/{tid}")
+            ok += d.status_code < 300
+            dele += 1
+            print(f"  [{uid}] {'✓' if d.status_code < 300 else '✗'} 删除 {tid[:8]}（{len(runs)} 个 run）HTTP {d.status_code}")
+
+    print(f"\n可删/已删 {dele} 个（成功 {ok}） / 跳过 {skip} 个")
+    if not args.confirm:
+        print("（未给 --confirm：只台账，没删任何东西）")
+    print("\n=== JSON ===")
+    print(json.dumps({
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "scope": "accounts",
+        "accounts": ledger,
+        "window_minutes": args.minutes,
+        "targets": dele,
+        "deleted_ok": ok,
+        "skipped": skip,
+        "confirmed_delete": bool(args.confirm),
+    }, ensure_ascii=False))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="P2-7 压测收尾台账 / 子会话清理")
     ap.add_argument("--minutes", type=float, default=120.0, help="只看最近 N 分钟内创建的会话")
     ap.add_argument("--limit", type=int, default=400, help="最多拉多少个会话")
     ap.add_argument("--n-queries", type=int, default=0, help="压测总问数（给了才算「子会话/问数」）")
     ap.add_argument("--confirm", action="store_true", help="真的删除子 agent 会话 + 我的 [压测] 主会话（默认只台账）")
+    ap.add_argument("--accounts", default="",
+                    help="只清这些账号名下的会话（逗号分隔，**用各自身份**读/删）。多用户压测必须给："
+                         "admin 视图下 `classify` 只看 graph_id，会把**真人**派出的子 agent 会话也归类成待删")
     args = ap.parse_args()
 
-    client = admin_client()
     since = time.time() - args.minutes * 60.0
     print(f"时间窗：最近 {args.minutes:.0f} 分钟（since={datetime.fromtimestamp(since, timezone.utc).isoformat(timespec='seconds')}）")
 
+    scoped = [x.strip() for x in args.accounts.replace(" ", "").split(",") if x.strip()]
+    if scoped:
+        return sweep_scoped(scoped, since, args)
+
+    client = admin_client()
     all_threads = list_threads(client, args.limit)
     in_window = [t for t in all_threads if parse_ts(t.get("created_at")) >= since]
     buckets: dict[str, list[dict]] = {}

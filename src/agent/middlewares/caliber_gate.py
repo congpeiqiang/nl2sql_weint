@@ -28,11 +28,17 @@
 |---|---|---|---|
 | 有 `## 业务口径` 块，但条目核验不过 | `_after` 主体 | 打回列出**哪几条**不合格 | `_MAX_RETRIES`=2 |
 | **整节没有**块，且本轮取过知识料 | `_no_block` | 打回要求补块（或声明「本次未依据知识库口径」） | `_MAX_MISSING_RETRIES`=1 |
+| 末条是**失败终局**（`failure_signal` 有戳） | `_after` 开头 | **不打回**，放行让回合结束 | — |
 
 第二条是 2026-09-26 生产 trace `f222a8a5…` 逼出来的：那一轮**提示词 v4 + 本中间件都已在线上**，
 子 agent 手里有 20.9k 口径原文（含 R1/R6/R7/R8）却整节省略，报告因此完全没有业务口径节。
 原先「只对已存在的块执法」等于把「省略」变成最省事的过关方式 —— 契约文本两次被证伪
 （先造假出处、再整节省略），只剩程序化兜底这一条路。
+
+第三条是 2026-09-28 生产 trace `3dcc9a66…` 逼出来的：超时被 `ModelTimeoutMiddleware` 吞成一条
+友好文档后掉进 `_no_block`，两条逃生口对失败消息都不成立 ⇒ 打回 → 图又发起第二次 240s 调用，
+用户看到 234s 空窗、整轮 620.8s 一 SQL 未执行。**失败消息不是"没写完的终稿"，它没有终稿可言**
+（`agent/utils/failure_signal.py` 有完整事故链）。
 
 ## 重答机制：`after_model` + `jump_to="model"`
 
@@ -93,6 +99,7 @@ from agent.utils.caliber_evidence import (
     parse_caliber_block,
     verify_caliber_entries,
 )
+from agent.utils.failure_signal import failed_mark
 
 _logger = logging.getLogger(__name__)
 
@@ -233,6 +240,19 @@ class CaliberGateMiddleware(AgentMiddleware):
         last = msgs[-1]
         # 尾部不是 AI（刚注入过纠正）→ 不判，避免自我循环
         if not isinstance(last, AIMessage):
+            return None
+        # 失败终局（超时 / 额度耗尽 / 未配模型，见 failure_signal）→ 放行，让回合结束。
+        # **这不是可选的**：这类消息没有 tool_calls、也不含 `## 业务口径` 块，会直接掉进
+        # `_no_block`，而它的两条逃生口（模型已声明未依据知识库口径 / 本轮没取过知识料）
+        # 对失败消息都不成立 —— 本轮确实取过知识料，超时文案里也没有那句声明 ⇒ 必然
+        # `jump_to="model"` 再烧一次完整的模型调用。2026-09-28 生产实证：一次超时被打回后
+        # 又白等 243.5s，用户看到 234s 空窗，整轮 620.8s 且一 SQL 未执行。
+        _mark = failed_mark(last)
+        if _mark:
+            _logger.info(
+                "[caliber] 末条为失败终局消息（kind=%s），跳过口径执法，让回合结束",
+                _mark.get("kind"),
+            )
             return None
         # 非终态：模型还在干活（"边说边查"那轮）。invalid_tool_calls 是坏 JSON，
         # 另有 DanglingToolCallsMiddleware 兜底，这里不掺和。
