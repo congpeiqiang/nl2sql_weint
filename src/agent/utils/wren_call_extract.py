@@ -323,10 +323,28 @@ def load_cube_metadata(project_path: str, cube_name: str) -> dict:
           "cube_description": "音乐商店销售分析：收入、订单、客单价",
           "measures": {"total_revenue": "总收入（单价 × 数量）"},
           "dimensions": {"billing_country": "账单国家"},
+          # ── 归因（attribution_analyze）要的平行键，2026-09-30 加法新增 ──
+          "measure_expressions":   {"total_revenue": "SUM(price * quantity)"},
+          "dimension_expressions": {"billing_country": "billing_country"},
+          "time_dimensions":       {"invoice_date": {"expression": "InvoiceDate",
+                                                     "type": "date",
+                                                     "levels": ["year", "month", "day"]}},
         }
 
     报告「业务口径」两层（LLM 摘要 + 模板结构）都靠这份描述把 measure/dimension
     的**技术名**翻成人话——用户看不懂 ``total_revenue``，但看得懂「总收入」。
+
+    **后面三个键是加法新增的，既有三个键的形状一个字节都没动**（归因工具要
+    ``expression`` 判算子形状、要 ``time_dimensions`` 当时间锚点白名单，而它们
+    原本被这条循环丢掉了）。之所以用**平行键**而不是把 ``measures`` 的值换成
+    ``{"description":…, "expression":…}``：那会破坏既有下游
+    （``report_builder`` 取 ``measures[名]`` 时期待的是字符串，拿到 dict 会静默
+    退化成一句难看的话，而那是 fail-open 分支、不报错）—— 拿下游的稳定性换两个
+    键名不划算。平行键在**同一次循环里一起填**，不可能漂移。
+
+    ⚠️ ``time_dimensions`` 与 ``dimensions`` 在 yml 里是**两个平级列表**，不是子集
+    关系：归因的 ``time_dimension`` 白名单只能取前者（取 ``dimensions`` 的键集会把
+    ``work_date`` 判成非法维度 —— 而它恰恰是工时库唯一的锚点）。
 
     **``read_text(encoding="utf-8")`` 必须带**：cube 元数据是中文，Windows 默认
     GBK 解码会 ``UnicodeDecodeError``（同 ``wren_plan._mdl_path`` 附近记的坑）。
@@ -349,11 +367,27 @@ def load_cube_metadata(project_path: str, cube_name: str) -> dict:
             "cube_description": str(doc.get("description") or ""),
             "measures": {},
             "dimensions": {},
+            "measure_expressions": {},
+            "dimension_expressions": {},
+            "time_dimensions": {},
         }
-        for key in ("measures", "dimensions"):
+        # 既有两键与新平行键**同一次循环里一起填**（不可能漂移）；`measures`/`dimensions`
+        # 的值仍是 str，形状与改动前逐字相同。
+        for key, expr_key in (("measures", "measure_expressions"),
+                              ("dimensions", "dimension_expressions")):
             for item in (doc.get(key) or []):
                 if isinstance(item, dict) and item.get("name"):
-                    out[key][str(item["name"])] = str(item.get("description") or "")
+                    name = str(item["name"])
+                    out[key][name] = str(item.get("description") or "")
+                    out[expr_key][name] = str(item.get("expression") or "")
+        for item in (doc.get("time_dimensions") or []):
+            if isinstance(item, dict) and item.get("name"):
+                levels = item.get("levels")
+                out["time_dimensions"][str(item["name"])] = {
+                    "expression": str(item.get("expression") or ""),
+                    "type": str(item.get("type") or ""),
+                    "levels": [str(x) for x in levels] if isinstance(levels, list) else [],
+                }
         return out
     except Exception as e:  # noqa: BLE001  fail-open
         _logger.warning(

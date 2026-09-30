@@ -25,6 +25,7 @@ read_file/grep/glob/ls 去文件系统找了它 9 次（真路径 `/workspace/<�
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pathlib
 import re
@@ -48,7 +49,9 @@ from langchain_core.messages import ToolMessage  # noqa: E402
 
 from agent.middlewares.message_slimmer import (  # noqa: E402
     MessageSlimmerMiddleware,
+    _ATTRIBUTION_EXEMPT_MAX_CHARS,
     _KNOWLEDGE_EXEMPT_MAX_CHARS,
+    _is_attribution_tool,
     _is_knowledge_tool,
 )
 
@@ -296,6 +299,139 @@ def t8_prompt_and_skill() -> None:
           "SKILL.md 说明只有知识类工具免截断，其它两轴仍会落盘")
 
 
+# ── ⑨ 归因结果免截断（S5：`attribution_analyze`，独立白名单、不动知识料那条）──────
+_ATTR_PAYLOAD = json.dumps(
+    {
+        "measures": ["total_hours"],
+        "primary_measure": "total_hours",
+        "per_measure": {
+            "total_hours": {
+                "measure": "total_hours",
+                "strategy": "term_wise",
+                "unsupported_reason": None,
+                "total_change": {
+                    "baseline_value": 12345.6, "current_value": 9876.5,
+                    "delta": -2469.1, "pct_change": -20.0,
+                },
+                "dimension_ranking": [
+                    {"dimension": f"dim_{i}", "score": -100.0 * i} for i in range(5)
+                ],
+                "selected_dimensions": [f"dim_{i}" for i in range(3)],
+                "per_dimension": {
+                    f"dim_{i}": {
+                        "dimension": f"dim_{i}",
+                        "values": [
+                            {
+                                "value": f"取值{j}", "delta": -j * 3.5,
+                                "contribution_pct": -j * 0.7, "segment_kind": "normal",
+                                "drill_down": {"filters": [
+                                    {"dimension": f"dim_{i}", "operator": "eq", "value": f"取值{j}"}
+                                ]},
+                            }
+                            for j in range(60)
+                        ],
+                    }
+                    for i in range(3)
+                },
+                "warnings": [],
+            }
+        },
+        "warnings": [],
+        "comparison_metadata": {"baseline_days": 31, "current_days": 31, "queries_executed": 8},
+        "queries_executed": 8,
+    },
+    ensure_ascii=False,
+)
+assert len(_ATTR_PAYLOAD) > 8000, len(_ATTR_PAYLOAD)
+
+
+def t9_attribution_exempt() -> None:
+    print(f"\n⑨ 归因结果免截断（载荷 {len(_ATTR_PAYLOAD)} 字符，嵌套 JSON 形态）")
+
+    # 具名识别：后缀匹配，且与知识料那条**互不污染**
+    yes = ["attribution_analyze", "tool_attribution_analyze"]
+    check(all(_is_attribution_tool(n) for n in yes), "归因工具名全命中（裸名 + 带前缀）",
+          "、".join(yes))
+    bad = [n for n in ("get_instructions", "wrenai_witops_get_instructions", "run_sql",
+                       "read_file", "get_context", "build_report") if _is_attribution_tool(n)]
+    check(not bad, "非归因工具全不命中（负对照）", f"误命中={bad}" if bad else "")
+    check(not _is_attribution_tool(None) and not _is_attribution_tool(""),
+          "None / 空名不命中")
+    check(not _is_knowledge_tool("attribution_analyze")
+          and not _is_attribution_tool("wrenai_witops_get_instructions"),
+          "两条白名单各自独立（没把归因塞进知识料那条常量）")
+
+    # 命中：嵌套 JSON 原样进上下文（截断后是半个 JSON，模型会照着读错数字）
+    be = FakeBackend()
+    out = _sync(_tool_msg("attribution_analyze", _ATTR_PAYLOAD), _slimmer(be))
+    check(out.content == _ATTR_PAYLOAD, "归因结果原样保留（未被落盘替换）")
+    check(not _truncated(out), "上下文里没有 TOO_LARGE stub / truncated 标记")
+    check("dim_2" in str(out.content) and "取值59" in str(out.content),
+          "末段数据（dim_2 / 取值59）仍在上下文里 —— 截断丢的正是这些")
+    check(be.writes == {}, "完全没有写盘", list(be.writes))
+
+    # 负对照：同一份内容换个工具名就落盘 ⇒ 差异只来自工具名
+    be_a, be_b = FakeBackend(), FakeBackend()
+    kept = _sync(_tool_msg("attribution_analyze", _ATTR_PAYLOAD), _slimmer(be_a))
+    dropped = _sync(_tool_msg("read_file", _ATTR_PAYLOAD), _slimmer(be_b))
+    check(kept.content != dropped.content and be_a.writes == {} and len(be_b.writes) == 1,
+          "同内容不同工具名 → 判定差异只由工具名决定")
+
+    # 上限仍生效（不能无上限撑爆上下文）
+    cap = _ATTRIBUTION_EXEMPT_MAX_CHARS
+    be_c, be_d = FakeBackend(), FakeBackend()
+    at_cap = "x" * cap
+    o_c = _sync(_tool_msg("attribution_analyze", at_cap), _slimmer(be_c))
+    o_d = _sync(_tool_msg("attribution_analyze", "x" * (cap + 1)), _slimmer(be_d))
+    check(o_c.content == at_cap and be_c.writes == {}, f"正好 {cap} 字符 → 免截断（含边界）")
+    check(_truncated(o_d) and len(be_d.writes) == 1, f"{cap + 1} 字符 → 仍落盘兜底")
+
+    # 显式 None = 不设上限
+    be_e = FakeBackend()
+    mw = MessageSlimmerMiddleware(backend=be_e, max_chars_before_truncate=8000,
+                                  chart_exempt_max_chars=60000,
+                                  attribution_exempt_max_chars=None)
+    o_e = _sync(_tool_msg("attribution_analyze", "x" * (cap + 1)), mw)
+    check(o_e.content == "x" * (cap + 1) and be_e.writes == {},
+          "构造参数传 None → 归因结果永不落盘（不设上限）")
+
+    # 异步路径（子 agent 走 async）：两条路径都得有这条分支，否则一半场景回退
+    async def run() -> None:
+        be_f, be_g = FakeBackend(), FakeBackend()
+        ok = await _async(_tool_msg("attribution_analyze", _ATTR_PAYLOAD), _slimmer(be_f))
+        rd = await _async(_tool_msg("read_file", _ATTR_PAYLOAD), _slimmer(be_g))
+        check(ok.content == _ATTR_PAYLOAD and be_f.writes == {},
+              "async：归因结果原样保留、不写盘")
+        check(_truncated(rd) and len(be_g.writes) == 1, "async：非归因工具仍落盘")
+
+    asyncio.run(run())
+
+    # 接线闸：同步 / 异步**各**有一条分支（只挂一条 = 一半场景静默回退）
+    src = (_SRC / "agent/middlewares/message_slimmer.py").read_text(encoding="utf-8")
+    check(src.count("if self._is_attribution_exempt(message, content_str):") == 2,
+          "同步 + 异步两条处理路径都接了归因豁免",
+          src.count("if self._is_attribution_exempt(message, content_str):"))
+    check("_ATTRIBUTION_EXEMPT_TOOL_SUFFIXES" in src
+          and "_KNOWLEDGE_EXEMPT_TOOL_SUFFIXES" in src,
+          "归因白名单是独立常量（没改写知识料那条）")
+
+    # 提示词闸：工具挂在**主 agent** 上（`main_agent.py`），玩法必须写进主 agent 的提示词。
+    # ⚠️ 写进 NL2SQL_SYSTEM_PROMPT.md 是**无效**的 —— 那是子 agent 的提示词，而子 agent
+    # 的工具面里根本没有 attribution_analyze。
+    main_prompt = (_SRC / "agent/prompt/MAIN_AGENT_PROMPT.md").read_text(encoding="utf-8")
+    check("attribution_analyze" in main_prompt, "主 agent 提示词列出 attribution_analyze")
+    check("## 归因分析 playbook" in main_prompt, "主 agent 提示词有归因 playbook 小节")
+    check("不解释" in main_prompt and "因果" in main_prompt,
+          "playbook 明写 T3 红线（只做分解、不解释为什么）")
+    check("分次调用" in main_prompt, "playbook 写明跨 cube 分次调用")
+    check("不要从聊天记录里猜" in main_prompt, "playbook 禁止猜日期/指标名")
+    check("ATTRIBUTION_DISABLED" in main_prompt,
+          "playbook 说明开关关闭是按设计的拒绝、不要重试")
+    nl2sql_prompt = (_SRC / "agent/prompt/NL2SQL_SYSTEM_PROMPT.md").read_text(encoding="utf-8")
+    check("attribution_analyze" not in nl2sql_prompt,
+          "子 agent 提示词**不提**本工具（提了就是教它调一个不在工具面里的东西）")
+
+
 def main() -> int:
     print(f"临时 AGENT_DATA_ROOT = {os.environ['AGENT_DATA_ROOT']}")
     print(f"源码根 = {_SRC}")
@@ -308,6 +444,7 @@ def main() -> int:
     t6_fail_open()
     t7_wiring()
     t8_prompt_and_skill()
+    t9_attribution_exempt()
 
     failed = [label for ok, label in results if not ok]
     print(f"\n{'=' * 60}\n{len(results) - len(failed)}/{len(results)} 通过")

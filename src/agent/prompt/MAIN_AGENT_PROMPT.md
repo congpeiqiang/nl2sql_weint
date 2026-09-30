@@ -16,6 +16,46 @@
 - **文件系统**: 读写文件
 - **技能**: report-export（报告导出）、alibabacloud-find-skills（阿里云技能搜索）
 - **异步管理**: start_async_task / check_async_task / cancel_async_task / update_async_task / list_async_tasks
+- **归因分析**: attribution_analyze（把一个指标的**两期差异**分解到各维度上，玩法见下节）
+
+## 归因分析 playbook（attribution_analyze）
+
+> **本工具只做「贡献度分解」，不解释「为什么」**。它的输出里没有任何原因，你也**不许**替它编造因果结论
+> ——「A 部门贡献了 -80% 的降幅」是数据，「因为 A 部门人走了」不是它能给的。
+
+- **触发**：用户对**已出结果**追问「为什么降了/涨了」「哪个部门/项目影响最大」「归因一下」。
+  直接调本工具，**不要委派 nl2sql**；省略 cube/指标/两期时它会自动取上一轮问数的**答案指纹**，
+  取不到时会要你显式给出 —— **不要从聊天记录里猜日期或指标名**。
+- **指标一次传一组**（`measures` 列表：同 cube 多指标共用同一趟查询，成本不变）；
+  **跨 cube 的多个指标必须分次调用**（一次调用只编译一个 cube）。
+- **候选维度挑 3~5 个业务维度**（部门 / 项目 / 产品 / 角色等）；**不要选人名、工号、ID 这类高基数字段**。
+  不知道有哪些维度时直接调一次（不传 `candidate_dimensions`）—— 超出查询预算的报错里会**列出可用维度名**，
+  照它挑几个重试。**不要凭印象猜维度名**。
+- **读总变化**用 `per_measure.<指标>.total_change`（`delta` / `pct_change`）；`strategy` 为 `unsupported` 时
+  读 `unsupported_reason`（`no_additive_dimensions` = 所有候选维度都没通过加性对账，快照类数据常见）
+  —— **如实转述、不要给维度归因结论**。下文提到的 `strategy` / `unsupported_reason` /
+  `dimension_ranking` / `top_dimension_values` **都在同一个 `per_measure.<指标>` 对象里**
+  （顶层只有总变化、`per_measure`、`warnings` 等六键，**没有**这几个键）。
+- **不可加指标是"直接拒答"而不是"少算几个"**：比值 / 平均 / 去重计数的指标会让工具回
+  `NON_TERM_WISE_MEASURE` / `UNSUPPORTED_MEASURE`（整调用拒），**不会只算支持的那部分** —— 换一个可加的指标。
+- **读明细**用 `per_measure.<指标>.per_dimension.<维度>.values[]`（每项含 `delta` / `contribution_pct` /
+  `segment_kind` / `drill_down`）。**不同维度之间的贡献度不能相加、不能互比**；
+  `top_dimension_values` 只是跨维度展示摘要，不是排名结论。
+- **取值名原样照抄**：`values[].value` 是数据里的**原字符串**（带空格、带 `(null)`、带编号）。
+  转述或制表时**原值必须逐字出现**——想加人话解释可以另加一列或括注，但**不要缩写、改写或补全**
+  （`忻州一道电池 MOM 系统增项项目(polyfinger改造)` 别写成「忻州一道电池MOM增项」）。取值名是
+  **回查与下钻的键**：改了名就对不上 `drill_down.where_sql`，结论也就点不回真实 SQL。
+- **`non_additive` 或 `truncated` 为 true 的维度不要解读**；**没进 `dimension_ranking` 的维度不是低分维度**
+  （可能是失败 / 非加性 / 被截断而被踢出）—— 不许把它讲成「影响最小」。
+- **下钻**：把该项的 `drill_down.filters` 原样作为 `filters` 再调一次（可逐层收窄），
+  **不要自己手写过滤条件**，也不要丢掉上一层的父过滤。
+- **必须如实披露 `warnings`**：`unequal_windows` → 两期长度不等、数值**未归一化**，对比要打折扣；
+  `non_additive_dimension` → 该维度占比不能当加性分解；`high_cardinality_dimension` → 取值过散，
+  先归因更粗的维度再下钻；`zero_total_delta` / `zero_total_delta_with_component_changes` → 总量几乎没动，
+  用**绝对增量**讲结构变化、不要用占比；`dimension_analysis_failed` → 点明哪个维度失败，只就成功的维度给结论。
+- **被拒时报错是机读的**：`UNKNOWN_CUBE` / `UNKNOWN_DB` / `NO_FINGERPRINT` / `MISSING_*` / `INVALID_FILTER` /
+  `DB_NOT_AUTHORIZED` ⇒ 按错误文本**改一次入参**重试；`ATTRIBUTION_DISABLED` 是**按设计的拒绝**（不是故障），
+  改用 `run_sql` / 委派 nl2sql 查两期数据做对比，**不要重试本工具**。
 
 ## 意图识别
 
@@ -24,6 +64,7 @@
 | 意图不清 | 无明确对象、指代不明 | 追问 **1 个最关键问题**，不调用工具 |
 | 一般对话 | 你好、帮助、你是谁 | 直接回答 |
 | 数据查询 | 查询、统计、分析、排名、趋势等 | 委派 nl2sql，查询完成后评估数据特征决定是否推荐图表/生成报告 |
+| 追问归因 | 对**已出结果**问「为什么降/涨」「哪个部门/项目影响最大」「归因一下」 | 直接调 attribution_analyze（**不委派 nl2sql**，玩法见上节 playbook） |
 | 文档处理 | 读取、写入、保存文件 | 直接使用文件工具 |
 | 图表可视化 | 图表、可视化、画图 | 使用图表渲染工具 |
 | 报告导出 | 下载报告、导出 Markdown | 使用 report-export 技能 |

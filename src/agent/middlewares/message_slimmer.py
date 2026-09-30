@@ -25,6 +25,11 @@
    head5/tail5 预览、正文在被砍掉的中间，就会拿文件工具去 VFS 里找并不存在的 knowledge 路径。
    体积上限见 `_KNOWLEDGE_EXEMPT_MAX_CHARS`。
 
+5. **归因结果免截断**：归因分析工具（`attribution_analyze`）的结果不落盘 —— 它是一个
+   **嵌套 JSON**（`dimension_ranking` / `per_dimension` / `total_change` / `warnings` 互相咬合），
+   截断后模型拿到的是半个 JSON，会照着被砍断的嵌套对象读错数字，而报告里每个数字都要与
+   知识库口径逐字对账。体积上限见 `_ATTRIBUTION_EXEMPT_MAX_CHARS`。
+
 安全设计：
 - 全程 fail-open：任何异常只记日志并返回原始结果，绝不阻断 agent 循环。
 - 不触碰 AI/Human 消息（AI 消息瘦身属 L2，暂缓）。
@@ -136,6 +141,32 @@ def _is_knowledge_tool(tool_name: str | None) -> bool:
     return tool_name.endswith(_KNOWLEDGE_EXEMPT_TOOL_SUFFIXES)
 
 
+# ── 归因分析结果免截断 ────────────────────────────────────────────
+# 归因结果是一个**嵌套 JSON**：`dimension_ranking` / `per_dimension.<dim>.values[]` /
+# `total_change` / `warnings` 互相咬合。落盘按 head5/tail5 截断之后，模型拿到的是
+# **半个 JSON** —— 轻则读不出结构去猜、重则照着被砍断的对象报错数字，而报告里的
+# 每个数字都会被 `CaliberGate` 与 `caliber_evidence` 拿去与知识库逐字对账 ——
+# 一个被截断的 JSON 产出的数字既对不上口径、又看不出是截断造成的。
+#
+# 坦白说：归因结果的典型体积（3 维 × 10 值 + `per_dimension` + `warnings`）约 3~5KB，
+# **多数情况下本就低于 8000 的截断阈值**。这条白名单在 M1 更接近「保证将来的体积增长
+# （更多维度 / 更多值 / 更多度量）不会静默砍掉数字」，**不是**在修一个已发生的事故 ——
+# 与知识料那条（真事故：trace `2f98ed67…`，模型去 VFS 找 knowledge 路径 9 次）的性质不同。
+#
+# 判据与知识料同构：按**后缀**匹配（天然兼容任何名字前缀），无 name ⇒ **不豁免**（方向安全）。
+_ATTRIBUTION_EXEMPT_TOOL_SUFFIXES = ("attribution_analyze",)
+_ATTRIBUTION_EXEMPT_MAX_CHARS = int(
+    os.environ.get("ATTRIBUTION_EXEMPT_MAX_CHARS", "60000")
+)
+
+
+def _is_attribution_tool(tool_name: str | None) -> bool:
+    """工具名是否属于归因分析工具（见上方说明：与 `_is_knowledge_tool` 同构，按后缀匹配）。"""
+    if not tool_name:
+        return False
+    return tool_name.endswith(_ATTRIBUTION_EXEMPT_TOOL_SUFFIXES)
+
+
 def _text_md5(text: str) -> str:
     """计算文本内容的 md5，用于完全重复检测。"""
     return hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()
@@ -186,6 +217,7 @@ class MessageSlimmerMiddleware(AgentMiddleware):
         max_chars_before_truncate: int | None = _DEFAULT_MAX_CHARS_BEFORE_TRUNCATE,
         chart_exempt_max_chars: int | None = _CHART_IFRAME_EXEMPT_MAX_CHARS,
         knowledge_exempt_max_chars: int | None = _KNOWLEDGE_EXEMPT_MAX_CHARS,
+        attribution_exempt_max_chars: int | None = _ATTRIBUTION_EXEMPT_MAX_CHARS,
     ) -> None:
         """初始化。
 
@@ -197,11 +229,14 @@ class MessageSlimmerMiddleware(AgentMiddleware):
                 （带完整交互式 iframe 的结果永不落盘）。见模块顶部说明。
             knowledge_exempt_max_chars: 知识类工具（get_instructions / get_all_knowledge /
                 list_knowledge）结果的免截断体积上限；None 表示不设上限（永不落盘）。
+            attribution_exempt_max_chars: 归因分析工具（attribution_analyze）结果的免截断
+                体积上限；None 表示不设上限（永不落盘）。见模块顶部说明。
         """
         self._backend = backend
         self._max_chars_before_truncate = max_chars_before_truncate
         self._chart_exempt_max_chars = chart_exempt_max_chars
         self._knowledge_exempt_max_chars = knowledge_exempt_max_chars
+        self._attribution_exempt_max_chars = attribution_exempt_max_chars
 
         # 超大工具结果落盘目录前缀。统一用 "/workspace/large_tool_results"：
         # 命中 CompositeBackend 的 "/workspace/" 路由 → workspace_data_backend
@@ -288,6 +323,27 @@ class MessageSlimmerMiddleware(AgentMiddleware):
             return False
         return True
 
+    def _is_attribution_exempt(self, message: ToolMessage, content_str: str) -> bool:
+        """归因分析工具的结果是否免于落盘截断（见模块顶部说明）。
+
+        超过 `attribution_exempt_max_chars` 的仍落盘：那种量级不是正常归因结果，不能让
+        上下文无上限膨胀；此时记 warning 便于排查「报告里的数字怎么少了几个维度」。
+        """
+        if not _is_attribution_tool(message.name):
+            return False
+        if (
+            self._attribution_exempt_max_chars is not None
+            and len(content_str) > self._attribution_exempt_max_chars
+        ):
+            _logger.warning(
+                "[MessageSlimmer] 归因结果 %s %d chars 超过免截断上限 %d，仍落盘截断",
+                message.name,
+                len(content_str),
+                self._attribution_exempt_max_chars,
+            )
+            return False
+        return True
+
     def _process_tool_message_sync(
         self, message: ToolMessage, prior_messages: list[Any]
     ) -> ToolMessage:
@@ -302,6 +358,14 @@ class MessageSlimmerMiddleware(AgentMiddleware):
                 _logger.info(
                     "[MessageSlimmer] 知识类结果 %s %d chars 免截断（否则正文被砍掉后，"
                     "模型会去 VFS 找并不存在的 knowledge 路径）",
+                    message.name,
+                    len(content_str),
+                )
+                return message
+            if self._is_attribution_exempt(message, content_str):
+                _logger.info(
+                    "[MessageSlimmer] 归因结果 %s %d chars 免截断（截断后是半个 JSON，"
+                    "模型会照着被砍断的嵌套对象读错数字）",
                     message.name,
                     len(content_str),
                 )
@@ -345,6 +409,14 @@ class MessageSlimmerMiddleware(AgentMiddleware):
                 _logger.info(
                     "[MessageSlimmer] 知识类结果 %s %d chars 免截断（否则正文被砍掉后，"
                     "模型会去 VFS 找并不存在的 knowledge 路径）",
+                    message.name,
+                    len(content_str),
+                )
+                return message
+            if self._is_attribution_exempt(message, content_str):
+                _logger.info(
+                    "[MessageSlimmer] 归因结果 %s %d chars 免截断（截断后是半个 JSON，"
+                    "模型会照着被砍断的嵌套对象读错数字）",
                     message.name,
                     len(content_str),
                 )

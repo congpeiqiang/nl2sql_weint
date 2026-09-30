@@ -1140,6 +1140,126 @@ def _question_identity(thread_id: str = "") -> tuple[str, str]:
     return qid, uq
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# S8「答案指纹」：这次子任务算的是哪个库 / 哪个指标 / 哪两期 / 哪条 SQL
+# ══════════════════════════════════════════════════════════════════════════
+# 写入点在图内（`Command(update=...)`，见 `_enhanced_build_check_command`），不走
+# `threads.update_state` —— 那里对 in-flight run 是 409 硬闸（见 memory「P2-4」），
+# 而此刻主 run 正在跑这次 check。字段名**逐字**沿用磁盘 manifest
+# （`process_audit.build_process_manifest`）且复用同一批取值函数，防「state 一份账、
+# 磁盘一份账」两套口径漂移 —— 上游要求见 归因分析方案.md §4.9。
+_FP_KEY = "_answer_fingerprint"
+
+#: SQL 里处于**比较上下文**的 ISO 日期（`>= '2026-08-01'`），按出现顺序取出。
+#: 「必须带比较符」是刻意的：裸日期（`SELECT '2026-08-01'`、格式串、注释、分区边界）
+#: 不参与 —— 否则一条含日期字面量的探值 SQL 就能凭空造出两期区间。
+_SQL_DATE_PRED_RE = re.compile(r"(?:>=|<=|<>|!=|>|<|=)\s*'?(20\d{2}-\d{2}-\d{2})'?")
+#: ISO 日期裸值（用于 cube filters —— 值是日期维的取值，位置本身即比较语义）
+_ISO_DATE_RE = re.compile(r"20\d{2}-\d{2}-\d{2}")
+
+
+def _windows_from_dates(dates: list[str]) -> dict | None:
+    """有序 ISO 日期 → ``{"baseline": [s, e], "current": [s, e]}``；形状不认识则 ``None``。
+
+    只认两种**可判**形状，其余一律不猜：
+      - **3 个**日期 ⇒ 相邻两期 ``[d0,d1)`` + ``[d1,d2)``（基线结束 = 当期开始，
+        日期只出现一次 —— 环比/同比最常见的写法，也是归因内核单测夹具的形状）；
+      - **4 个**日期 ⇒ 两段互不相接 ``[d0,d1)`` + ``[d2,d3)``。
+    2 个日期 = 只有一期（没有对照期）⇒ ``None``；>4 个 ⇒ 分不清哪两对是工期 ⇒ ``None``。
+    半开区间、基线在前（时间序），与 `attribution_core.Window` 的语义一致。
+    """
+    ds = [d for i, d in enumerate(dates) if d not in dates[:i]]  # 去重保序
+    if len(ds) == 3:
+        pairs = [(ds[0], ds[1]), (ds[1], ds[2])]
+    elif len(ds) == 4:
+        pairs = [(ds[0], ds[1]), (ds[2], ds[3])]
+    else:
+        return None
+    if not all(s < e for s, e in pairs) or pairs[0][1] > pairs[1][0]:
+        return None
+    return {"baseline": [pairs[0][0], pairs[0][1]],
+            "current": [pairs[1][0], pairs[1][1]]}
+
+
+def _extract_windows(messages, final_sql: str) -> dict | None:
+    """从最终 SQL / Cube 调用实参里抽两期区间；抽不到 ⇒ ``None``。
+
+    **``None`` 不是失败，是纪律**：归因要的基线/当期必须是**绝对**日期，而「上个月」
+    「Q3」这类相对说法**不许**由代码折成日期（猜错会给出一个看着对、实际错期的归因）。
+    抽不到就留给工具层要模型显式给出（方案 §4.9）。
+    """
+    try:
+        if final_sql:
+            return _windows_from_dates(_SQL_DATE_PRED_RE.findall(final_sql))
+        # Cube 通道：日期在 filters 里（`work_date:gte:2026-08-01` / `{"work_date": {...}}`），
+        # 不在 Cube 定义的 time_dimensions 里 ⇒ 只能从实参取
+        cube = _extract_last_cube_call(messages) or {}
+        args = cube.get("args") if isinstance(cube, dict) else None
+        if not isinstance(args, dict):
+            return None
+        flt = args.get("filters")
+        seq = list(flt.values()) if isinstance(flt, dict) else (
+            flt if isinstance(flt, list) else [])
+        blob = " ".join(str(x) for x in seq)
+        return _windows_from_dates(_ISO_DATE_RE.findall(blob))
+    except Exception as e:  # noqa: BLE001  指纹是旁路，异常只意味着这一格留空
+        _logger.debug("[check_progress] 抽两期区间失败: %s", e)
+        return None
+
+
+def _build_answer_fingerprint(result: dict, messages, thread_id: str) -> dict:
+    """组装「答案指纹」：库 / 问题身份 / 最终 SQL（+摘要）/ cube 口径 / 物理 SQL 文件 / 两期区间。
+
+    只落**已确证**的东西，不落任何结论或数值（数值由归因工具现算，见方案 §4.9）——
+    指纹的作用是「同一道题的下一轮追问知道上一轮算的是什么」，不是缓存答案。
+    """
+    from agent.utils.process_audit import (
+        SQL_ORIGIN_MIXED, _digest, _physical_sql_pointer, judge_sql_origin,
+    )
+
+    final_sql = str(result.get("sql") or "")
+    origin = result.get("sql_origin")  # 成功路径上面已判过，直接用（同源、不重算）
+    if not origin:
+        try:
+            origin = judge_sql_origin(messages, producing_sql=final_sql).get("origin")
+        except Exception as e:  # noqa: BLE001  fail-open：来源不明就留空
+            _logger.debug("[check_progress] 指纹判 SQL 来源失败: %s", e)
+            origin = None
+    cube_spec: dict = {}
+    # 与 manifest 同条件（`build_process_manifest` 只在「无 SQL」或「混合路径」下取 cube
+    # 快照）：否则「cube 口径」这一格会与磁盘那份不一致。
+    if not final_sql or origin == SQL_ORIGIN_MIXED:
+        try:
+            from agent.utils.wren_call_extract import cube_snapshot
+
+            cube_spec = (cube_snapshot(messages) or {}).get("spec") or {}
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[check_progress] 指纹取 cube 快照失败: %s", e)
+    qid, uq = _question_identity(thread_id)
+    return {
+        "db_name": _current_db_name(),
+        "question_id": qid,
+        "user_question": uq,
+        "final_sql": final_sql,
+        "final_sql_digest": _digest(final_sql),
+        "final_cube_spec": cube_spec,
+        "sql_origin": origin,
+        "physical_sql_file": _physical_sql_pointer(result),
+        "windows": _extract_windows(messages, final_sql),
+    }
+
+
+def _attach_answer_fingerprint(result: dict, messages, thread_id: str) -> None:
+    """把指纹挂到 `result` 上（`_FP_KEY` 是内部通道，`_build_check_command` 会 pop 掉）。
+
+    **独立于 manifest 的 try**：manifest 落盘失败不该让指纹也消失（反之亦然）。
+    """
+    try:
+        result[_FP_KEY] = _build_answer_fingerprint(result, messages, thread_id)
+    except Exception as e:  # noqa: BLE001  指纹是旁路，异常只意味着这轮没有指纹
+        _logger.debug("[check_progress] 组装答案指纹失败: %s", e)
+
+
 def _collect_dry_run_sqls(messages) -> set:
     """收集本子任务干跑（dry_run）过的 SQL。
 
@@ -1440,6 +1560,9 @@ def apply_patch():
                     result["process_manifest"] = _ptrs["manifest"]
             except Exception as e:  # noqa: BLE001
                 _logger.debug("[check_progress] 写中间产物审计失败: %s", e)
+            # S8 答案指纹：随本次 check 结果一起写回主 agent state（图内 Command），
+            # 供追问归因读取。**与 manifest 各自 fail-open**，互不拖累。
+            _attach_answer_fingerprint(result, messages, thread_id)
         elif run["status"] == "error":
             error_detail = run.get("error")
             result["error"] = (
@@ -1471,6 +1594,10 @@ def apply_patch():
                     result["process_manifest"] = _ptrs["manifest"]
             except Exception as e:  # noqa: BLE001
                 _logger.debug("[check_progress] 写失败审计件失败: %s", e)
+            # 失败路径镜像一份（与成功路径同源同形状）：`final_sql` 空、`sql_origin`
+            # 多半 `unknown`，但 `db_name` / 问题身份 / `windows` 一样有效 —— 追问归因
+            # 时这几格照样要用（方案 §4.9「失败分支镜像一份」）。
+            _attach_answer_fingerprint(result, messages, thread_id)
         elif run["status"] == "interrupted":
             # 审批闸门已移除（2026-08-28 起 sql_approval 只读硬拦截、不再 raise
             # interrupt），当前 interrupted 是 deepagents 上下文压缩等「会自恢复的
@@ -1518,15 +1645,22 @@ def apply_patch():
         for _k in ("error", "error_kind", "failure_reported"):
             if task.get(_k) is not None and _k not in updated_task:
                 updated_task[_k] = task[_k]
-        return Command(
-            update={
-                "messages": [ToolMessage(
-                    json.dumps(result, ensure_ascii=False, indent=2),
-                    tool_call_id=tool_call_id,
-                )],
-                "async_tasks": {task["task_id"]: updated_task},
-            }
-        )
+        # S8 答案指纹：**先 pop 再 dumps** —— 这个键是 state 内部通道，绝不能出现在给
+        # 模型看的 ToolMessage 正文里（否则会被当成可用输入去读/编）。同一份 `result`
+        # 既产出消息又产出 state 更新，是本函数作为「两条路径唯一漏斗」的既有性质。
+        _fp = result.pop(_FP_KEY, None)
+        update: dict = {
+            "messages": [ToolMessage(
+                json.dumps(result, ensure_ascii=False, indent=2),
+                tool_call_id=tool_call_id,
+            )],
+            "async_tasks": {task["task_id"]: updated_task},
+        }
+        if isinstance(_fp, dict) and _fp:
+            # 按 task_id 键控 + `_merge_dict_by_key` reducer：并发多查询各写各的键，
+            # 与 query_headers / subagent_steps_map 同一套机制（不会互相覆盖）。
+            update["answer_fingerprints"] = {task["task_id"]: _fp}
+        return Command(update=update)
 
     _mod._build_check_command = _enhanced_build_check_command
 

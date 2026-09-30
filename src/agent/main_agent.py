@@ -22,6 +22,9 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from agent.llms.model import deepseek_model
 from agent.tools.mcp_tool import main_tools as mcp_tools
 from agent.tools.report_builder import build_report_tool
+# 归因分解（S3）：与 build_report 同层 —— 指纹在主 state（读指纹是一次取值，
+# 无跨图协议），cube 元信息有进程内 reader，追问归因不必再起子 run（方案 §4.4）。
+from agent.tools.attribution_analyze import attribution_analyze_tool
 from agent.settings.file_permissions import FILE_PERMISSIONS
 from agent.middlewares.query_keywords import QueryKeywordsMiddleware
 from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
@@ -228,6 +231,10 @@ class MainAgentState(DeepAgentState):
     query_active: NotRequired[bool]        # 查询进行中标记（前端拦截二次查询依据）
     # ── Token 计量（累积型：LLM 耗时、输入/输出/缓存/推理 token、步数）──
     token_stats: Annotated[NotRequired[dict], _accumulate_token_stats]
+    # ── S8「答案指纹」：任务 id -> 这次算的是哪个库/哪个指标/哪条 SQL/哪两期 ──
+    # 由 check_progress 在图内随 check 结果一起写回（见 _build_answer_fingerprint）；
+    # 追问归因（attribution_analyze）靠它拿到上一轮的绝对两期区间与 db_name。
+    answer_fingerprints: Annotated[NotRequired[dict[str, dict]], _merge_dict_by_key]
 
 
 # ── Checkpointer ────────────────────────────────────────────────────
@@ -260,7 +267,7 @@ trace_recorder = TraceRecorderMiddleware(
 
 agent = create_deep_agent(
     model=_agent_model,
-    tools=[*mcp_tools, build_report_tool],
+    tools=[*mcp_tools, build_report_tool, attribution_analyze_tool],
     subagents=[nl2sql_async],
     memory=["/shared/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
     # vfs_path_resolver 放列表末尾（最内层、紧贴模型）：后处理在 langfuse_span /
