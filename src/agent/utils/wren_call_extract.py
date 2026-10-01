@@ -314,6 +314,37 @@ def resolve_wren_ctx_by_db(db_name: str) -> tuple:
 
 
 # ── Cube 元数据：描述字典（报告业务口径用）───────────────────────────
+def list_cubes(project_path: str) -> list[str]:
+    """`<project>/cubes/` 下**可用**的 cube 名（= 有 `metadata.yml` 的目录）。
+
+    为什么要列目录、而不是把 cube 名直接交给 `load_cube_metadata`（那条路对不存在的
+    cube 同样返回 `{}`）：**cube 名会被拼进文件路径**
+    （`Path(project)/"cubes"/cube/"metadata.yml"`）。`cube="../../x"` 能让它越出项目
+    目录去读另一份 yml；先对目录名集合判成员，这条路径**按构造**就断了（目录名里不含
+    路径分隔符）。顺带把可用名清单写进调用方的错误文本 —— 模型照着改名重试即可。
+
+    只列有 `metadata.yml` 的目录：「有目录、没声明」的 cube `load_cube_metadata` 一样读不出来，
+    列进来只会让调用方按提示改完**还是**被拒。
+
+    列目录失败（`OSError`）⇒ 空集。**空集的含义由调用方定**：归因工具据此 fail-closed
+    拒绝 cube 名（与 `load_cube_metadata` 读不到同向），cube 车道软闸据此 fail-open 放行。
+
+    2026-09-30 从 `agent.tools.attribution_analyze` **原样搬家**过来（本模块是「wren 工具
+    名 → 项目/Cube 元信息」的唯一实现，软闸不该反向 import 工具模块）；`attribution_analyze`
+    保留同名别名，行为零变化。
+    """
+    root = Path(str(project_path)) / "cubes"
+    try:
+        return sorted(
+            item.name
+            for item in root.iterdir()
+            if item.is_dir() and (item / "metadata.yml").is_file()
+        )
+    except OSError as e:
+        _logger.warning("[wren_call_extract] 列 cube 目录失败（%s）：%s", root, e)
+        return []
+
+
 def load_cube_metadata(project_path: str, cube_name: str) -> dict:
     """读 ``<project>/cubes/<cube>/metadata.yml`` → 描述字典；失败返回 ``{}``。
 
@@ -329,6 +360,9 @@ def load_cube_metadata(project_path: str, cube_name: str) -> dict:
           "time_dimensions":       {"invoice_date": {"expression": "InvoiceDate",
                                                      "type": "date",
                                                      "levels": ["year", "month", "day"]}},
+          # ── Cube 车道软闸（cube_route_gate）要的底座键，2026-09-30 加法新增 ──
+          "cube_name": "sales_analytics",
+          "base_object": "invoiceline",
         }
 
     报告「业务口径」两层（LLM 摘要 + 模板结构）都靠这份描述把 measure/dimension
@@ -341,6 +375,8 @@ def load_cube_metadata(project_path: str, cube_name: str) -> dict:
     （``report_builder`` 取 ``measures[名]`` 时期待的是字符串，拿到 dict 会静默
     退化成一句难看的话，而那是 fail-open 分支、不报错）—— 拿下游的稳定性换两个
     键名不划算。平行键在**同一次循环里一起填**，不可能漂移。
+    2026-09-30 再加法新增 ``cube_name`` / ``base_object`` 两个顶层键（cube 车道软闸
+    用；同一条纪律：既有键不动、只做加法）。
 
     ⚠️ ``time_dimensions`` 与 ``dimensions`` 在 yml 里是**两个平级列表**，不是子集
     关系：归因的 ``time_dimension`` 白名单只能取前者（取 ``dimensions`` 的键集会把
@@ -370,6 +406,12 @@ def load_cube_metadata(project_path: str, cube_name: str) -> dict:
             "measure_expressions": {},
             "dimension_expressions": {},
             "time_dimensions": {},
+            # 2026-09-30 加法新增：cube 车道软闸（middlewares/cube_route_gate.py）要靠
+            # `base_object` 把「手写 SQL 的 FROM」和「cube 的底座」对上；`cube_name` 取
+            # 文件里声明的 name（**不是目录名**，两者在现行库里恰好相同但语义不同）。
+            # 既有六个键的形状与值一个字节都没动。
+            "cube_name": str(doc.get("name") or ""),
+            "base_object": str(doc.get("base_object") or ""),
         }
         # 既有两键与新平行键**同一次循环里一起填**（不可能漂移）；`measures`/`dimensions`
         # 的值仍是 str，形状与改动前逐字相同。

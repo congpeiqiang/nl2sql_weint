@@ -32,7 +32,7 @@ tar -czf $tar `
   --exclude=.venv --exclude=.git --exclude=logs --exclude=.langgraph_api `
   --exclude=.idea --exclude=docs --exclude=.tmp --exclude=__pycache__ `
   --exclude=docker --exclude="*.bin" --exclude="*.log" `
-  --exclude=.env --exclude=.env.prod --exclude=src/agent/workspace `
+  --exclude=.env --exclude=.env.prod --exclude=.env.dev `
   --exclude=src/agent/workspace-temp `
   --exclude=src/agent/shared/model_config.json `
   -C $LocalRoot .
@@ -46,6 +46,12 @@ tar -czf $tar `
 #   （/app/data/shared）那份；本机 src 里这份是 AGENT_DATA_ROOT 外置前的旧种子，
 #   带上生产只会铺到 /app/src/agent/shared/ 下当隐患（AGENT_DATA_ROOT 一失效就
 #   被静默读走）。2026-09-21 加。
+# ↑ .env.dev **2026-10-01 加**：它是**被 git 跟踪**的文件且含**明文真值密钥**，而
+#   prod 模式根本不读它（[[deploy-env-flag]]：prod 由 compose 注入，env_loader 叠
+#   .env.prod）。此前每次整包发版都把它带进 `backend/.env.dev` ⇒ Dockerfile 的
+#   `COPY . .` 让它落进镜像 `/app/.env.dev`（2026-09-30 实测 6704B、时间戳随发版变）。
+#   ⚠️ 只挡未来的包：服务器 `backend/.env.dev` 与**已构建镜像里的**旧副本仍在，
+#   要清得单独动手（那属于生产操作，需授权）。
 if ($LASTEXITCODE -ne 0) { throw "打包失败" }
 $tarMB = [math]::Round((Get-Item $tar).Length/1MB,2)
 Write-Host "   打包完成：$tarMB MB（gzip 后）"

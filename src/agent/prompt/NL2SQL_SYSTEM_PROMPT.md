@@ -33,15 +33,28 @@
  └─(1) wren-retrieve：一次并行取齐 结构(get_context) / 范例(recall_queries) / 规则(get_instructions) / 知识(list_knowledge) 四块料（工具清单里确有一并把拿全的 get_all_knowledge 时才用它替代）
  └─(2) wren-clarify：依取料包裁决清晰度；不清晰 → [需要澄清] 停止本轮
  └─(3) 判路由（零工具调用）：
-        具名指标三条件全满足      → wren-metric-query（query_cube，先 sql_only=True 预览）
+        具名指标三条件全满足      → **必须** wren-metric-query（query_cube，先 sql_only=True 预览）
         ①②满足、③维度缺          → wren-metric-query 出主体 + wren-sql-author 包外层（混合）
-        measure 匹配不上          → wren-sql-author（手写 SQL）
+        measure 匹配不上 / cube   → wren-sql-author（手写 SQL，答复须写明 cube 为何表达不了）
+        表达不了（见下）
  └─(4) dry_run → 失败即改（回对应能力修正，≤3 次）
  └─(5) wren-perf-optimize：规则集检测 + 语义不变优化；改过必重 dry_run
  └─(6) wren-execution：run_sql(sql, limit=N) → 输出答案
 ```
 
 **路由判据（具名指标三条件）**：① 问题含聚合意图（总额/数量/平均/占比/去重计数/TopN）；② 能锁定某 cube 的某 measure——匹配看 measure 的 **`expression`**（聚合烧在 expression 里，**永不读 `type`**）与 glossary/metrics 术语映射；③ 过滤/分组维度都在该 cube 的 dimensions/time_dimensions 内。
+
+**三条件全满足 ⇒ 必须走 cube 车道**（不得用 `run_sql` 手写重算）。以下**都不是**豁免理由：
+
+- 用 `run_sql` 直查 cube 的 `base_object` 视图能跑通 —— 语义层视图对 `run_sql` 可见，是**通道可用性**，不是路由许可；
+- 知识料里写着「视图经语义层查询正常可用」—— 同上，它说的是"能查"，不是"该这么查"；
+- 你已经把 measure 的 `expression` 逐字抄进手写 SQL —— 数字对得上只是"抄对了"，没有一致性校验兜底。
+
+**多时间轴 = 多次 `query_cube` 并列，不是手写豁免**：一次调用只接受**一个** `time_dimension`，要几条轴就调几次（如「新增」按 `mention_time`、「完成」按 `complete_time` 各一次），结果**并列呈现**，禁止因为"要拼两条轴"退回手写 SQL。
+
+**`describe_cube` 的定位**：执行前的**参数确认**（拿 measures / time_dimensions 的名字去组 `query_cube` 参数），**不是**口径词典、**不是**手写 SQL 的表达式来源。
+
+**逃生口**：cube 确实表达不了（行级明细 / 窗口函数 / 跨 cube 关联 / 未声明维度）⇒ 允许手写，但该轮答复必须写明「为什么不走 cube」。
 
 ### 循环内铁律
 

@@ -23,6 +23,16 @@ SQL。三重后果（用户看到的那张报告）：
 没有任何「产出了最终表」的证据）且同批消息里存在成功取数的 Cube 调用 ⇒ 返回 ""
 （空串本就是契约内「没有产出 SQL」的表达），交回 Cube 通道如实渲染。
 
+本脚本还覆盖第二类失效（2026-10-01 修，trace b816d442，「列出 9 月完成缺陷里耗时最长的
+10 条」）：真产出 SQL 的 tier0 因**渲染形态差异**全军覆没 —— 库里 `complete_time` 是 ISO
+`2026-09-14T16:33:51`，答案表写成 `2026-09-14 16:33:51`；`duration_days` 库里是 `92`，
+答案写成 `92 天（2212 h）`；`project_name` 库里是 NULL，答案写成「（空，未匹配到项目）」。
+三种都对不上 ⇒ tier0 命中 0/10 ⇒ 退化到 tier2，而诊断聚合（`GROUP BY status_code`）恰也
+10 行、`max()` 平票取靠前者 ⇒ 快照/报告 SQL 变成探值。修法：① 时刻/数字先做**渲染形态
+归一**（ISO `T`↔空格、去毫秒与时区、裸数字↔千分位按数值相等）；② 短数字改判**数位边界**
+而非裸子串（`92` 命中 `92 天（2212 h）`，但 `2` 不命中 `2026-…`）；③ 值匹配补一条**行内
+取证**（候选某行的非空值全部落在答案同一行即算覆盖），使 NULL 占位文案不成反证。
+
 本脚本断言：五层启发式各自的选取（tier0 压过行数 / 0b 标量对齐 / 1 列名 / 2、3 兜底
 仍在）、通道闸的正例与**五条负对照**、闸与 `judge_sql_origin.evidence.cube_data_calls`
 **同源**、以及「先选到探值 ⇒ 报告那行说反话 / 修好后 ⇒ 说 Cube」的对照。
@@ -112,6 +122,23 @@ class Trace:
 def _res(columns: list[str], rows: list, row_count: int | None = None) -> dict:
     return {"columns": columns, "rows": rows,
             "row_count": row_count if row_count is not None else len(rows)}
+
+
+def _tool_idx_of_sql(msgs: list[dict], sql: str) -> int:
+    """按 `assistant.tool_calls[].args.sql` 定位对应 tool 消息的下标。
+
+    SQL 只出现在**入参**里，run_sql 的结果载荷（columns/rows/row_count）不含它 —— 所以
+    找候选不能靠 grep 结果文本，必须顺着 tool_call_id 反查。
+    """
+    ids = {
+        tc.get("id")
+        for m in msgs for tc in (m.get("tool_calls") or [])
+        if (tc.get("args") or {}).get("sql") == sql
+    }
+    for i, m in enumerate(msgs):
+        if m.get("role") == "tool" and m.get("tool_call_id") in ids:
+            return i
+    raise AssertionError(f"夹具里找不到 SQL 对应的 tool 消息：{sql[:40]}")
 
 
 _SQL_DETAIL = ("SELECT e.name, e.dept, e.hire_date FROM emp_detail e "
@@ -390,6 +417,129 @@ def e_cube_channel_gate_negative() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# ⑥ 渲染形态归一 + 行内取证（trace b816d442 形状，2026-10-01 修）
+# ══════════════════════════════════════════════════════════════════════
+_SQL_SEPT_DETAIL = (
+    "SELECT bug_id, bug_name, project_name, assigned_to_user_name, mention_time, "
+    "complete_time, DATEDIFF(complete_time, mention_time) AS duration_days, "
+    "TIMESTAMPDIFF(HOUR, mention_time, complete_time) AS duration_hours "
+    "FROM v_bug WHERE status_code = 2 AND complete_time >= '2026-09-01'"
+)
+_SQL_STATUS_AGG = ("SELECT status_code, status_name, COUNT(*) AS cnt FROM v_bug "
+                   "GROUP BY status_code, status_name")
+
+# 模型写进答案表的形态：ISO `T` → 空格、NULL → 占位文案、时长折成「n 天（m h）」
+_FINAL_SEPT = (
+    "9 月完成缺陷耗时最长的前 3 条：\n\n"
+    "| # | bug_id | bug_name | project_name | 处理人 | 提出时间 | 完成时间 | 时长 |\n"
+    "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    "| 1 | 57790 | A | 苏州阿特斯 | 邱春永 | 2026-04-28 15:11:45 | 2026-09-14 16:33:51 "
+    "| 139 天（3337 h） |\n"
+    "| 2 | 60379 | B | （空，未匹配到项目） | 顾盟盟 | 2026-06-01 09:50:50 "
+    "| 2026-09-01 14:07:39 | 92 天（2212 h） |\n"
+    "| 3 | 62362 | C | （空，未匹配到项目） | 张友倩 | 2026-06-30 16:00:07 "
+    "| 2026-09-24 17:25:15 | 86 天（2065 h） |\n"
+)
+
+
+def _sept_detail_rows() -> dict:
+    """真产出：时间戳是 ISO `T`、project_name 有 NULL、时长为裸数字。"""
+    cols = ["bug_id", "bug_name", "project_name", "assigned_to_user_name",
+            "mention_time", "complete_time", "duration_days", "duration_hours"]
+    rows = [
+        {"bug_id": 57790, "bug_name": "A", "project_name": "苏州阿特斯",
+         "assigned_to_user_name": "邱春永", "mention_time": "2026-04-28T15:11:45",
+         "complete_time": "2026-09-14T16:33:51", "duration_days": 139,
+         "duration_hours": 3337},
+        {"bug_id": 60379, "bug_name": "B", "project_name": None,
+         "assigned_to_user_name": "顾盟盟", "mention_time": "2026-06-01T09:50:50",
+         "complete_time": "2026-09-01T14:07:39", "duration_days": 92,
+         "duration_hours": 2212},
+        {"bug_id": 62362, "bug_name": "C", "project_name": None,
+         "assigned_to_user_name": "张友倩", "mention_time": "2026-06-30T16:00:07",
+         "complete_time": "2026-09-24T17:25:15", "duration_days": 86,
+         "duration_hours": 2065},
+    ]
+    return _res(cols, rows, 3)
+
+
+def _status_agg_rows() -> dict:
+    """诊断聚合：**与真产出同为 3 行**（复现 `max()` 平票取靠前者的条件）。"""
+    return _res(["status_code", "status_name", "cnt"],
+                [{"status_code": 2, "status_name": "已关闭", "cnt": 3},
+                 {"status_code": 3, "status_name": "已确认", "cnt": 1},
+                 {"status_code": 1, "status_name": "待处理", "cnt": 1}], 3)
+
+
+def f_render_norm_and_row_scope() -> None:
+    section("⑥ 渲染形态归一 + 行内取证（时间格式/数字格式/NULL 占位）")
+    from agent.subagents.check_progress import (  # noqa: E402
+        _match_norm,
+        _run_sql_cell_values,
+        _run_sql_row_values,
+        _value_matches_cell,
+    )
+
+    # ── 单元级：归一与匹配规则 ──
+    check(_match_norm("2026-09-14t16:33:51") == "2026-09-14 16:33:51",
+          "ISO `T` 归一为空格（大小写 T 都认）")
+    check(_match_norm("2026-09-14t16:33:51.123") == "2026-09-14 16:33:51", "去毫秒")
+    check(_match_norm("2026-09-14t16:33:51z") == "2026-09-14 16:33:51", "去尾随 Z")
+    check(_match_norm("2026-09-14t16:33:51+08:00") == "2026-09-14 16:33:51", "去时区偏移")
+    check(_match_norm("139 天（3337 h）") == "139 天（3337 h）",
+          "无时刻形态的文本**原样透传**（不得误改）")
+    check(_value_matches_cell("92 天（2212 h）", "92"),
+          "★ 两位数按数位边界命中格式化单元格（原先 <3 位一刀切挡死）")
+    check(not _value_matches_cell("2026-09-14 16:33:51", "2"),
+          "★ 但短数字不得命中长数字串内部（`2` ⊄ `2026-…`）")
+    check(not _value_matches_cell("2026-09-14 16:33:51", "0914"),
+          "★ 跨分隔符的粘连数字不算命中（`0914` 不是 `2026-09-14` 的连续数位）")
+    check(_value_matches_cell("2026-09-14 16:33:51", "14"),
+          "日期里的 `14`（两侧是 `-`/空格）是合法数位边界 ⇒ 算命中")
+    check(_value_matches_cell("1", "1") and not _value_matches_cell("1,309", "1"),
+          "★ 单个数位只认完全相等（`1` 不得命中 `1,309`）")
+    check(_value_matches_cell("1,309", "1309"), "千分位与裸数字按数值相等命中")
+    check(_value_matches_cell("2026-09-14 16:33:51", _match_norm("2026-09-14t16:33:51")),
+          "（先归一）ISO `T` 与空格形态互相命中")
+
+    # ── 轨迹级：真产出必须压过同为 3 行的诊断聚合 ──
+    t = Trace()
+    t.call("wrenai_witops_run_sql", {"sql": _SQL_STATUS_AGG}, result=_status_agg_rows())
+    t.ai("先看下状态分布。")
+    t.call("wrenai_witops_run_sql", {"sql": _SQL_SEPT_DETAIL}, result=_sept_detail_rows())
+    t.ai(_FINAL_SEPT)
+    got = _extract_last_sql(t.msgs)
+    check(got == _SQL_SEPT_DETAIL, "★ 归一后真产出 SQL 胜出（不再退化成 tier2 平票）",
+          got[:60])
+    check(got != _SQL_STATUS_AGG, "★ 而非同为 3 行的诊断聚合")
+
+    # 负对照：诊断聚合的命中必须**恒为 0**（它不是产出，别被归一误伤成命中）
+    agg_i = _tool_idx_of_sql(t.msgs, _SQL_STATUS_AGG)
+    from agent.subagents.check_progress import _final_answer_data_rows  # noqa: E402
+    from agent.subagents.check_progress import _final_row_covered_by  # noqa: E402
+    final_rows = _final_answer_data_rows(t.msgs)
+    check(len(final_rows) == 3, f"夹具自检：最终答案 3 行（实际 {len(final_rows)}）")
+    agg_hit = sum(
+        1 for cells in final_rows
+        if _final_row_covered_by(cells, _run_sql_cell_values(t.msgs, agg_i),
+                                 _run_sql_row_values(t.msgs, agg_i))
+    )
+    check(agg_hit == 0, f"★ 负对照：诊断聚合 tier0 命中 0/3（实际 {agg_hit}/3）")
+
+    # ── 反证不得来自 NULL 占位：行内取证单测 ──
+    detail_i = _tool_idx_of_sql(t.msgs, _SQL_SEPT_DETAIL)
+    d_vals = _run_sql_cell_values(t.msgs, detail_i)
+    d_rvals = _run_sql_row_values(t.msgs, detail_i)
+    null_row = final_rows[1]  # bug_id=60379，project_name 在库里是 NULL
+    check("60379" in [c.strip() for c in null_row], "夹具自检：第 2 行是 bug_id=60379")
+    # 拍平值集合里根本没有 project_name 的值 ⇒ 占位文案这一格无值可命中
+    check(not _final_row_covered_by(null_row, d_vals),
+          "★ 只拍平比对：NULL 占位那格判不覆盖（这正是旧实现的失效点）")
+    check(_final_row_covered_by(null_row, d_vals, d_rvals),
+          "★ 加行内取证后：该行由「库行非空值全部落在答案该行」救回，NULL 不再是反证")
+
+
+# ══════════════════════════════════════════════════════════════════════
 def main() -> None:
     s0_fixture_sanity()
     a_tier0_value_match()
@@ -397,6 +547,7 @@ def main() -> None:
     c_tier1_and_priority()
     d_cube_channel_gate()
     e_cube_channel_gate_negative()
+    f_render_norm_and_row_scope()
 
     print()
     passed = sum(1 for ok, _ in results if ok)

@@ -78,7 +78,6 @@ future-annotations 会把签名里的标注变成字符串 ⇒ 第二层认不�
 import json
 import logging
 import os
-import pathlib
 import re
 from typing import Annotated, Any
 
@@ -92,6 +91,13 @@ from agent.utils.attribution_core import (
     TypedError,
     Window,
 )
+# 实现已搬到 `agent.utils.wren_call_extract.list_cubes`（2026-09-30）：cube 车道软闸
+# （middlewares/cube_route_gate.py）也要这份「目录列举 + 防路径穿越」，而中间件不该反向
+# import 工具模块。别名保留原名 ⇒ 本模块内的调用点与 `verify_attribution` 的源码断言
+# （要求看到 `_list_cubes(project_path)`）全部不变；语义不变：空集 ⇒ 成员判定必不过 ⇒
+# 拒绝（与 `load_cube_metadata` 读不到同向：**fail-closed，不会因此放行**）。
+# `wren_call_extract` 顶层只有 stdlib（其模块 docstring 明写），此处无循环 import 风险。
+from agent.utils.wren_call_extract import list_cubes as _list_cubes
 
 _logger = logging.getLogger(__name__)
 
@@ -420,31 +426,7 @@ def _caller_can_use_db(db_name: str) -> bool:
     return _rt.caller_can_access_db(user, db_name, "attribution_analyze")
 
 
-def _list_cubes(project_path: str) -> list[str]:
-    """`<project>/cubes/` 下**可用**的 cube 名（= 有 `metadata.yml` 的目录）。
-
-    为什么要列目录、而不是把 cube 名直接交给 `load_cube_metadata`（那条路对不存在的
-    cube 同样返回 `{}` ⇒ 也是 `UNKNOWN_CUBE`）：**cube 名会被拼进文件路径**
-    （`Path(project)/"cubes"/cube/"metadata.yml"`）。`cube="../../x"` 能让它越出项目
-    目录去读另一份 yml；先对目录名集合判成员，这条路径**按构造**就断了（目录名里不含
-    路径分隔符）。顺带把可用名清单写进错误文本 —— 模型照着改名重试即可。
-
-    只列有 `metadata.yml` 的目录：「有目录、没声明」的 cube `load_cube_metadata` 一样读不出来，
-    列进来只会让模型按提示改完**还是**被拒。
-
-    列目录失败（`OSError`）⇒ 空集 ⇒ 成员判定必不过 ⇒ 拒绝（与 `load_cube_metadata` 读不到
-    同向：**fail-closed，不会因此放行**）。
-    """
-    root = pathlib.Path(str(project_path)) / "cubes"
-    try:
-        return sorted(
-            item.name
-            for item in root.iterdir()
-            if item.is_dir() and (item / "metadata.yml").is_file()
-        )
-    except OSError as e:
-        _logger.warning("[attribution] 列 cube 目录失败（%s）：%s", root, e)
-        return []
+# （`_list_cubes` 的实现见本文件顶部 import 处的别名说明）
 
 
 def _window_of(pair: Any, fingerprint: dict, which: str) -> Window | None:

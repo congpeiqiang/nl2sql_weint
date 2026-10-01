@@ -38,7 +38,7 @@ from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
 from agent.utils.offload import offload, offload_long
-from api._common import json_response, parse_body, require_user, require_admin
+from api._common import admin_guard, json_response, parse_body, require_user
 from api.db_config import _ensure_mcp_tools, _scan_wren_projects
 from mcp_server.db_mcp_server.db.core.db_config_store import get_store
 
@@ -1173,7 +1173,9 @@ async def list_wren_projects(request: Request):
 
 async def associate_local(request: Request):
     """场景 A：关联本地已有目录到某条库配置。"""
-    require_admin(request)
+    denied = admin_guard(request, "关联本地语义库")
+    if denied:
+        return denied
     data = await parse_body(request)
     path = str(data.get("path", "") or "").strip()
     target_db = str(data.get("target_db", "") or "").strip()
@@ -1213,7 +1215,9 @@ async def from_git(request: Request):
     `_adopt_git_into` 接管（备份本地 → 干净 clone → 整目录交换）。已是 Git 仓库的
     同名目录拒绝接管（它有「更新」按钮）。
     """
-    require_admin(request)
+    denied = admin_guard(request, "从 Git 新建语义库")
+    if denied:
+        return denied
     from agent.utils import git_repo
 
     data = await parse_body(request)
@@ -1332,7 +1336,9 @@ async def from_git(request: Request):
 
 async def delete_project(request: Request):
     """解绑所有关联 + 删除项目目录（不可逆，需前端二次确认）。"""
-    require_admin(request)
+    denied = admin_guard(request, "删除语义库")
+    if denied:
+        return denied
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1403,7 +1409,9 @@ async def build_project(request: Request):
     情况是**硬失败**（工具全挂、重启后容器起不来）。新写法下，构建失败连旧目录都不动
     （库照常服务），成功则是单文件 `os.replace` ⇒ 读者连「文件短暂不存在」都看不到。
     """
-    require_admin(request)
+    denied = admin_guard(request, "构建语义库")
+    if denied:
+        return denied
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1462,7 +1470,9 @@ async def summary_project(request: Request):
 
 async def create_project(request: Request):
     """Step 1：创建空项目骨架。"""
-    require_admin(request)
+    denied = admin_guard(request, "新建语义库")
+    if denied:
+        return denied
     data = await parse_body(request)
     project_name = str(data.get("project_name", "") or "").strip()
     db_name = str(data.get("db_name", "") or "").strip()
@@ -1546,9 +1556,344 @@ async def create_project(request: Request):
     })
 
 
+# ── 按表/字段构建模型（2026-10-01）─────────────────────────────
+#
+# 废弃字段的正确表达方式是 wren 原生的**隐藏列**，而不是从 columns 里删掉：
+#   - 删列会让 `relationships.yml` 里 `条件 = "a.id = b.a_id"` 这种**列名文本**指向不存在的
+#     字段，`wren context build` 直接报错；
+#   - 隐藏列只是从模型 schema 里摘出去，列定义还在，随时可以还原。
+#
+# ⚠️ **键名是 `is_hidden`，不是 `hidden`**（2026-10-01 实测，见下）：wren 把 metadata.yml
+# 的 snake_case 键经 `wren/context.py` 的映射表转成 mdl.json 的 camelCase，`is_hidden`
+# → `isHidden`，之后 `wren/mdl/cte_rewriter.py` 按 `isHidden` 过滤；而 `hidden` 不在映射表里，
+# 被**原样搬运**进 mdl.json 成一个没人读的键。踩过的坑：生产库 `witops-wrenai` 一度有
+# 6 个文件 15 处写的是 `hidden: true` —— 全部静默失效，模型照样看得见那些「已废弃」字段。
+# （mdl.json 里 `isHidden` 为真的列：不出现在 `SELECT *` 的展开里；显式 `SELECT 该列`
+#  会编译失败 `No field named …`。）
+
+# 隐藏列在 metadata.yml 里的落点（列块内，2 空格缩进）
+_HIDDEN_KEY = "is_hidden"
+# 同一个含义的**错误**写法（历史遗留），读的时候要认，改的时候顺手归一
+_HIDDEN_KEY_LEGACY = "hidden"
+
+
+def _read_existing_models(project: Path) -> dict[str, dict]:
+    """读 `models/<表>/metadata.yml`，返回 ``{表名: {"columns": [...], "hidden": [...]}}``。
+
+    只读、不写回。给「调整已有语义库」的对话框当当前状态用（前端拿它预置复选框）。
+    解析失败的文件跳过（不让一个坏 YAML 挡掉整个界面）。
+    """
+    import yaml as _yaml
+
+    models_dir = project / "models"
+    out: dict[str, dict] = {}
+    if not models_dir.is_dir():
+        return out
+    for entry in sorted(models_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        meta = entry / "metadata.yml"
+        if not meta.is_file():
+            continue
+        try:
+            data = _yaml.safe_load(meta.read_text(encoding="utf-8")) or {}
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("[wren_semantic] 读取 %s 失败，跳过: %s", meta, e)
+            continue
+        if not isinstance(data, dict):
+            continue
+        cols = [c for c in (data.get("columns") or []) if isinstance(c, dict) and c.get("name")]
+        out[str(data.get("name") or entry.name)] = {
+            "columns": [str(c["name"]) for c in cols],
+            "hidden": [
+                str(c["name"]) for c in cols
+                if c.get(_HIDDEN_KEY) or c.get(_HIDDEN_KEY_LEGACY)
+            ],
+        }
+    return out
+
+
+def _set_column_hidden(text: str, col: str, hidden: bool) -> str:
+    """在 metadata.yml **文本**里把某一列的隐藏开关打开/关掉。
+
+    为什么做文本手术而不是 `yaml.safe_load` + `dump`：实测生产库 48 个模型文件里有 12 个
+    的长 `description` 会被 `dump` 按 80 列重排 ⇒ 每次改一个开关都会捎带一堆与本次改动
+    无关的 diff，评审时看不见真正改了什么。
+
+    规则（认不出就报错，不猜）：
+      - 目标列块 = 从 `- name: <col>` 那一行到下一个同缩进的 `- name:` 之前；
+      - 块内已有 `hidden:`（历史写法）就地改名成 `is_hidden:`，不新增行；
+      - 否则在 `is_primary_key:` 之后插入（与既有文件的字段顺序一致），没有就插在 `- name:` 之后；
+      - 关闭时删掉那一行。
+    """
+    lines = text.splitlines(keepends=True)
+    # 列块缩进：`- name:` 前面可能有空格（平铺列表里通常是 0）
+    start = None
+    indent = ""
+    for i, ln in enumerate(lines):
+        m = re.match(r"^(\s*)-\s+name:\s*(.*?)\s*$", ln)
+        if m and m.group(2).strip("'\"") == col:
+            if start is not None:
+                raise ValueError(f"列 '{col}' 在文件中出现多次，无法确定要改哪一处")
+            start = i
+            indent = m.group(1)
+    if start is None:
+        raise ValueError(f"列 '{col}' 不在文件中")
+
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if re.match(rf"^{re.escape(indent)}-\s+name:", lines[j]):
+            end = j
+            break
+
+    key_re = re.compile(
+        rf"^{re.escape(indent)}\s+({_HIDDEN_KEY}|{_HIDDEN_KEY_LEGACY}):\s*\S+\s*$"
+    )
+    for j in range(start + 1, end):
+        m = key_re.match(lines[j])
+        if not m:
+            continue
+        if hidden:
+            # 归一：历史 `hidden:` 就地改成 `is_hidden:`（顺带保留原来的缩进）
+            lines[j] = re.sub(rf"\b{_HIDDEN_KEY_LEGACY}\b", _HIDDEN_KEY, lines[j])
+        else:
+            del lines[j]
+        return "".join(lines)
+
+    if not hidden:
+        return text  # 本来就没隐藏，幂等
+    insert_at = start + 1
+    for j in range(start + 1, end):
+        if re.match(rf"^{re.escape(indent)}\s+is_primary_key:", lines[j]):
+            insert_at = j + 1
+            break
+    lines.insert(insert_at, f"{indent}  {_HIDDEN_KEY}: true\n")
+    return "".join(lines)
+
+
+def _render_model_yaml(tbl: str, t: Any, visible: set[str] | None) -> str:
+    """按内省结果渲染一个 `models/<表>/metadata.yml` 的正文。
+
+    ``visible`` 为 None 表示全列可见；否则不在集合里的列标 `is_hidden: true`。
+    """
+    import yaml as _yaml
+
+    def _col(c: Any) -> dict:
+        out = {
+            "name": c.name,
+            "type": c.wren_type,
+            "is_calculated": False,
+            "not_null": not c.nullable,
+            "is_primary_key": c.is_primary_key,
+        }
+        if visible is not None and c.name not in visible:
+            out[_HIDDEN_KEY] = True
+        if c.comment:
+            out["properties"] = {"description": c.comment}
+        return out
+
+    model: dict = {
+        "name": tbl.lower(),
+        "table_reference": {"table": tbl},
+        "columns": [_col(c) for c in t.columns],
+        "cached": False,
+    }
+    if t.primary_key:
+        model["primary_key"] = t.primary_key
+    if t.comment:
+        model["properties"] = {"description": t.comment}
+    return (
+        f"# {tbl} table\n"
+        + _yaml.dump(model, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    )
+
+
+def _relationship_fk_columns(
+    foreign_keys: list[Any], selected_tables: list[str]
+) -> tuple[dict[str, set[str]], set[str]]:
+    """算出这次会写进 `relationships.yml` 的外键。
+
+    返回 ``(每张表会被引用的列, 会被引用的表名)``。
+
+    判据必须与 `_apply_model_selection` 写关系时**完全一致**：`join_type` 是 MANY_TO_ONE、
+    条件两端都要是真实模型 ⇒ **任一端没被选中就整条不写**。历史代码这里是 `and`（两端都
+    没选才跳过），导致只取消勾选一侧时照样写出引用「不存在的模型」的关系，
+    后续 `wren context build` 直接 `references unknown model` 失败。
+    """
+    selected = {s.lower() for s in selected_tables}
+    cols: dict[str, set[str]] = {}
+    tables: set[str] = set()
+    for fk in foreign_keys:
+        src, tgt = fk.source_table.lower(), fk.target_table.lower()
+        if src == tgt or src not in selected or tgt not in selected:
+            continue
+        cols.setdefault(src, set()).add(fk.source_column)
+        cols.setdefault(tgt, set()).add(fk.target_column)
+        tables.add(src)
+        tables.add(tgt)
+    return cols, tables
+
+
+def _validate_column_selection(
+    result: Any,
+    selected_tables: list[str],
+    selected_columns: dict[str, list[str]] | None,
+) -> str | None:
+    """校验字段选择，返回错误文案（None = 通过）。
+
+    fail-closed：宁可拒绝也不产出一个「构建能过、查询才炸」的库。
+    """
+    if not selected_columns:
+        return None
+    table_map = {t.name: t for t in result.tables}
+    fk_cols, _ = _relationship_fk_columns(result.foreign_keys, selected_tables)
+
+    for tbl_name in selected_tables:
+        if tbl_name not in selected_columns:
+            continue  # 没指定 = 全列可见
+        t = table_map.get(tbl_name)
+        if t is None:
+            continue  # 「表不在内省结果里」由写入环节告警跳过
+        visible = selected_columns[tbl_name]
+        known = {c.name for c in t.columns}
+        unknown = [c for c in visible if c not in known]
+        if unknown:
+            return (
+                f"列不存在：{tbl_name}.{'、'.join(unknown[:5])}"
+                f"{'…' if len(unknown) > 5 else ''} 不在数据库表结构中"
+            )
+        hidden = known - set(visible)
+        if not hidden:
+            continue
+        # 主键被隐藏 ⇒ 模型声明了 primary_key 却没有这一列，语义自相矛盾
+        pk_hidden = [c for c in t.primary_key if c in hidden]
+        if pk_hidden:
+            return (
+                f"不能隐藏主键列：{tbl_name}.{'、'.join(pk_hidden)}"
+                "（主键是模型自身的结构列，隐藏后模型将没有可用主键）"
+            )
+        # 被本次将写出的外键关系引用的列 ⇒ 隐藏后任何 JOIN 都会 `No field named`
+        rel_hidden = sorted(c for c in hidden if c in fk_cols.get(tbl_name.lower(), set()))
+        if rel_hidden:
+            return (
+                f"不能隐藏表关联列：{tbl_name}.{'、'.join(rel_hidden)}"
+                "（该列被自动生成的外键关系引用，隐藏后所有关联查询都会失败）"
+            )
+    return None
+
+
+def _apply_model_selection(
+    project: Path,
+    result: Any,
+    selected_tables: list[str],
+    selected_columns: dict[str, list[str]] | None,
+    *,
+    include_relationships: bool,
+    patch_existing: bool,
+    prune: bool,
+) -> tuple[int, int, int]:
+    """按选择写 `models/` 与 `relationships.yml`。返回 (生成数, 删除数, 关系数)。
+
+    ``patch_existing``：
+      - False（新建流程）：已存在的模型文件**重写**（沿用旧行为，零回归）；
+      - True（调整已有库）：已存在的文件只做**文本手术**改隐藏开关，手改过的描述、
+        字段顺序、注释全部原样保留 —— 用 DB 内省结果重写会把这些抹掉。
+
+    校验放在**本函数第一步**（不是交给调用方）：拒绝的请求保证一个字节都不落盘。
+    卫语句 ``ValueError`` = 选择非法（可映射成 400）；``RuntimeError`` = 文件改不动（409）。
+    """
+    import yaml as _yaml
+
+    err = _validate_column_selection(result, selected_tables, selected_columns)
+    if err:
+        raise ValueError(err)
+
+    table_map = {t.name: t for t in result.tables}
+    models_dir = project / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    generated = 0
+    removed = 0
+    wanted = {s.lower() for s in selected_tables}
+
+    # 1) 不在选择里的表：按需删目录（只认「是 models/ 下的目录且带 metadata.yml」的，
+    #    不碰任何别的文件）
+    if prune:
+        for entry in sorted(models_dir.iterdir()):
+            if not entry.is_dir() or entry.name.lower() in wanted:
+                continue
+            if not (entry / "metadata.yml").is_file():
+                continue
+            _rmtree_force(entry)
+            removed += 1
+
+    # 2) 逐表写 / 改
+    for tbl_name in selected_tables:
+        t = table_map.get(tbl_name)
+        if t is None:
+            _logger.warning("[wren_semantic] 表 '%s' 不在内省结果中，跳过", tbl_name)
+            continue
+        visible = None
+        if selected_columns and tbl_name in selected_columns:
+            visible = set(selected_columns[tbl_name])
+
+        model_dir = models_dir / tbl_name.lower()
+        meta = model_dir / "metadata.yml"
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        if patch_existing and meta.is_file():
+            # 原地打标：只改隐藏开关，其余字节不动
+            text = meta.read_text(encoding="utf-8")
+            for c in t.columns:
+                want_hidden = visible is not None and c.name not in visible
+                try:
+                    text = _set_column_hidden(text, c.name, want_hidden)
+                except ValueError as e:
+                    # 列块认不出来（手改过结构）⇒ 报错而不是猜，避免改错地方
+                    raise RuntimeError(
+                        f"{tbl_name}/metadata.yml 无法定位列 '{c.name}'（{e}）；"
+                        "该文件可能被手工改过结构，请手工调整或改用「重新生成」"
+                    ) from e
+            meta.write_text(text, encoding="utf-8")
+        else:
+            meta.write_text(_render_model_yaml(tbl_name, t, visible), encoding="utf-8")
+        generated += 1
+
+    # 3) relationships.yml：过滤条件与 _relationship_fk_columns 保持一致
+    relationships_generated = 0
+    if include_relationships:
+        seen_pairs: set[tuple[str, str]] = set()
+        relationships: list[dict] = []
+        for fk in result.foreign_keys:
+            src = fk.source_table.lower()
+            tgt = fk.target_table.lower()
+            # 任一端不在最终模型集合里就跳过 —— 写出引用不存在模型的关系会让
+            # `wren context build` 直接失败（references unknown model）
+            if src == tgt or src not in wanted or tgt not in wanted:
+                continue
+            key = tuple(sorted([src, tgt]))  # type: ignore[assignment]
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            relationships.append({
+                "name": f"{src}_{tgt}",
+                "models": [src, tgt],
+                "join_type": "MANY_TO_ONE",
+                "condition": f"{src}.{fk.source_column} = {tgt}.{fk.target_column}",
+            })
+        (project / "relationships.yml").write_text(
+            "# Auto-generated from database foreign keys\n" +
+            _yaml.dump({"relationships": relationships}, default_flow_style=False, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        relationships_generated = len(relationships)
+    return generated, removed, relationships_generated
+
+
 async def introspect_project(request: Request):
     """Step 2：连接数据库提取表结构。"""
-    require_admin(request)
+    denied = admin_guard(request, "读取数据库表结构")
+    if denied:
+        return denied
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1593,6 +1938,9 @@ async def introspect_project(request: Request):
         "ok": True,
         "db_name": db_name,
         "db_type": cfg.db_type,
+        # 已有库调整对话框的当前状态来源：{表名: {"columns": [...], "hidden": [...]}}。
+        # 新建流程拿到的是 {}（models/ 还是空的）。纯加法，老前端不受影响。
+        "existing_models": _read_existing_models(project),
         "tables": [
             {
                 "name": t.name,
@@ -1626,9 +1974,16 @@ async def introspect_project(request: Request):
 
 
 async def generate_models(request: Request):
-    """Step 2b：按选中表生成 models/*.yml 和 relationships.yml。"""
-    require_admin(request)
-    import yaml as _yaml
+    """Step 2b：按选中的**表与字段**生成 models/*.yml 和 relationships.yml。
+
+    两种用法共用本端点（靠 `patch_existing` 区分）：
+      - 新建流程：`{selected_tables, selected_columns?}` ⇒ 写新文件；
+      - 调整已有库：`{selected_tables, selected_columns?, patch_existing: true, prune: true}`
+        ⇒ 原地改隐藏开关 + 删掉不再要的表目录，手改过的模型文件内容不丢。
+    """
+    denied = admin_guard(request, "生成模型")
+    if denied:
+        return denied
 
     name = request.path_params["name"]
     project = _find_project(name)
@@ -1639,9 +1994,24 @@ async def generate_models(request: Request):
     selected_tables: list[str] = data.get("selected_tables", []) or []
     include_relationships = bool(data.get("include_relationships", True))
     db_name = str(data.get("db_name", "") or "").strip()
+    # 字段级选择：{"表": ["可见列", ...]}；某表没出现在这里 = 该表全列可见。
+    # 缺省 ⇒ 与旧行为完全一致（老前端不传也照跑）。
+    selected_columns: dict[str, list[str]] | None = data.get("selected_columns") or None
+    # 已有库调整专用：True = 已存在的模型文件只原地改隐藏开关（保住手改内容）+ 删掉
+    # 未选中的表目录。默认 False = 新建流程的老行为（重写、不删）。
+    patch_existing = bool(data.get("patch_existing", False))
+    prune = bool(data.get("prune", False))
 
     if not selected_tables:
         return json_response({"error": "selected_tables 必填，至少选一张表"}, status=400)
+    if selected_columns is not None and not isinstance(selected_columns, dict):
+        return json_response({"error": "selected_columns 需为 {表名: [列名]} 形式"}, status=400)
+    if prune and not patch_existing:
+        # 只删不保护是危险组合（调用方多半是漏传参数），明确拒绝
+        return json_response(
+            {"error": "prune 必须与 patch_existing 同时使用（删除表目录前需先确认是调整已有库）"},
+            status=400,
+        )
 
     # 需要内省结果来生成模型 — 调内省
     if not db_name:
@@ -1670,83 +2040,36 @@ async def generate_models(request: Request):
 
     # P1-14：选 N 张表就写 N 个 models/<表>/metadata.yml（每个都要建目录 + 序列化 YAML 落盘），
     # 外加 relationships.yml —— 勾「全选」时是几百次写，整段搬线程（纯文件 I/O，长任务池）。
-    def _write_models() -> tuple[int, int]:
-        # 构建表名 → TableInfo 映射
-        table_map = {t.name: t for t in result.tables}
-        models_generated = 0
-        for tbl_name in selected_tables:
-            t = table_map.get(tbl_name)
-            if t is None:
-                _logger.warning("[wren_semantic] 表 '%s' 不在内省结果中，跳过", tbl_name)
-                continue
-            model = {
-                "name": tbl_name.lower(),
-                "table_reference": {"table": tbl_name},
-                "columns": [
-                    {
-                        "name": c.name,
-                        "type": c.wren_type,
-                        "is_calculated": False,
-                        "not_null": not c.nullable,
-                        "is_primary_key": c.is_primary_key,
-                        **({"properties": {"description": c.comment}} if c.comment else {}),
-                    }
-                    for c in t.columns
-                ],
-                "cached": False,
-            }
-            if t.primary_key:
-                model["primary_key"] = t.primary_key
-            if t.comment:
-                model["properties"] = {"description": t.comment}
-
-            model_dir = project / "models" / tbl_name.lower()
-            model_dir.mkdir(parents=True, exist_ok=True)
-            (model_dir / "metadata.yml").write_text(
-                f"# {tbl_name} table\n" +
-                _yaml.dump(model, default_flow_style=False, allow_unicode=True, sort_keys=False),
-                encoding="utf-8",
-            )
-            models_generated += 1
-
-        # 生成 relationships.yml
-        relationships_generated = 0
-        if include_relationships:
-            seen_pairs: set[tuple[str, str]] = set()
-            relationships: list[dict] = []
-            for fk in result.foreign_keys:
-                if fk.source_table not in selected_tables and fk.target_table not in selected_tables:
-                    continue
-                src = fk.source_table.lower()
-                tgt = fk.target_table.lower()
-                if src == tgt:
-                    continue
-                key = tuple(sorted([src, tgt]))  # type: ignore[assignment]
-                if key in seen_pairs:
-                    continue
-                seen_pairs.add(key)
-                relationships.append({
-                    "name": f"{src}_{tgt}",
-                    "models": [src, tgt],
-                    "join_type": "MANY_TO_ONE",
-                    "condition": f"{src}.{fk.source_column} = {tgt}.{fk.target_column}",
-                })
-            (project / "relationships.yml").write_text(
-                "# Auto-generated from database foreign keys\n" +
-                _yaml.dump({"relationships": relationships}, default_flow_style=False, allow_unicode=True, sort_keys=False),
-                encoding="utf-8",
-            )
-            relationships_generated = len(relationships)
-        return models_generated, relationships_generated
+    # 字段级校验在 _apply_model_selection 第一步，保证被拒时一个字节都不落盘。
+    def _write_models() -> tuple[int, int, int]:
+        return _apply_model_selection(
+            project, result, selected_tables, selected_columns,
+            include_relationships=include_relationships,
+            patch_existing=patch_existing,
+            prune=prune,
+        )
 
     # 写的是构建的**输入**（models/*.yml）：拿项目的写锁，避免与「更新/重建」的
     # 暂存整目录拷贝交叉（那样会把半写的 model 文件烤进换入的副本）
-    async with _project_lock(str(project.resolve())):
-        models_generated, relationships_generated = await offload_long(_write_models)
+    try:
+        async with _project_lock(str(project.resolve())):
+            models_generated, models_removed, relationships_generated = await offload_long(_write_models)
+    except ValueError as e:
+        # 选择非法（藏主键 / 藏关系列 / 列不存在）—— 已确认没落盘
+        _logger.info("[wren_semantic] 拒绝字段选择: %s", e)
+        return json_response({"error": str(e)}, status=400)
+    except RuntimeError as e:
+        # 文本手术定位不到列块（文件被手工改过结构）——如实报错，不猜着改
+        _logger.warning("[wren_semantic] 调整模型失败: %s", e)
+        return json_response({"error": str(e)}, status=409)
 
     return json_response({
         "ok": True,
-        "generated": {"models": models_generated, "relationships": relationships_generated},
+        "generated": {
+            "models": models_generated,
+            "removed": models_removed,
+            "relationships": relationships_generated,
+        },
     })
 
 
@@ -1775,7 +2098,9 @@ async def save_knowledge(request: Request):
 
     返回 saved / deleted / rejected；rejected 是非法的路径（前端据此报错，不静默吞掉）。
     """
-    require_admin(request)
+    denied = admin_guard(request, "保存业务知识")
+    if denied:
+        return denied
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -1936,7 +2261,9 @@ async def open_directory(request: Request):
 
 async def push_to_git(request: Request):
     """Step 5：推送语义库至 Git 远程仓库。"""
-    require_admin(request)
+    denied = admin_guard(request, "推送 Git")
+    if denied:
+        return denied
     from agent.utils import git_repo
 
     name = request.path_params["name"]
@@ -2181,7 +2508,9 @@ async def read_knowledge(request: Request):
 
 async def ai_generate_knowledge(request: Request):
     """AI 分析数据库结构，生成业务知识草稿。"""
-    require_admin(request)
+    denied = admin_guard(request, "AI 生成业务知识")
+    if denied:
+        return denied
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -2335,9 +2664,11 @@ async def git_status(request: Request):
             "remote": git_repo.list_remote_refs(cwd),
             "status": git_repo._run(["status", "--porcelain"], cwd=cwd),
             # 未提交改动的**具体文件**（与 pull_ref 护栏同判据）：前端「更新」对话框据此
-            # 列出是哪几个文件挡着。注意 has_local_changes（含未跟踪文件）比这个宽 ——
-            # 未跟踪文件不拦更新，别用前者决定是否放行（2026-09-15 生产：保存知识只写盘
-            # 不提交 → 工作树常年脏，用户只看到一句看不懂的拒绝）。
+            # 列出是哪几个文件挡着。局部改动与**新增未跟踪**分开回：`save_knowledge`
+            # 只写盘不提交 ⇒ 新知识永远是未跟踪文件（2026-10-01 生产：这类文件既不在
+            # local_changes 里、`checkout -f` 又不删 ⇒ 更新后语义库里留着旧知识）。
+            # has_local_changes（status --porcelain 非空）比两者之和更宽（含 .gitignore
+            # 忽略物），只作「工作树脏不脏」的展示口径，不作放行判据。
             "changes": git_repo.local_changes(cwd),
         }
 
@@ -2367,6 +2698,7 @@ async def git_status(request: Request):
         "has_updates": has_updates,
         "has_local_changes": has_local_changes,
         "local_changes": changes["blocking"],
+        "untracked_changes": changes["untracked"],
         "generated_changes": changes["generated"],
         "branch": branch,
         "commit": info.get("commit", ""),
@@ -2429,7 +2761,9 @@ async def git_pull(request: Request):
     被关页面打断时，语义库会停在「有源文件、没构建产物」的状态，而 wren 加载器对缺
     `target/mdl.json` 是**硬失败**（该库工具全挂、重启后容器都起不来）。
     """
-    require_admin(request)
+    denied = admin_guard(request, "更新语义库")
+    if denied:
+        return denied
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:
@@ -2517,7 +2851,9 @@ async def git_adopt(request: Request):
     「更新」按钮，不该再走覆盖语义）；本地有自建内容时回 200 + `code="local_content"`
     等用户确认（前端据此渲染确认勾选），**确认前不动任何文件**。
     """
-    require_admin(request)
+    denied = admin_guard(request, "接管本地语义库")
+    if denied:
+        return denied
     name = request.path_params["name"]
     project = _find_project(name)
     if project is None:

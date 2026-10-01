@@ -730,6 +730,116 @@ def section_structure() -> None:
           "钩子结论进日志（运维从响应与日志两处都能看到）")
 
 
+# ══ ⑤ 未跟踪文件护栏 ═════════════════════════════════════════
+def section_untracked() -> None:
+    """前端「保存知识」只写盘、不提交 ⇒ 新知识永远是**未跟踪文件**。
+
+    `git checkout -f` 只覆盖已跟踪文件、**从不删除**未跟踪文件：不把它们算进更新护栏，
+    用户点了「更新到 tag v2」，更新后的语义库里就还留着没推 git 的旧知识 —— 库内容
+    ≠ 该 tag 的内容，而用户以为已经同步了（2026-10-01 生产事故）。本段在真实文件系统上
+    复现这条链路，两侧都断言：**默认拒绝**（不覆盖用户数据）、**确认放弃则 stash 带走**
+    （未跟踪文件必须真的进 stash，否则「放弃」是假的）。
+    """
+    print("\n⑤ 未跟踪文件：只写盘的新知识不得跨过「更新」，放弃时必须真被 stash 带走")
+    import api.wren_semantic as W
+    from agent.utils import git_repo
+
+    base = WORK / "sec5"
+    ws = base / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    bare, seed = setup_origin(base, "libU")
+    # 远程准备一个「更新目标」tag：用户说的正是「更新指定 tag」
+    (seed / "models" / "m2").mkdir(parents=True, exist_ok=True)
+    (seed / "models" / "m2" / "metadata.yml").write_text(
+        "name: m2\ntableReference:\n  table: t2\n  schema: public\ncolumns: []\n",
+        encoding="utf-8",
+    )
+    git(seed, "add", "-A")
+    git(seed, "commit", "-m", "add m2")
+    git(seed, "tag", "-a", "v2", "-m", "v2")
+    # 只推 tag、不推 main：这样 `models/m2` 是「v2 独有」的内容，能拿它证明
+    # 「被拒时确实没换入」而不是被别的路径带进来的
+    git(seed, "push", "origin", "v2")
+
+    dest = ws / "libU"
+    clone_like_production(bare, dest)
+    stub_env(STUB_LOG="", STUB_SLEEP="0", STUB_MARK="", STUB_FAIL="")
+
+    # 模拟前端「保存知识」：新分类目录 + 新文件，只落盘不提交 ⇒ 未跟踪
+    newk = dest / "knowledge" / "glossary" / "新术语.md"
+    newk.write_text("还没推 git 的新知识\n", encoding="utf-8")
+    check(git(dest, "status", "--porcelain").stdout.strip().startswith("??"),
+          "夹具成立：新知识是未跟踪文件", git(dest, "status", "--porcelain").stdout.strip())
+
+    lc = git_repo.local_changes(str(dest))
+    check(lc["blocking"] == [] and lc["untracked"] == ["knowledge/glossary/新术语.md"],
+          "local_changes 把它归到 untracked（不混进 blocking/generated）", lc)
+
+    # (f) 未确认放弃 → 拒绝，且线上一个字节都没动
+    before = manifest(dest)
+    ok_f, pay_f = asyncio.run(W._pull_swapped(dest, "v2", False))
+    check(ok_f is False, "只有未跟踪文件、未确认放弃 → 拒绝更新", pay_f.get("message"))
+    check("新增未跟踪" in str(pay_f.get("message")),
+          "拒绝文案点明是「新增未跟踪」（不是笼统一句未提交）", pay_f.get("message"))
+    check("新术语.md" in str(pay_f.get("message")),
+          "拒绝文案列出具体文件（用户看得懂是哪个）", pay_f.get("message"))
+    check(pay_f.get("blocked") == "dirty" and "knowledge/glossary/新术语.md" in (pay_f.get("dirty_files") or []),
+          "blocked=dirty 且 dirty_files 带上该文件（前端据此列表格）", pay_f)
+    check(manifest(dest) == before, "被拒时线上目录一个字节都没动（含 .git）")
+    check((dest / "models" / "m2").exists() is False, "被拒时确实没换入 tag v2 的内容")
+
+    # (g) 确认放弃 → stash 必须把未跟踪文件一并带走（`-u`），更新后库里不得残留
+    ok_g, pay_g = asyncio.run(W._pull_swapped(dest, "v2", True))
+    check(ok_g is True, "确认放弃后更新成功", pay_g.get("message"))
+    check(bool(pay_g.get("stash_ref")), "返回 stash_ref", pay_g.get("stash_ref"))
+    check((dest / "models" / "m2" / "metadata.yml").is_file(),
+          "tag v2 的内容真的换进来了（不是空更新）")
+    check(not newk.exists(),
+          "★ 未跟踪的新知识没有跨过更新（这就是事故的直接症状）", newk.exists())
+    # 用护栏自己的判据（untracked 桶）而不是裸 ls-files：`target/mdl.json` 是更新时
+    # 就地补构建出来的产物，它本来就是未跟踪的，不该算「残留」。
+    check(git_repo.local_changes(str(dest))["untracked"] == [],
+          "更新后没有残留的未跟踪**源文件**（target/ 构建产物不算）",
+          git_repo.local_changes(str(dest)))
+    check(pay_g.get("discarded_files") == ["knowledge/glossary/新术语.md"],
+          "discarded_files 如实回传被放弃的文件", pay_g.get("discarded_files"))
+    # 最强的证明：备份是**可找回**的（前端文案承诺 git stash pop 能拿回来）
+    git(dest, "stash", "pop")
+    check(newk.is_file() and newk.read_text(encoding="utf-8") == "还没推 git 的新知识\n",
+          "stash 里确实有它 —— git stash pop 能把新知识拿回来（承诺没落空）")
+
+    # (h) target/ 下的新增属构建产物，不拦更新
+    newk.unlink()
+    (dest / "target" / "extra.tmp").write_text("x\n", encoding="utf-8")
+    ok_h, pay_h = asyncio.run(W._pull_swapped(dest, "v2", False))
+    check(ok_h is True, "target/ 下的新增不拦更新（构建产物可再生）", pay_h.get("message"))
+
+    # (i) local_changes 三个桶的判据（含 .gitignore 必须不算脏）
+    scratch = base / "scratch"
+    subprocess.run(["git", "init", "-b", "main", str(scratch)], capture_output=True, check=True)
+    (scratch / "tracked.txt").write_text("a\n", encoding="utf-8")
+    (scratch / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    git(scratch, "add", "-A")
+    git(scratch, "commit", "-m", "init")
+    (scratch / "tracked.txt").write_text("b\n", encoding="utf-8")
+    (scratch / "knowledge").mkdir(exist_ok=True)
+    (scratch / "knowledge" / "新知识.md").write_text("n\n", encoding="utf-8")
+    (scratch / "target").mkdir(exist_ok=True)
+    (scratch / "target" / "x.json").write_text("{}", encoding="utf-8")
+    (scratch / "ignored").mkdir(exist_ok=True)
+    (scratch / "ignored" / "junk.txt").write_text("j\n", encoding="utf-8")
+    lc2 = git_repo.local_changes(str(scratch))
+    check(lc2["blocking"] == ["tracked.txt"], "blocking = 已跟踪改动", lc2)
+    check(lc2["untracked"] == ["knowledge/新知识.md"],
+          "untracked = 新增未跟踪（不含 target/，也不含 .gitignore 忽略的）", lc2)
+    check(lc2["generated"] == ["target/x.json"], "generated = target/ 下的新增", lc2)
+    check(lc2["dirty"] is True, "dirty=True", lc2)
+
+    src = (SRC / "api" / "wren_semantic.py").read_text(encoding="utf-8")
+    check('"untracked_changes": changes["untracked"]' in src,
+          "git-status 把「新增未跟踪」单独回给前端（更新对话框据此列出挡路文件与放弃选项）")
+
+
 def main() -> int:
     global WORK
     WORK = Path(tempfile.mkdtemp(prefix="verify_staging_"))
@@ -742,6 +852,7 @@ def main() -> int:
     section_pull()
     section_rebuild()
     section_structure()
+    section_untracked()
 
     print(f"\n{PASS}/{PASS + FAIL} 通过")
     print(f"（工作目录保留供排查：{WORK}）")

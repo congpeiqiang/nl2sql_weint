@@ -19,6 +19,7 @@ from agent.middlewares.quota_error import QuotaErrorMiddleware
 from agent.middlewares.model_timeout import ModelTimeoutMiddleware
 from agent.middlewares.model_required import ModelRequiredMiddleware
 from agent.middlewares.sql_approval import build_sql_approval_middleware
+from agent.middlewares.cube_route_gate import CubeRouteGateMiddleware
 from agent.middlewares.query_gate import QueryGateMiddleware
 from agent.middlewares.tool_filter import ToolFilterMiddleware
 from agent.middlewares.dynamic_mcp_tools import DynamicMCPToolsMiddleware
@@ -160,7 +161,11 @@ def dynamic_prompt(request: ModelRequest) -> str:
                     f"`{prefix}_run_sql(sql, limit?)` 执行。\n"
                 )
                 # ── Cube 摘要注入 ──────────────────────────────
-                # 列出可用 Cube，让 LLM 在策略选择时就知道能否走 Cube 快速通道
+                # 列出可用 Cube，让 LLM 在判路由（六步主循环第 3 步）时就知道有哪些可走具名指标车道。
+                # ⚠️ 这里**只列事实**，不写「优先/必须」这类优先级措辞：走哪条车道由提示词的
+                # 「具名指标三条件」决定（见 NL2SQL_SYSTEM_PROMPT.md §三），注入段不得自定优先级。
+                # 2026-09-30 删掉旧文案「（优先使用 Strategy C 快速通道）」—— A/B/C 那套命名
+                # 现只存在于 prompt_bak/，现役提示词已改用「六步主循环 + 三条件」，留着是个没有定义的标签。
                 try:
                     project_path = get_detector().project_path_for(db_name)
                     if project_path:
@@ -173,7 +178,7 @@ def dynamic_prompt(request: ModelRequest) -> str:
                             )
                             if cube_names:
                                 routing += (
-                                    f"\n可用 Cube（优先使用 Strategy C 快速通道）：{', '.join(f'`{c}`' for c in cube_names)}\n"
+                                    f"\n可用 Cube：{', '.join(f'`{c}`' for c in cube_names)}\n"
                                     f"调用 `{prefix}_list_cubes()` 查看详情，匹配则用 "
                                     f"`{prefix}_query_cube(cube, measures, dimensions)` 直接查询，跳过完整流水线。\n"
                                 )
@@ -286,6 +291,13 @@ _middleware = [
 # 软提示非硬拦、每线程至多一次、Cube 通道豁免。须在 LangfuseSpan 内层（被拦工具仍
 # 在 span 里可见）、SqlReadOnly 硬闸外层（写/DDL 仍由硬闸兜底）。
 _middleware.append(QueryGateMiddleware())
+# cube 车道软兜底（2026-09-30）：手写 SQL 的 FROM/JOIN 关系**完全落在某个 cube 的
+# base_object 上**且含聚合/GROUP BY ⇒ 拦一次并指到 `query_cube`（trace 9afcd8ea：
+# `bug_quality` 完全覆盖却手写 5 段 LEFT JOIN 打 `v_bug`，报告落成 llm_from_schema）。
+# 软门非硬拦、每线程至多一次、**独立**于 QueryGate 的提醒命名空间（互不吃额度），
+# 逃生口 = 原样重发即放行；`NL2SQL_CUBE_ROUTE_GATE=off` 一键回退。紧挨 QueryGate：
+# 同层（被拦工具仍在 LangfuseSpan 里可见，写/DDL 仍由 SqlReadOnly 硬闸兜底）。
+_middleware.append(CubeRouteGateMiddleware())
 if sql_approval_middleware is not None:
     _middleware.append(sql_approval_middleware)
 _middleware.append(WriteTodosProtocolMiddleware())

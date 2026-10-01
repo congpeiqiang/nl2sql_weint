@@ -82,13 +82,12 @@ def build_app() -> Starlette:
         wren_semantic,
     )
 
-    # wren_semantic 其余路由属语义库管理（另一套 _require_project_access），
-    # 本脚本只验 /api/git-ssh-key 这一条，单独挑出来避免引入无关依赖。
-    git_key_routes = [
-        r for r in wren_semantic.routes
-        if getattr(r, "path", "") == "/api/git-ssh-key"
-    ]
-    assert git_key_routes, "wren_semantic 里没找到 /api/git-ssh-key 路由"
+    # wren_semantic 其余路由属语义库管理（另一套 _require_project_access）。
+    # 第 5 段要打它的管理员端点（非管理员应在**守卫**上被拒、进不到业务代码），
+    # 所以整份挂进来 —— 非管理员路径上守卫在最前面，不会摸到真项目/真 git。
+    assert any(
+        getattr(r, "path", "") == "/api/git-ssh-key" for r in wren_semantic.routes
+    ), "wren_semantic 里没找到 /api/git-ssh-key 路由"
 
     routes = [
         *report_file.routes,
@@ -97,7 +96,7 @@ def build_app() -> Starlette:
         *feedback_stats.routes,
         *trace_routes.routes,
         *db_config.routes,
-        *git_key_routes,
+        *wren_semantic.routes,
     ]
     return AuthMiddleware(Starlette(routes=routes))
 
@@ -121,6 +120,25 @@ async def probe(app, method: str, path: str, *, uid: str | None = None,
     ) as c:
         r = await c.request(method, path, headers=headers, json=json_body)
     return r.status_code
+
+
+async def probe_json(app, method: str, path: str, *, uid: str | None = None,
+                     is_admin: bool = False, json_body: dict | None = None):
+    """同 `probe`，但把响应体也取回来 —— 用户看到的按钮提示文案就是它。"""
+    headers: dict[str, str] = {}
+    if uid:
+        headers["Cookie"] = f"nl2sql_token={mint(uid, is_admin)}"
+    headers["X-Forwarded-For"] = "1.2.3.4"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=(NGINX_IP, 12345)),
+        base_url="http://testserver",
+    ) as c:
+        r = await c.request(method, path, headers=headers, json=json_body)
+    try:
+        js = r.json()
+    except Exception:  # noqa: BLE001
+        js = None
+    return r.status_code, js
 
 
 FAKE_TID = "11111111-1111-4111-8111-111111111111"  # 非本人名下
@@ -181,6 +199,41 @@ ALLOW_ADMIN = [
     # 要跑 2 轮×3s 重试），所以只验它的 403 分支即可。
 ]
 
+# 语义库管理的 12 个管理员端点。非管理员点这些按钮时，前端 `semanticApi` 只读响应体
+# 里的 `.error`，读不到就退回 `HTTP ${status}` —— 2026-10-01 生产原话就是
+# 「build-witops-wrenai 失败: HTTP 403」，用户看不出是权限问题（「是不是没有权限」）。
+# 根因：这些端点原先 `raise HTTPException`，而本服务的 app 是**并进 langgraph 主 app**
+# 的，异常被 langgraph 的 `http_exception_handler` 折成 `{"detail": ...}`（且 detail 非
+# str 时直接变 "unknown error"）⇒ 修法只能是 handler 里**返回**带 error 的 JSON。
+ADMIN_ERROR_ENDPOINTS = [
+    ("POST", "/api/wren-projects/create", {"name": "libX"}),
+    ("POST", "/api/wren-projects/local", {"name": "libX"}),
+    ("POST", "/api/wren-projects/from-git", {"repo_url": "https://example.com/a.git"}),
+    ("DELETE", "/api/wren-projects/libX", None),
+    ("POST", "/api/wren-projects/libX/introspect", {}),
+    ("POST", "/api/wren-projects/libX/generate-models", {}),
+    ("POST", "/api/wren-projects/libX/knowledge/save",
+     {"category": "glossary", "name": "术语", "content": "x"}),
+    ("POST", "/api/wren-projects/libX/knowledge/ai-generate", {}),
+    ("POST", "/api/wren-projects/libX/push", {"message": "m"}),
+    ("POST", "/api/wren-projects/libX/build", {}),
+    ("POST", "/api/wren-projects/libX/git-pull", {}),
+    ("POST", "/api/wren-projects/libX/git-adopt", {"repo_url": "https://example.com/a.git"}),
+]
+
+
+def check_admin_guard_wiring() -> None:
+    """结构面：语义库模块里不许再有 `require_admin(request)` 这种「抛出去」的写法。
+
+    行为面（上面那张表）只覆盖已知的 12 条；这条挡住**新增**端点又走回老路
+    （新增一个抛 HTTPException 的管理员端点 = 又把 403 变成「HTTP 403」）。
+    """
+    src = (_HERE.parents[1] / "src" / "api" / "wren_semantic.py").read_text(encoding="utf-8")
+    check("require_admin(request)" not in src,
+          "wren_semantic 不再用抛异常的 require_admin（用返回式 admin_guard）")
+    check(src.count("admin_guard(request,") >= 12,
+          "语义库的 12 个管理员端点全部走 admin_guard", src.count("admin_guard(request,"))
+
 
 async def main() -> int:
     app = build_app()
@@ -206,13 +259,24 @@ async def main() -> int:
         code = await probe(app, method, path, uid=Z, json_body=body)
         check(code not in (401, 403), f"user {method} {path} → {code}（未被守卫拦）")
 
-    print("\n=== 4/4 owner / 管理员不被误伤（只读端点，非 401/403）===")
+    print("\n=== 4/5 owner / 管理员不被误伤（只读端点，非 401/403）===")
     for method, path, body in ALLOW_OWNER:
         code = await probe(app, method, path, uid=OWNER, json_body=body)
         check(code not in (401, 403), f"owner {method} {path} → {code}（未被守卫拦）")
     for method, path, body in ALLOW_ADMIN:
         code = await probe(app, method, path, uid="admin", is_admin=True, json_body=body)
         check(code not in (401, 403), f"admin {method} {path} → {code}（未被守卫拦）")
+
+    print("\n=== 5/5 非管理员的拒绝文案：响应体必须带 error 键（前端只读 .error）===")
+    for method, path, body in ADMIN_ERROR_ENDPOINTS:
+        code, js = await probe_json(app, method, path, uid=Z, json_body=body)
+        tag = f"{method} {path}"
+        check(code == 403, f"{tag} → 403", f"HTTP {code}")
+        err = str((js or {}).get("error") or "")
+        check(bool(err), f"{tag} 响应体有 error（否则前端只剩「HTTP 403」）", js)
+        check("管理员" in err, f"{tag} 文案说明是权限问题", err)
+        check(Z in err, f"{tag} 文案带上当前账号（用户知道是「谁」没权限）", err)
+    check_admin_guard_wiring()
 
     bad = [label for ok, label in results if not ok]
     print(f"\n=== 结果：{len(results) - len(bad)}/{len(results)} 通过 ===")

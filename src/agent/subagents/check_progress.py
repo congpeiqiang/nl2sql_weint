@@ -432,6 +432,34 @@ def _run_sql_cell_values(messages, i) -> set:
     return vals
 
 
+def _run_sql_row_values(messages, i) -> list:
+    """第 i 条 run_sql 结果**按行**的非空单元值集合（tier0 的行内证据）。
+
+    与 `_run_sql_cell_values`（整表拍平成一个集合）的差别是**保留「同属一行」的结构**：
+    拍平比对时，数据库某列为 NULL、模型在答案里写了占位文案（trace b816d442 的
+    `project_name` → 「（空，未匹配到项目）」）会成为**永远无法命中的反证**，把整行判掉。
+    按行取证只要求「候选某一行的全部非空值都能在答案某行里找到」——NULL 天然不参与，
+    于是它既不是证据也不是反证。错误文本/非 JSON ⇒ 返回空列表。
+    """
+    try:
+        obj = json.loads(_msg_content_str(messages[i]))
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(obj, dict):
+        return []
+    out = []
+    for r in obj.get("rows") or []:
+        if not isinstance(r, dict):
+            continue
+        vals = {
+            str(v).strip() for v in r.values()
+            if v is not None and str(v).strip()
+        }
+        if vals:
+            out.append(vals)
+    return out
+
+
 def _final_answer_data_rows(messages) -> list:
     """最后一条 AI 消息里所有 Markdown 数据表的数据行（每行=归一化单元格列表）。
 
@@ -465,35 +493,130 @@ def _final_answer_data_rows(messages) -> list:
     return []
 
 
-def _final_row_covered_by(cells, vals) -> bool:
-    """一行最终表数据行是否被候选 run_sql 返回值集合“整行覆盖”。
+# ── tier0 值匹配的「渲染形态归一」──────────────────────────────────
+# 生产 trace b816d442（2026-10-01，「列出 9 月完成缺陷里耗时最长的 10 条」）：
+#   run_sql 返回值是 `complete_time = "2026-09-14T16:33:51"`（ISO，T 分隔），
+#   模型写进最终答案表格是 `2026-09-14 16:33:51`（空格分隔）。
+# 原实现只做子串比对 ⇒ **每一行都因这两格判不覆盖** ⇒ 真产出 SQL 的 tier0 命中
+# 0/10 ⇒ 整条启发式退化到 tier2「行数最多」，而那条诊断聚合
+# （`GROUP BY status_code`）恰好也是 10 行，`max()` 平票取**靠前**者 ⇒ 报告/快照里
+# 的 SQL 变成探值，物理 SQL 复算与 `judge_sql_origin` 的输入一并错位。
+# 结论：**纯渲染形态差异不能让整行覆盖失败**——同一时刻/同一个数的不同写法必须先归一。
+_CLOCK_RE = re.compile(r"\d{2}:\d{2}:\d{2}")
+# 「合法数字渲染」：**裸数字串** / 正确千分位分组 / 小数 / 尾随 %。刻意不认 `1,2`
+# 这类非法分组（会把非数字文本折成 12）、也不认夹在日期或文本里的数字串
+# （`2026-09-01` 不是数字）——免得误命中。
+_NUM_RENDER_RE = re.compile(r"^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?$")
 
-    行内每个非空单元格都须被候选某值命中：归一化+小写后，单元格含该值 或 该值含
-    单元格（兼容 run_sql 返回时间戳 2026-08-23 00:00:00 而答案只写 2026-08-23）。
-    仅对 len>=2 的值做子串命中，防纯短数字（如 “1”）跨行大面积误命中；单元格两端
-    先剥 ** 加粗。
+
+def _match_norm(s: str) -> str:
+    """时刻文本归一：ISO 的 `T` → 空格、去秒后小数、去秒后时区（`Z`/`+08:00`）。
+
+    只归一**渲染形态**，不改变语义。无时钟时刻的字符串原样返回——值集合是按值
+    逐个调用的，这条快路径把姓名/文案/短数字全部挡在正则之外。
     """
-    for c in cells:
-        cc = c.strip().strip("*").strip().lower()
-        if not cc:
+    if not _CLOCK_RE.search(s):
+        return s
+    s = re.sub(r"(\d{4}-\d{2}-\d{2})[Tt](\d{2}:\d{2}:\d{2})", r"\1 \2", s)
+    s = re.sub(r"(\d{2}:\d{2}:\d{2})\.\d+", r"\1", s)
+    return re.sub(r"(\d{2}:\d{2}:\d{2})(?:[Zz]|[+-]\d{2}:?\d{2})(?![0-9])", r"\1", s)
+
+
+def _num_render_key(s: str) -> float | None:
+    """数字文本归一：合法数字渲染（裸数字 / 正确千分位 / 小数 / 尾随 %）→ float，否则 None。
+
+    与 `_is_plain_number`（tier0b 用）**刻意分开**：后者宽松（`1,2` 也当数字），
+    本函数只认「整串就是一个数」，避免把日期/文本里的数字串折成数值造成误命中。
+    裸数字与带分组写法因而等价（`1309` == `1,309`）。
+    """
+    t = s.strip()
+    if not _NUM_RENDER_RE.match(t):
+        return None
+    try:
+        return float(t.replace(",", "").rstrip("%"))
+    except ValueError:
+        return None
+
+
+def _digit_hit(hay: str, needle: str) -> bool:
+    """纯数字 `needle` 在 `hay` 里的命中是否可信（替代裸子串判定）。
+
+    单个数位（`1`/`2`）只认**完全相等**——它出现在任何数字串里的概率太高，宁可漏；
+    两位数及以上按**数位边界**判定（两侧都不是数字），于是 `92` 命中 `92 天（2212 h）`、
+    而 `2` / `12` 不命中 `2026-09-01` 里的连续数位。
+    """
+    if len(needle) < 2:
+        return hay == needle
+    return re.search(rf"(?<!\d){re.escape(needle)}(?!\d)", hay) is not None
+
+
+def _value_matches_cell(cc: str, vv: str) -> bool:
+    """（**都已归一化**）候选值 `vv` 与答案单元格 `cc` 是否互相命中。
+
+    子串双向匹配（兼容 run_sql 返回 `2026-08-23 00:00:00` 而答案只写 `2026-08-23`）；
+    纯数字一侧改判 `_digit_hit`（数位边界 / 单个数字须相等）而非裸子串——既让 `92`
+    命中 `92 天（2212 h）`，又不让 `2` / `12` 命中 `2026-09-01` 里的连续数位。两侧都是
+    合法数字渲染时按数值相等命中（`43,065` == 43065）。
+    """
+    if not cc or not vv:
+        return False
+    if vv in cc and (not vv.isdigit() or _digit_hit(cc, vv)):
+        return True
+    if cc in vv and (not cc.isdigit() or _digit_hit(vv, cc)):
+        return True
+    cn, vn = _num_render_key(cc), _num_render_key(vv)
+    return cn is not None and vn is not None and cn == vn
+
+
+def _cell_covered_by_any(cc: str, vals) -> bool:
+    """单个（已归一化的）答案单元格是否被候选值集合里的某个值命中。"""
+    for v in vals:
+        if not v or not v.strip():
             continue
-        covered = False
-        for v in vals:
-            if not v or not v.strip():
-                continue
-            vv = v.strip().lower()
-            if not vv:
-                continue
-            # 纯短数字（<3 位）只精确相等命中、禁子串：防分布类计数/日期的 “1”“12”
-            # 子串误伤；单字中文（姓）不受此限——须参与整行覆盖才能选中（中文 len=1）
-            if vv.isdigit() and len(vv) < 3 and vv != cc:
-                continue
-            if vv in cc or cc in vv:
-                covered = True
-                break
-        if not covered:
+        vv = _match_norm(v.strip().lower())
+        if vv and _value_matches_cell(cc, vv):
+            return True
+    return False
+
+
+def _row_values_covered(norm_cells: list, row_vals) -> bool:
+    """候选**某一行**的全部非空值是否都能在答案该行的单元格里找到（行内证据）。
+
+    比拍平集合更严（必须落在同一行）也更公道（NULL/空值不参与、也就不会成为反证）。
+    """
+    for v in row_vals:
+        vv = _match_norm(v.strip().lower())
+        if not vv:
+            continue
+        if not any(_value_matches_cell(cc, vv) for cc in norm_cells):
             return False
     return True
+
+
+def _final_row_covered_by(cells, vals, row_values=None) -> bool:
+    """一行最终表数据行是否被候选 run_sql 返回值集合“整行覆盖”。
+
+    行内每个非空单元格都须被候选某值命中（`_cell_covered_by_any`）；单元格两端先剥
+    `**` 加粗。比对前两侧都过 `_match_norm` 做**渲染形态归一**（ISO `T` ↔ 空格、去毫秒/
+    时区；见该函数上方的事故说明），所以纯渲染差异不再让整行覆盖失败。
+
+    `row_values`（候选的**按行**值集合，`_run_sql_row_values`）非空时再给一次机会：
+    只要候选存在某一行，其全部非空值都能在答案这一行里找到，也算覆盖——数据库该列为
+    NULL 而模型写了占位文案时，拍平比对会把这一行判成“无证据”，行内取证则不受影响。
+    两条路都是**放宽**，原本已命中的判定一个都不会变。
+    """
+    norm_cells = []
+    for c in cells:
+        cc = _match_norm(c.strip().strip("*").strip().lower())
+        if cc:
+            norm_cells.append(cc)
+    if not norm_cells:
+        return True
+    if all(_cell_covered_by_any(cc, vals) for cc in norm_cells):
+        return True
+    if row_values:
+        return any(_row_values_covered(norm_cells, rv) for rv in row_values)
+    return False
 
 
 def _is_plain_number(s) -> bool:
@@ -607,7 +730,7 @@ def _extract_last_sql(messages) -> str:
     编译后的物理 SQL，来源判 `cube_metric`）。**只在无证据时生效**：任何一层命中
     （值/标量/列名对得上最终表）都照旧返回那条 SQL，无论通道是 Cube 还是 run_sql。
     """
-    sqls = []  # [{sql, rows, cols, values}]
+    sqls = []  # [{sql, rows, cols, values, row_values}]
     for i, m in enumerate(messages):
         if isinstance(m, dict):
             role = m.get("role") or m.get("type")
@@ -626,6 +749,7 @@ def _extract_last_sql(messages) -> str:
                 "rows": rows,
                 "cols": cols,
                 "values": _run_sql_cell_values(messages, i),
+                "row_values": _run_sql_row_values(messages, i),
                 "ok": not _tool_result_error(m),
             }
         )
@@ -647,7 +771,8 @@ def _extract_last_sql(messages) -> str:
             if not c["values"]:
                 continue
             hit = sum(
-                1 for cells in final_rows if _final_row_covered_by(cells, c["values"])
+                1 for cells in final_rows
+                if _final_row_covered_by(cells, c["values"], c.get("row_values"))
             )
             if hit <= 0:
                 continue
