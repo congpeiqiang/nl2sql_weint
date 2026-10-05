@@ -1734,6 +1734,25 @@ def _relationship_fk_columns(
     return cols, tables
 
 
+def _pk_columns(table: Any) -> set[str]:
+    """把 ``table.primary_key`` 归一成集合。
+
+    `db_introspect.TableInfo.primary_key` 是**单列主键的字符串**（`str | None`，见
+    `db_introspect.py`；三个内省器都直接赋 `pk` 字符串），但对它做 `for c in pk` 会
+    逐**字符**迭代 —— `"id"` 变成 `{'i','d'}`，于是「隐藏主键」永远匹配不上、闸门静默失效。
+    这里统一按字符串/序列两种形态归一，防止再次踩到。
+    """
+    pk = getattr(table, "primary_key", None)
+    if not pk:
+        return set()
+    if isinstance(pk, str):
+        return {pk}
+    try:
+        return {str(c) for c in pk}
+    except TypeError:
+        return {str(pk)}
+
+
 def _validate_column_selection(
     result: Any,
     selected_tables: list[str],
@@ -1766,7 +1785,7 @@ def _validate_column_selection(
         if not hidden:
             continue
         # 主键被隐藏 ⇒ 模型声明了 primary_key 却没有这一列，语义自相矛盾
-        pk_hidden = [c for c in t.primary_key if c in hidden]
+        pk_hidden = sorted(_pk_columns(t) & hidden)
         if pk_hidden:
             return (
                 f"不能隐藏主键列：{tbl_name}.{'、'.join(pk_hidden)}"

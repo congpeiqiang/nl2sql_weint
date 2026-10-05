@@ -92,18 +92,23 @@ def col(name: str, *, pk: bool = False, nullable: bool = True, comment: str = ""
 
 
 def introspect_result():
-    """alpha (主表) ← beta.alpha_id；两张表各有可废弃的业务列。"""
+    """alpha (主表) ← beta.alpha_id；两张表各有可废弃的业务列。
+
+    ⚠️ `primary_key` 必须是**字符串**：`db_introspect.TableInfo.primary_key` 是
+    `str | None`（单列主键），真实内省从不产出列表。这里曾写成 `primary_key=["id"]`，
+    于是「隐藏主键」的校验用真实的字符串时就静默失效（`for c in "id"` 逐字符）。
+    """
     alpha = SimpleNamespace(
         name="alpha", comment="主表",
         columns=[col("id", pk=True, nullable=False),
                  col("name", comment="名称"),
                  col("old_flag", comment="废弃标记")],
-        primary_key=["id"],
+        primary_key="id",
     )
     beta = SimpleNamespace(
         name="beta", comment="从表",
         columns=[col("id", pk=True, nullable=False), col("alpha_id"), col("old_note")],
-        primary_key=["id"],
+        primary_key="id",
     )
     fks = [SimpleNamespace(source_table="beta", source_column="alpha_id",
                            target_table="alpha", target_column="id")]
@@ -244,7 +249,7 @@ def section_text_surgery() -> None:
         "  is_primary_key: false\n  properties:\n"
         "    description: 这是一个很长的中文描述，长到足以让 yaml.dump 的默认宽度把它折成两行，"
         "从而在重排时产生与本次改动无关的 diff\n"
-        "primary_key:\n- id\ncached: false\n"
+        "primary_key: id\ncached: false\n"
     )
     out = _set_column_hidden(src, "name", True)
     import difflib
@@ -301,6 +306,17 @@ def section_validation() -> None:
     check(_validate_column_selection(res, ["alpha"], None) is None, "不传 selected_columns 时放行")
     check(_validate_column_selection(res, ["alpha"], {"alpha": ["id", "old_flag"]}) is None,
           "藏一个普通业务列放行（old_flag 既非主键也非关系列）")
+
+    # 夹具形态闸：primary_key 必须是字符串。写成列表时 `for c in pk` 逐字符迭代，
+    # 「隐藏主键」在真实数据上会静默失效 —— 这条断言就是防它回来的。
+    check(all(isinstance(t.primary_key, str) for t in res.tables),
+          "夹具 primary_key 是字符串（与 db_introspect.TableInfo 一致）")
+    err_pk = _validate_column_selection(res, ["alpha"], {"alpha": ["name", "old_flag"]})
+    check(err_pk is not None and "alpha.id" in err_pk,
+          "单列主键（字符串 id）被拒，且文案点出 alpha.id", err_pk)
+    err_pk2 = _validate_column_selection(res, ["beta"], {"beta": ["alpha_id", "old_note"]})
+    check(err_pk2 is not None and "beta.id" in err_pk2,
+          "单列表 beta 同理被拒（文案点出 beta.id）", err_pk2)
 
     # **一字节都不落盘**：校验在核心函数第一步，拒绝时直接抛 ValueError
     before = sorted(str(p.relative_to(proj)) for p in proj.rglob("*"))
