@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# ── P2-2 nginx 补丁：X-Request-ID 透传/回显 + 访问日志（服务器侧，手工应用）──
+# ── docker/nginx.conf 整份同步到服务器（手工应用；不止 P2-2 那几行）──
+#
+# 它做的事就是**把仓库里的 `docker/nginx.conf` 整份覆盖到线上**（md5 判差异 → 备份 →
+# 就地写同一 inode → `nginx -t`（失败自动回滚）→ `nginx -s reload`）。P2-2 的
+# X-Request-ID 是它最早服务的补丁，此后 2026-10-05 的**上游请求期解析**（resolver +
+# 变量 proxy_pass）也走它 —— 所以别再把它当"只打 P2-2 那几行"的补丁。
 #
 # 为什么不能靠发版：发布 tar **排除 docker/**，而 compose 是把服务器上的
 # `$AppDir/docker/nginx.conf` 以**文件级**只读方式 bind mount 进容器
@@ -8,15 +13,20 @@
 # 三个必须记住的点：
 #   ① 文件级挂载 ⇒ 新内容必须**就地写进同一个 inode**。用 `mv` 换文件会让容器继续读旧
 #      inode，表现是"改了没生效"。本脚本写入后会把 inode 比对一遍。
-#   ② 线上与仓库副本已分叉（线上多一段 P0-3 注释）⇒ 上传的是**仓库副本的当前内容**，
-#      所以仓库副本必须包含线上那段注释（`scripts/verify_request_logging.py` ⑥ 有断言防丢）。
+#   ② 线上副本与仓库副本 **2026-10-05 核实为 md5 逐字相同**（`6d7197fa3c7ad9727b39edbf95412574`）
+#      —— 旧注里"线上多一段 P0-3 注释、两侧已分叉"已过时（那段本文件里本来就有）。
+#      方向上仍是**本地 → 线上单向覆盖**：仓库副本是唯一权威，`scripts/verify_request_logging.py`
+#      ⑥ 有断言防它丢掉 P0-3 那段历史注释。
 #   ③ `nginx -t` 失败会自动回滚；**reload 之前坏文件不影响正在跑的 nginx**，不必重建容器，
 #      也不必停服（`nginx -s reload` 不打断已建立的连接）。
+#   ⚠️ 反向的一条：改完**必须真打一次请求**才算了事 —— 变量形式 proxy_pass **不做启动期
+#      解析**，主机名写错 `nginx -t` 也发现不了（见本步第 5 节的 /ok 探针与
+#      docs/prod环境/发布脚本.md「上游解析与发版顺序」）。
 #
 # 用法（在本机 Git Bash 里跑；服务器需已配好 SSH key ⇒ 全程不弹口令）：
-#   bash docs/weint环境/发布脚本/apply-nginx-request-id-patch.sh            # 应用 + 校验
-#   bash docs/weint环境/发布脚本/apply-nginx-request-id-patch.sh --dry-run  # 只看将要写入的指令
-#   bash docs/weint环境/发布脚本/apply-nginx-request-id-patch.sh --rollback # 回滚到最近一次备份
+#   bash docs/prod环境/apply-nginx-request-id-patch.sh            # 应用 + 校验
+#   bash docs/prod环境/apply-nginx-request-id-patch.sh --dry-run  # 只看将要写入的指令
+#   bash docs/prod环境/apply-nginx-request-id-patch.sh --rollback # 回滚到最近一次备份
 set -euo pipefail
 
 SSH_TARGET="${NL2SQL_SSH:-weint@192.168.25.64}"
@@ -25,7 +35,15 @@ CONF_REL="docker/nginx.conf"
 NGINX_CT="nl2sql-app_nginx_1"
 HTTP_PORT="${NL2SQL_NGINX_PORT:-8080}"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 仓库根：向上找到含 $CONF_REL 的那一层。
+# ⚠️ 2026-10-05 修：本脚本从 `docs/weint环境/发布脚本/` 搬到 `docs/prod环境/` 时，原先写死的
+# `/../../..` **没跟着少退一层** ⇒ 解析到仓库的**父目录**，脚本会死在「本地缺
+# …/docker/nginx.conf」（也就是说搬家之后它其实一直跑不起来）。改成按标记文件向上找，
+# 再搬目录也不会坏。
+_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$_d"
+while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/$CONF_REL" ]; do REPO_ROOT="$(dirname "$REPO_ROOT")"; done
+[ -f "$REPO_ROOT/$CONF_REL" ] || { echo "XX 向上找不到 $CONF_REL —— 仓库根判定失败（脚本在 $_d）"; exit 1; }
 LOCAL_CONF="$REPO_ROOT/$CONF_REL"
 REMOTE_CONF="$APP_DIR/$CONF_REL"
 

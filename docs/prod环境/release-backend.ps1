@@ -4,6 +4,16 @@
 # 用法：  .\release-backend.ps1
 # 参数：  -LocalRoot 本地后端根（默认 D:\code_work_space\llm\nl2sql）
 #         -Server / -SshUser / -AppDir 服务器信息
+#
+# 2026-10-05（档 1：发版不再依赖 nginx 的「IP 复用」）：
+#   ① 重启前先走**协作式排空**（容器内 `scripts/ops_drain.py`，自己签 token，无需口令）：
+#      在跑的 run 跑完、新提交拿到 503+Retry-After 而不是被腰斩的 502 ⇒ 把「长时间 502」
+#      换成长时间 503，**硬中断只剩冷启**。best-effort：脚本不存在/端点不可达/预算用尽
+#      都只告警，绝不拦住发版（`stop` 时的信号式排空仍会兜底）。
+#   ② 验证改成**经 nginx 打 /ok**（http://127.0.0.1:8080/ok）而非直连 2026 再盲等 75s：
+#      既确认冷启完成，又确认 nginx 已解析到新容器 —— 这是 `docker/nginx.conf` 改成
+#      「resolver + 变量 proxy_pass」（请求期解析）之后的端到端验收。同时**量出**真实窗口。
+#   ③ 本脚本**永远不碰 nginx 容器**：换容器后的新 IP 由 resolver 自己发现，不需要 reload。
 # ============================================================
 param(
     [string]$LocalRoot = "D:\code_work_space\llm\nl2sql",
@@ -101,12 +111,29 @@ Write-Host "== 3/5 服务器拼接 + 解压 + 重建镜像 ==" -ForegroundColor 
 ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api 2>&1 | tail -3"
 if ($LASTEXITCODE -ne 0) { throw "构建失败" }
 
-Write-Host "== 4/5 三步重启（v1 compose 需 stop/rm/up）==" -ForegroundColor Cyan
+Write-Host "== 4/5 先协作式排空，再三步重启（v1 compose 需 stop/rm/up）==" -ForegroundColor Cyan
+# 排空必须在 stop 之前：这时进程还在正常接连接，新提交能被**明确拒绝**（503 + Retry-After
+# + 中文提示），在跑的 run 也能收尾。反过来若不排空，`stop` 会先关监听 ⇒ 新请求直接
+# connection refused（502），然后才用信号式排空等老 run —— 用户看到的是断服而不是「稍后重试」。
+# ⚠️ 不判退出码：ops_drain 的 2（预算用尽仍有 run）与 1（端点不可达）都不该中断发版。
+$ct = "nl2sql-app_langgraph-api_1"
+ssh @SshOpt "${SshUser}@${Server}" "docker exec $ct sh -lc 'test -f /app/scripts/ops_drain.py' 2>/dev/null && docker exec $ct python /app/scripts/ops_drain.py --budget 180 || echo 'SKIP ops_drain（旧镜像或不可达）—— 依赖 stop 时的信号式排空'"
+
+$tDown = Get-Date
 ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && docker-compose stop langgraph-api && docker-compose rm -f langgraph-api && docker-compose up -d langgraph-api"
 
-Write-Host "== 5/5 等待启动并验证 ==" -ForegroundColor Cyan
-Start-Sleep -Seconds 75
-ssh @SshOpt "${SshUser}@${Server}" "curl -s -o /dev/null -w 'backend_ok:%{http_code}' --max-time 6 http://127.0.0.1:2026/ok; echo; docker logs nl2sql-app_langgraph-api_1 2>&1 | grep -E 'MCP 工具加载完成|预检通过|预检失败' | tail -4"
+Write-Host "== 5/5 健康轮询（经 nginx 8080）==" -ForegroundColor Cyan
+# 单次 ssh 里跑轮询循环（别再每 2 秒开一次 ssh）。探的是**经 nginx** 的 /ok：
+# 既证明后端冷启完成，也证明 nginx 已经解析到**新容器**（上游已是请求期解析）。
+# 写法沿用本文件既有约定：PS 双引号串里 bash 的 `$` 用**反引号**转义；别用 `\"`（那个会
+# 提前闭合 PS 字符串 —— 2026-09-26 那条教训就是它）。`%{http_code}` 无引号也安全。
+$poll = "for i in `$(seq 1 60); do c=`$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://127.0.0.1:8080/ok); case `$c in 200) echo nginx_ok=200; exit 0;; esac; sleep 2; done; echo nginx_ok=timeout; exit 1"
+ssh @SshOpt "${SshUser}@${Server}" $poll
+$pollRc = $LASTEXITCODE
+$secs = [math]::Round(((Get-Date) - $tDown).TotalSeconds, 1)
+Write-Host "   不可用窗口 ≈ $secs s（含排空 + 冷启 —— 这就是用户感知的断服时长）" -ForegroundColor Yellow
+ssh @SshOpt "${SshUser}@${Server}" "docker logs nl2sql-app_langgraph-api_1 2>&1 | grep -E 'MCP 工具加载完成|预检通过|预检失败' | tail -4"
+if ($pollRc -ne 0) { throw "经 nginx 的 /ok 在 120s 内未恢复 200 —— 查 nginx error_log（上游解析？）与后端预检日志" }
 
 Write-Host ""
 Write-Host "OK 后端发布完成。期望：backend_ok:200 + 预检通过: N 个 MCP 工具就绪（echarts=18, wrenai_*=27±, dbmcp=2 逐项 breakdown）" -ForegroundColor Green
