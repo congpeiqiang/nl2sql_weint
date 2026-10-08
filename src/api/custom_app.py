@@ -93,8 +93,10 @@ async def _lifespan(app: "Starlette"):
     （langgraph_api/server.py combine_lifespans，shutdown 逆序执行）。
 
     停机顺序（P2-1 起，顺序本身是设计的一部分）：
-      ① **排空**（`api.drain`）：等 `langgraph_runtime_inmem.queue.get_num_workers()`
-         清零，预算 `NL2SQL_DRAIN_SECS`（默认 180，0 = 不等）。**必须在 langgraph 自己的
+      ① **排空**（`api.drain`）：等"本实例在跑的后台任务数"清零（**计数按 edition 分派** ——
+         inmem 走 `langgraph_runtime_inmem.queue.get_num_workers()`、postgres 走
+         `langgraph_runtime.metrics.get_metrics()['workers']['active']`，见 `api/drain._read_workers`），
+         预算 `NL2SQL_DRAIN_SECS`（默认 180，0 = 不等）。**必须在 langgraph 自己的
          停机之前**——它的 inmem 排空窗口是硬编码 5 秒，之后就是进程退出，我们插不进手。
          本 lifespan 比基础 runtime 的 lifespan 先退出（AsyncExitStack 逆序），所以这里是
          唯一的插入点。详见 `api/drain.py` 文件头。

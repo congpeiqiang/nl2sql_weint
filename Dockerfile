@@ -46,6 +46,12 @@ RUN uv pip install --python /app/.venv/bin/python langchain-qwq \
 RUN uv pip install --python /app/.venv/bin/python "lancedb==0.37.1" \
     --extra-index-url https://pypi.org/simple/
 
+# postgres 版型的平台存储运行时依赖：`langgraph_runtime_postgres/database.py` 硬 import redis
+# （我们 venv 里没有）。纯 Python 包；版本对齐官方镜像里的 7.4.0。同样**不进 pyproject/uv.lock**，
+# 理由同上：避免动既有锁定版本（langgraph 全家桶的锁一旦被重解析，风险远大于这一个包）。
+RUN uv pip install --python /app/.venv/bin/python "redis==7.4.0" \
+    --extra-index-url https://pypi.org/simple/
+
 # ── Stage 2: 运行时 ──
 FROM python:3.13-slim
 ARG DEBIAN_MIRROR
@@ -86,6 +92,39 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # 复制项目源码
 COPY . .
+
+# ── postgres 版型的平台存储运行时（蓝绿阶段 1，2026-10-05）─────────────────────
+# 三样东西**只在官方镜像里分发**：PyPI 上 `langgraph-storage-postgres` 是个空壳
+# （simple 页 0 文件、JSON API 404）⇒ **没有 pip 安装这条路径**，只能抽包。
+#   /storage/langgraph_runtime_postgres  平台存储（threads/runs/assistants/crons）的 Python 实现
+#   /storage/migrations                  平台库 schema 迁移（64 个 .sql，开机自动执行）
+#   /usr/bin/core-api-grpc               Go core —— postgres 版型下所有 CRUD **全走它的 gRPC**
+#                                        （Python 侧无回退实现）⇒ 必需进程，由 start_server.py 拉起
+# 依据与全部实测结论：docs/prod环境/蓝绿发布_阶段0实测.md（版本号 / 抽包路径 / 启动顺序坑）
+# ⚠️ 这个 tag 是阶段 0 实测过的那个（python 3.13.14、langgraph-api 0.11.1 = 本仓库同版）。
+#    换 tag 必须重跑那份文档里的六项取证，并同步改下面的版本闸。
+# ⚠️ 构建机必须先有这个镜像（hub.docker.com 在部署机不可达，走 daocloud）：
+#      docker pull docker.m.daocloud.io/langchain/langgraph-api:0.11.1-py3.13-wolfi
+COPY --from=docker.m.daocloud.io/langchain/langgraph-api:0.11.1-py3.13-wolfi /storage/langgraph_runtime_postgres /storage/langgraph_runtime_postgres
+COPY --from=docker.m.daocloud.io/langchain/langgraph-api:0.11.1-py3.13-wolfi /storage/migrations /storage/migrations
+COPY --from=docker.m.daocloud.io/langchain/langgraph-api:0.11.1-py3.13-wolfi /usr/bin/core-api-grpc /usr/bin/core-api-grpc
+RUN chmod 755 /usr/bin/core-api-grpc
+
+# 抽包路径进 sys.path（官方镜像用 site-packages 里的 .pth，我们等价地用 PYTHONPATH）
+ENV PYTHONPATH=/storage
+
+# 版本闸：抽包来源与本仓库要求的版本必须一致 —— 换 tag 忘了改这里，构建即失败
+# （无声的版本漂移会表现为"会话列表/run 偶尔 500"，比构建失败难查得多）
+RUN python -c "import importlib.util, importlib.metadata as m, sys; \
+        sys.path.insert(0, '/storage'); \
+        v = m.version('langgraph-api'); \
+        assert v == '0.11.1', 'langgraph-api 版本不符（抽包 tag 与仓库要求不一致）: ' + v; \
+        assert importlib.util.find_spec('langgraph_runtime_postgres') is not None, 'langgraph_runtime_postgres 找不到（PYTHONPATH=/storage 没生效）'; \
+        print('OK postgres runtime: langgraph-api ' + v)" \
+ && test -x /usr/bin/core-api-grpc \
+ && test -f /storage/langgraph_runtime_postgres/database.pyc \
+ && test -f /storage/migrations/000001_create_assistants_threads.up.sql \
+ && echo "OK core-api-grpc + migrations 就位"
 
 # 默认环境变量（可被 docker-compose / .env.prod 覆盖）
 # LANG/LC_ALL=C.UTF-8：容器 shell 的 UTF-8 locale，否则 ls/cat 对中文文件名

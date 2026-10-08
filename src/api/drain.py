@@ -21,10 +21,17 @@
    ⚠️ 这一步 socket 已关，不会再有新请求进来，gate 形同虚设（不影响正确性）。
    它保证的是"即使有人直接 `docker restart`，在跑的 run 也有预算跑完"。
 
-**计数的真源**：`langgraph_runtime_inmem.queue.get_num_workers()` = 在跑的后台任务数
-（含子 agent run 与 sync 循环 —— 一次问数约 3 个，所以清零点比"run 数"更保守）。
-读不到（非 inmem 运行时 / 离线）→ 视为 0 并 debug 记一笔：**没有计数就不等**
+**计数的真源**（2026-10-05 蓝绿阶段 1 起**按 edition 分派**，见 `_read_workers`）：
+在跑的后台任务数（含子 agent run 与 sync 循环 —— 一次问数约 3 个）：
+- inmem 版型 → `langgraph_runtime_inmem.queue.get_num_workers()`
+- postgres 版型 → `langgraph_runtime.metrics.get_metrics()['workers']['active']`
+
+读不到（版型对不上 / 离线 / 包改名）→ 视为 0 并 debug 记一笔：**没有计数就不等**
 （宁可照旧硬停，也不要凭空阻塞发版）。
+⚠️ 但"读不到"与"真的是 0"**必须能区分**：快照里带 `counter_source` / `counter_trusted`，
+发版脚本断言的是 **`trusted 且 remaining == 0`**。只看 `remaining == 0` 的话，
+换版型那天（`get_num_workers` 在新 runtime 包里不存在）会静默退化成"永远已排空"，
+接着 `docker stop` 腰斩在跑的 run —— 而日志上一切正常。
 
 **预算与边界**：`NL2SQL_DRAIN_SECS`（默认 180，`0` = 不等待只拒绝新请求）。
 预算用尽仍未清零 → warning 里点出**还剩几个**，然后照常退出 —— 剩下的会被 langgraph
@@ -63,6 +70,14 @@ _RUN_CREATE_RE = re.compile(
 )
 
 _lock = threading.Lock()
+# 最近一次计数读取的元信息（由 `active_workers()` 更新，`drain_state()` 快照出去）。
+# 存在的唯一理由：让发版脚本能区分「真的清零了」与「读不到计数所以是 0」——
+# 后者若被当成前者，脚本会立刻 `docker stop`，把在跑的 run 腰斩（见模块头）。
+_counter_meta: dict[str, Any] = {
+    "source": "未读取",    # inmem / postgres / unknown
+    "trusted": False,      # True = 这个数字真的是从运行时读到的
+    "detail": "",          # 读到的原始值 / 失败原因（排障用）
+}
 _state: dict[str, Any] = {
     "draining": False,
     "started_at": 0.0,      # monotonic；0 = 未开始
@@ -86,19 +101,58 @@ def budget_secs() -> int:
         return _DEFAULT_BUDGET_SECS
 
 
-def active_workers() -> int:
-    """在跑的 langgraph 后台任务数（含子 agent run / sync 循环）。
+def _read_workers() -> tuple[int, str, bool, str]:
+    """读"本实例在跑的后台任务数" → `(数量, 来源, 是否可信, 细节)`。
 
-    读不到该计数（非 inmem 运行时、离线测试、包版本变了）→ 返回 0 并只记一次 debug：
-    没有计数就不等待，避免把发版凭空拖住。
+    两个版型的真源（语义相同，都是**本实例**在跑几个 job）：
+    - inmem → `langgraph_runtime_inmem.queue.get_num_workers()`（= `len(WORKERS)`）
+    - postgres → `langgraph_runtime.metrics.get_metrics()['workers']['active']`
+
+    ⚠️ postgres 版型下**执行**仍在本进程的 Python worker 上（Go core 只管平台库的 CRUD
+    与队列表），所以"本实例在跑几个"读得到、也才有意义 —— 排空关心的是**自己**还有没有活。
     """
+    try:
+        from langgraph_api.feature_flags import IS_POSTGRES_OR_GRPC_BACKEND
+    except Exception as e:  # noqa: BLE001  连版型都判不出来
+        return 0, "unknown", False, f"读不到 feature_flags: {e}"
+
+    if IS_POSTGRES_OR_GRPC_BACKEND:
+        try:
+            from langgraph_runtime.metrics import get_metrics
+
+            workers = dict(get_metrics().get("workers") or {})
+        except Exception as e:  # noqa: BLE001
+            return 0, "postgres", False, f"读不到 langgraph_runtime.metrics: {e}"
+        if "active" not in workers:
+            # `N_JOBS_PER_WORKER=0`（空闲色）就走到这里：队列根本没起，没有 workers 读数。
+            return 0, "postgres", False, f"metrics['workers'] 无 active（{workers!r}）"
+        try:
+            return int(workers["active"]), "postgres", True, f"workers={workers}"
+        except (TypeError, ValueError) as e:
+            return 0, "postgres", False, f"workers['active'] 不是整数（{workers!r}）: {e}"
+
     try:
         from langgraph_runtime_inmem.queue import get_num_workers
 
-        return int(get_num_workers())
+        n = int(get_num_workers())
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[drain] 读不到后台任务计数（按 0 处理，不等待）: %s", e)
-        return 0
+        return 0, "inmem", False, f"读不到 langgraph_runtime_inmem.queue: {e}"
+    return n, "inmem", True, f"WORKERS={n}"
+
+
+def active_workers() -> int:
+    """在跑的 langgraph 后台任务数（含子 agent run / sync 循环）。
+
+    读不到该计数（版型对不上、离线测试、包版本变了）→ 返回 0 并记一笔 debug：
+    没有计数就不等待，避免把发版凭空拖住。**但读时会把来源/是否可信写进 `_counter_meta`**
+    （`drain_state()` 用它告诉发版脚本"这个 0 是真的还是读不到"），见模块头。
+    """
+    count, source, trusted, detail = _read_workers()
+    with _lock:
+        _counter_meta.update(source=source, trusted=trusted, detail=detail)
+    if not trusted:
+        _logger.debug("[drain] 读不到后台任务计数（按 0 处理，不等待）: %s", detail)
+    return count
 
 
 def _effective_budget(budget: int | None) -> float:
@@ -155,17 +209,28 @@ def end_drain() -> dict[str, Any]:
 
 
 def drain_state() -> dict[str, Any]:
-    """当前排空状态快照（状态端点与日志共用）。"""
+    """当前排空状态快照（状态端点与日志共用）。
+
+    `remaining` 是**现读**的（不是最近一次等待的残留值）。快照另带两项给发版脚本：
+    - `counter_source` / `counter_trusted`：这个 0 是**读到的**还是**读不到兜底的**
+    - `drained` **要求可信**：读不到计数时，`drained` 恒为 False ——
+      宁可让脚本自己决定（继续等 / 人工确认 / 接受硬停），也不谎报"已排空"。
+    """
+    remaining = active_workers()
     with _lock:
         snapshot = dict(_state)
         deadline = snapshot["deadline_at"]
-    snapshot["remaining"] = active_workers()
+        counter = dict(_counter_meta)
+    snapshot["remaining"] = remaining
+    snapshot["counter_source"] = counter["source"]
+    snapshot["counter_trusted"] = bool(counter["trusted"])
+    snapshot["counter_detail"] = counter["detail"]
     snapshot["budget_secs"] = budget_secs()
     if deadline:
         snapshot["deadline_in_secs"] = max(0.0, round(deadline - time.monotonic(), 1))
     else:
         snapshot["deadline_in_secs"] = None
-    snapshot["drained"] = bool(snapshot["drained"]) and snapshot["remaining"] == 0
+    snapshot["drained"] = bool(snapshot["drained"]) and remaining == 0 and bool(counter["trusted"])
     return snapshot
 
 
@@ -201,11 +266,23 @@ async def wait_for_idle(
 
     waited = time.monotonic() - started
     with _lock:
+        trusted = bool(_counter_meta["trusted"])
+        source = str(_counter_meta["source"])
         _state["waited_secs"] = waited
         _state["remaining"] = remaining
-        _state["drained"] = remaining == 0
-    if remaining == 0:
-        _logger.warning("[drain] 排空完成：等了 %.1fs（%d 次轮询），在跑任务已清零", waited, ticks)
+        _state["drained"] = remaining == 0 and trusted
+    if remaining == 0 and trusted:
+        _logger.warning("[drain] 排空完成：等了 %.1fs（%d 次轮询），在跑任务已清零（计数来源=%s）",
+                        waited, ticks, source)
+    elif remaining == 0:
+        # 读不到计数（版型对不上 / 运行时包改名）⇒ 这个 0 是兜底值，不是"确认清零"。
+        # 行为不变（照旧立刻返回、照旧硬停），但**不许**说成"排空完成" —— 发版脚本要据此
+        # 自己决定是继续等还是人工确认（见模块头）。
+        _logger.warning(
+            "[drain] **计数不可用**（来源=%s）：无法确认在跑任务是否清零，按'不等待'继续停机。"
+            "发版脚本别据 remaining==0 判断已排空",
+            source,
+        )
     elif not is_draining():
         _logger.warning("[drain] 排空被撤销（等了 %.1fs，仍有 %d 个在跑）", waited, remaining)
     else:

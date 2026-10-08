@@ -13,6 +13,9 @@
      恰恰是"取消我这个跑不完的查询"。拒绝必须发生在入口（下游不许被调用）。
   ② **等待语义**：`wait_for_idle` 真等到清零；预算用尽不装成成功（`drained=False` +
      点名剩余数）；期间可被 `DELETE` 撤销；读不到计数就不等（不凭空拖住发版）。
+     另校**计数来源/可信**：正常路径 `counter_source` 必须是真 source（inmem/postgres）且
+     `counter_trusted=True`；读不到计数时 `counter_trusted=False` 且 **`drained` 不许为 True**
+     —— 否则换成 postgres 版型那天，脚本会把"读不到"当"已排空"直接停容器，腰斩在跑的 run。
   ③ **生命周期顺序**：真 `custom_app._lifespan` 退出时 **先排空、后 flush Langfuse**
      （反了的话最后一批 run 的分数只能靠 atexit 兜底）。**破坏性负对照**：预算置 0
      → flush 时任务仍未清零，证明 ③ 的"等到了"不是恒真。
@@ -119,6 +122,57 @@ def fake_langfuse_flush(sink: list[float]):
             sys.modules[key] = real
         else:
             sys.modules.pop(key, None)
+
+
+@contextlib.contextmanager
+def fake_postgres_metrics(active: int | None | list):
+    """把版型伪装成 postgres，并注入 `langgraph_runtime.metrics` 的替身。
+
+    本仓 venv 里装的是 `langgraph_runtime_inmem`，postgres 版型的分支**从没跑过**；
+    这里用替身把三条路都真跑：
+      · `3`      —— 有读数
+      · `[3, 0]` —— 按调用次序取值（验"postgres 上也能真等到清零"）
+      · `None`   —— `N_JOBS_PER_WORKER=0` 的空闲色：metrics 里没有 workers 读数
+
+    替身要连**父包一起**放进 sys.modules —— `from langgraph_runtime.metrics import
+    get_metrics` 会先去 import 父包，而真的 `langgraph_runtime` 在
+    `LANGGRAPH_RUNTIME_EDITION` 未设时 import 即抛。
+    """
+    import langgraph_api.feature_flags as ff
+
+    real_flag = ff.IS_POSTGRES_OR_GRPC_BACKEND
+    missing = object()
+    real_pkg = sys.modules.get("langgraph_runtime", missing)
+    real_metrics = sys.modules.get("langgraph_runtime.metrics", missing)
+
+    seq = list(active) if isinstance(active, (list, tuple)) else [active]
+    calls = {"n": 0}
+
+    pkg = types.ModuleType("langgraph_runtime")
+    metrics = types.ModuleType("langgraph_runtime.metrics")
+
+    def _get_metrics() -> dict:
+        value = seq[min(calls["n"], len(seq) - 1)]
+        calls["n"] += 1
+        if value is None:
+            return {}                      # N_JOBS_PER_WORKER=0：队列没起，没有 workers 键
+        return {"workers": {"max": 10, "active": value, "available": max(0, 10 - value)}}
+
+    metrics.get_metrics = _get_metrics  # type: ignore[attr-defined]
+    pkg.metrics = metrics  # type: ignore[attr-defined]
+
+    ff.IS_POSTGRES_OR_GRPC_BACKEND = True  # type: ignore[assignment]  # `from ... import X` 是调用期读属性
+    sys.modules["langgraph_runtime"] = pkg
+    sys.modules["langgraph_runtime.metrics"] = metrics
+    try:
+        yield metrics
+    finally:
+        ff.IS_POSTGRES_OR_GRPC_BACKEND = real_flag  # type: ignore[assignment]
+        for name, real in (("langgraph_runtime", real_pkg), ("langgraph_runtime.metrics", real_metrics)):
+            if real is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = real  # type: ignore[assignment]
 
 
 @contextlib.contextmanager
@@ -327,6 +381,11 @@ async def t2_wait() -> None:
         "计数真源可用：`langgraph_runtime_inmem.queue.get_num_workers()`（未起服务时应为 0）",
         str(get_num_workers()),
     )
+    # 计数来源要能分辨：快照里必须点名真 source，且标记为可信（发版脚本据此放行）
+    snap = drain.drain_state()
+    check(snap["counter_source"] == "inmem" and snap["counter_trusted"] is True,
+          "快照带计数来源且标记可信（inmem）",
+          f"source={snap['counter_source']} trusted={snap['counter_trusted']}")
 
     # 读不到计数（非 inmem 运行时 / 包变了）→ 真 `active_workers` 自己兜底成 0。
     # 这里不能打桩 `drain.active_workers`（那是"上层函数抛异常"，兜底不在那条路径上）——
@@ -345,11 +404,58 @@ async def t2_wait() -> None:
             elapsed = time.perf_counter() - t0
         check(state["remaining"] == 0 and elapsed < 0.5,
               "**没有计数就不等**：宁可照旧硬停，也不凭空把发版拖住 30s", f"{elapsed:.2f}s")
+        # ⚠️ 这条是换版型（inmem → postgres）那天的护栏：读不到计数时，那个 0 是**兜底值**。
+        # 一旦 `drained` 跟着变成 True，发版脚本就会直接 `docker stop` —— 在跑的 run 被腰斩，
+        # 而日志上一切正常。所以：`drained` 必须**要求可信**。
+        check(state["counter_trusted"] is False and state["drained"] is False,
+              "**读不到计数 ≠ 已排空**：counter_trusted=False 且 drained 不谎报 True",
+              f"source={state['counter_source']} trusted={state['counter_trusted']} drained={state['drained']}")
     finally:
         if real_have:
             sys.modules[key] = real_mod  # type: ignore[assignment]
         else:
             sys.modules.pop(key, None)
+
+    # ── postgres 版型分支（2026-10-05 蓝绿阶段 1 新增，本仓 venv 里没有 postgres runtime，
+    #    所以用替身模块把两条路都真跑一遍：有读数 / 没有读数）────────────────────────
+    # 背景：`N_JOBS_PER_WORKER=0` 的**空闲色**根本没有 workers 读数 —— 那条路径也不能
+    # 被当成"已排空"（否则切换流程会在空闲色上误判）。
+    reset_drain()
+    with fake_postgres_metrics(3):
+        check(drain.active_workers() == 3,
+              "postgres 版型：从 `langgraph_runtime.metrics.get_metrics()['workers']['active']` 取值",
+              str(drain.active_workers()))
+        snap = drain.drain_state()
+        check(snap["counter_source"] == "postgres" and snap["counter_trusted"] is True,
+              "postgres 版型：来源点名 postgres 且可信",
+              f"source={snap['counter_source']} trusted={snap['counter_trusted']}")
+
+    # postgres 版型下真等到清零（3 → 0）：换版型后排空主路径仍然成立
+    reset_drain()
+    with fake_postgres_metrics([3, 0]), drain_budget("10"):
+        drain.begin_drain(reason="verify")
+        state = await drain.wait_for_idle(poll_secs=0.01)
+    check(state["drained"] is True and state["remaining"] == 0 and state["counter_trusted"] is True,
+          "postgres 版型：连续读到清零 → drained=True 且计数可信",
+          f"remaining={state['remaining']} trusted={state['counter_trusted']}")
+
+    # 恒定非 0 → 等满预算也不装成功（与 inmem 同一语义）
+    reset_drain()
+    with fake_postgres_metrics(3), drain_budget("0"):
+        drain.begin_drain(reason="verify")
+        state = await drain.wait_for_idle()
+    check(state["drained"] is False and state["remaining"] == 3,
+          "postgres 版型：预算 0 / 仍有在跑 → 不装成功",
+          f"remaining={state['remaining']}")
+
+    # 空闲色（N_JOBS_PER_WORKER=0）：metrics 里没有 workers 读数 → 不可信，不许说已排空
+    reset_drain()
+    with fake_postgres_metrics(None):
+        check(drain.active_workers() == 0, "postgres 版型 + 无 workers 读数（N_JOBS=0 的空闲色）→ 兜底为 0")
+        snap = drain.drain_state()
+        check(snap["counter_trusted"] is False and snap["drained"] is False,
+              "空闲色：计数不可信 ⇒ drained 仍为 False（不谎报已排空）",
+              f"source={snap['counter_source']} trusted={snap['counter_trusted']}")
 
     # 预算解析
     with drain_budget("abc"):

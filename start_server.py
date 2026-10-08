@@ -8,6 +8,10 @@ A minimal script to start the LangGraph API server directly using uvicorn.
 import os
 import sys
 import json
+import socket
+import subprocess
+import threading
+import time
 from pathlib import Path
 
 # ── 文件日志（自动轮转、落盘持久目录）─────────────────────────
@@ -127,6 +131,132 @@ def setup_environment():
         if not os.environ.get("CHECKPOINT_DB_URI", "").startswith("postgresql://"):
             print("⚠️ DEPLOY_ENV=prod 但 CHECKPOINT_DB_URI 未指向 PostgreSQL，请检查 docker-compose / 环境配置")
     print(f"🌍 Deploy env: {deploy_env}")
+
+# ── postgres 版型的 Go core（蓝绿阶段 1，2026-10-05）──────────────────────
+# 换到 postgres 版型后，平台存储（threads / runs / assistants / crons）的 CRUD **全部**是对
+# Go core 的 gRPC 调用（`langgraph_api/feature_flags.py`：IS_POSTGRES_OR_GRPC_BACKEND →
+# `langgraph_api.grpc.ops`，Python 侧没有回退实现）⇒ core 是**必需进程**，不是可选组件。
+# 官方镜像用它的 entrypoint 起 core；我们的镜像由本文件负责，两个理由：
+#   ① core 必须**继承 `LANGSERVE_GRAPHS`**，而那个值只在 `setup_environment()` 里拼出来。
+#      先起 core 再进 Python（官方顺序）在我们这儿会踩：core 拿到空图表 ⇒ 建助手时
+#      `NOT_FOUND: graph 'chat_agent' not found` ⇒ lifespan 起不来、整个服务退出。
+#      **2026-10-05 阶段 0 实测踩过这条**。
+#   ② core 的 stdout 要落进我们的日志文件、退出要随本进程回收（官方是同一进程组里 exec）。
+CORE_BINARY = "core-api-grpc"
+CORE_READY_TIMEOUT_SECS = 30
+
+
+def _core_address() -> tuple[str, int]:
+    """core 的 gRPC 监听地址（`LSD_GRPC_SERVER_ADDRESS`，默认 `localhost:50051`）。"""
+    raw = (os.environ.get("LSD_GRPC_SERVER_ADDRESS") or "localhost:50051").strip()
+    if ":" in raw:
+        host, _, port = raw.rpartition(":")
+    elif raw.isdigit():
+        host, port = "localhost", raw      # 只给了端口
+    else:
+        host, port = raw, "50051"          # 只给了主机名
+    try:
+        return host, int(port)
+    except ValueError:
+        print(f"⚠️ LSD_GRPC_SERVER_ADDRESS 解析不了（{raw!r}），按 localhost:50051 处理")
+        return "localhost", 50051
+
+
+def _tcp_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def start_core_api_grpc(log_dir: Path) -> subprocess.Popen | None:
+    """postgres 版型：拉起 `core-api-grpc` 并等它开始监听；其它版型直接返回 None。
+
+    **必须在 `setup_environment()` 之后调用**（见上方注释 ①）。
+    """
+    if (os.environ.get("LANGGRAPH_RUNTIME_EDITION") or "").strip().lower() != "postgres":
+        return None
+
+    # 版型对了但库没接上：`setup_environment` 的默认值 `:memory:` 会留在这儿，
+    # core 连不上平台库时的报错很难看出是配置问题 —— 直接点名。
+    db_uri = (os.environ.get("DATABASE_URI") or "").strip()
+    if not db_uri.startswith("postgres"):
+        print(f"\n🚫 LANGGRAPH_RUNTIME_EDITION=postgres 但 DATABASE_URI={db_uri!r}（应是 postgresql://…）",
+              flush=True)
+        print("   ⇒ 平台存储（会话列表/run/助手）需要平台库；请检查 docker-compose 的 DATABASE_URI",
+              flush=True)
+        sys.exit(1)
+
+    host, port = _core_address()
+    # 幂等：地址上已经有监听者（compose 单独起了 core / 上一轮残留）就不再起第二个
+    if _tcp_open(host, port):
+        print(f"ℹ️ {host}:{port} 已有服务在监听，跳过拉起 {CORE_BINARY}", flush=True)
+        return None
+
+    log_path = log_dir / "core-api-grpc.log"
+    print(f"🧩 postgres 版型：拉起 {CORE_BINARY}（gRPC {host}:{port}，日志 {log_path}）", flush=True)
+    # stdout/stderr 进文件而不是 docker logs：core 启动时会打一坨 Datadog tracer 配置
+    # （连不上 localhost:8126 的失败告警），混进主日志会把发版脚本 grep 的关键行淹掉。
+    handle = open(log_path, "ab", buffering=0)
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            [CORE_BINARY],
+            stdout=handle, stderr=subprocess.STDOUT,
+            env=os.environ.copy(),          # ← 含 LANGSERVE_GRAPHS / DATABASE_URI / REDIS_URI
+        )
+    except FileNotFoundError:
+        print(f"\n🚫 找不到 {CORE_BINARY} —— postgres 版型要求它随镜像分发（见 Dockerfile 的多阶段 COPY）",
+              flush=True)
+        sys.exit(1)
+    finally:
+        handle.close()
+
+    deadline = time.monotonic() + CORE_READY_TIMEOUT_SECS
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            print(f"\n🚫 {CORE_BINARY} 启动即退出（exit={proc.returncode}），tail 日志：", flush=True)
+            print(_tail(log_path), flush=True)
+            sys.exit(1)
+        if _tcp_open(host, port):
+            print(f"✅ {CORE_BINARY} 已就绪（pid={proc.pid}，{host}:{port}）", flush=True)
+            threading.Thread(target=_watch_core, args=(proc, log_path), daemon=True).start()
+            return proc
+        time.sleep(0.2)
+
+    print(f"\n🚫 等 {CORE_READY_TIMEOUT_SECS}s 仍没等到 {CORE_BINARY} 监听 {host}:{port}，tail 日志：",
+          flush=True)
+    print(_tail(log_path), flush=True)
+    stop_core_api_grpc(proc)
+    sys.exit(1)
+
+
+def _tail(path: Path, lines: int = 20) -> str:
+    try:
+        return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+    except Exception:  # noqa: BLE001  排障信息读不到不该盖住原错误
+        return "(读不到日志)"
+
+
+def _watch_core(proc: subprocess.Popen, log_path: Path) -> None:
+    """core 是「没了就全废」的进程（平台存储全走它），退出必须显式吵一声。"""
+    rc = proc.wait()
+    print(f"\n🚨 [core-api-grpc] 进程退出（exit={rc}）—— 会话列表/run/助手的读写会全部失败；"
+          f"日志见 {log_path}", flush=True)
+
+
+def stop_core_api_grpc(proc: subprocess.Popen | None, timeout: float = 10.0) -> None:
+    """回收 core（SIGTERM → 到点 SIGKILL）。它是我们的子进程，容器停时不该留孤儿。"""
+    if proc is None or proc.poll() is not None:
+        return
+    print(f"🛑 回收 {CORE_BINARY}（pid={proc.pid}）", flush=True)
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"⚠️ {CORE_BINARY} {timeout}s 内没退出，SIGKILL", flush=True)
+        proc.kill()
+
 
 def preflight_check():
     """就绪门控：在启动服务前验证关键依赖是否就绪。"""
@@ -266,12 +396,16 @@ def main():
     # Setup environment
     setup_environment()
 
-    # 就绪门控：验证关键依赖
-    preflight_check()
-
-    # 文件日志目录：确保存在（uvicorn log_config 的 FileHandler 需要）
+    # 文件日志目录：确保存在（uvicorn log_config 的 FileHandler 需要；core 的日志也落这儿）
     log_file = resolve_log_file()
     log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # postgres 版型：先拉起 Go core 再进预检 —— 预检（加载 MCP 工具）要跑几秒，
+    # 正好给 core 冷启当并行窗口（core 未就绪时平台存储的任何调用都会被拒）。
+    core_proc = start_core_api_grpc(log_file.parent)
+
+    # 就绪门控：验证关键依赖
+    preflight_check()
 
     # Print server information
     print("\n" + "="*60)
@@ -306,5 +440,9 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        # uvicorn 退出（正常停机 / 异常）后回收 core：它是本进程的子进程，
+        # 留成孤儿会让容器迟迟不退出（docker stop 的宽限期白等）。
+        stop_core_api_grpc(core_proc)
 if __name__ == "__main__":
     main()

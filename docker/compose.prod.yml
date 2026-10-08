@@ -1,0 +1,162 @@
+# NL2SQL 生产部署（weint 服务器 192.168.25.64）—— 蓝绿阶段 1 形态
+#
+# ⚠️ **这是线上 `docker-compose.yml` 的仓库参照副本，不是生效文件。**
+#    线上真身：/home/weint/apps/nl2sql/nl2sql-app/docker-compose.yml（手工维护，发版脚本不覆盖）。
+#    改这里不等于改线上；改线上请用本文件做「同 inode 就地覆盖」（见 docs/prod环境/ 手册）。
+#    反过来，**仓库根那份 docker-compose.yml 是开发形态**（1200m / 无 api_meta 卷 /
+#    无 stop_grace_period / 端口 2026:2026），别拿它去推生产 —— 这就是本文件存在的理由。
+#
+# 架构：nginx:8080 → frontend:3000 + langgraph-api:2026 → postgres(nl2sql_platform +
+#       nl2sql_checkpoint) + redis(跨实例 run 订阅)
+# 适配：80/3000 被占 → nginx 用 8080；checkpoint 用独立 postgres 容器(5435, LAN 可达)
+# 前端：本地构建产物（方案A），容器内 yarn install + next start
+# 工具：docker-compose v1.29（需 version: "3.8"）
+#
+# ── 阶段 1 相对旧版改了什么（2026-10-05，蓝绿的前置）────────────────────
+#  1. 平台存储从 inmem pckl 换成 **postgres 版型**：`LANGGRAPH_RUNTIME_EDITION=postgres`
+#     + `DATABASE_URI=<平台库>`。理由：inmem 每容器一份 pckl、每 10s 整份覆盖写
+#     （last-writer-wins）⇒ **两色并存必互相抹数据**，蓝绿无从谈起。
+#  2. 新增 `redis` 服务：管**跨实例订阅在跑的 run**（切流后浏览器在新色上仍能收到
+#     旧色在跑 run 的 token 流）。
+#  3. `nl2sql_api_meta:/app/.langgraph_api` 卷**保留不删** —— 里面是旧版型的 pckl，
+#     回滚要用（见「回滚」）。
+#  4. 平台库 `nl2sql_platform` 与正文库 `nl2sql_checkpoint` **分库**：`POSTGRES_DB`
+#     只会建第一个库，第二个必须手工 `CREATE DATABASE` 一次（写进手册）。
+#
+# ── 阶段 2 才会有的东西（此处不做，留位）──────────────────────────────
+#  · 两色 `langgraph-api` / `langgraph-api-b`，各指自己的 `LANGGRAPH_API_URL`，
+#    **只有当前色发布宿主端口**；空闲色 `N_JOBS_PER_WORKER=0`（否则新代码一启动
+#    就从共享队列领 run 上活）。
+#  · ⚠️ **迁移自动化**：官方 runtime 开机自动跑 `/storage/migrations`（阶段 0 实测：
+#    61 条 schema_migrations）。阶段 1 单色、且旧实例已停 ⇒ 自动迁移正是我们要的；
+#    但**阶段 2 必须把它改成受控步骤**（杠杆 `DB_MIGRATION_BY_CORE_API=false` 为默认，
+#    见 docs/prod环境/蓝绿发布_阶段0实测.md §五-1），否则新色一开机就改共享库
+#    schema，而旧色还在跑。
+#
+# ── 回滚 ──────────────────────────────────────────────────────────────
+#  把 `LANGGRAPH_RUNTIME_EDITION` / `DATABASE_URI` / `REDIS_URI` / `MIGRATIONS_PATH`
+#  四行去掉（回到 inmem），`stop && rm -f && up -d` 重建 —— pckl 卷完好，threads 全在。
+#  （threads 的时间戳在迁移时是直写平台库补的，回滚后由 pckl 的原值说了算。）
+version: "3.8"
+
+services:
+  langgraph-api:
+    # P2-1 优雅停机：docker 默认只给 10s 就 SIGKILL（restart / OOM / daemon 重启走这条路）；
+    # 必须 > 后端排空预算 NL2SQL_DRAIN_SECS(180)。发布脚本走的 `stop -t 240` 是另一条路。
+    stop_grace_period: 240s
+    build: ./backend
+    # P0-2：只绑回环。原 "2026:2026" 把 API 发布到 LAN —— 任何人不带 token、
+    # 不带 X-Forwarded-For 直连即被认成 internal，会话归属的四个 @auth.on 钩子
+    # 对 internal 全部放行 → 整套用户隔离归零。nginx 走服务名连后端，不受影响。
+    ports:
+      - "127.0.0.1:2026:2026"
+    env_file:
+      - .env.prod
+    environment:
+      # ── 平台存储：postgres 版型（阶段 1 新增）──
+      # 平台库与正文库分库；`${PG_PASSWORD:-nl2sql_secret}` 与线上 old 版同款插值
+      # （.env.prod 里没有 PG_PASSWORD ⇒ 这个 fallback 就是线上真密码，改密码要两处一起改）。
+      LANGGRAPH_RUNTIME_EDITION: postgres
+      DATABASE_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@postgres:5432/nl2sql_platform
+      # 官方 runtime 开机自动跑迁移的目录（阶段 0 实测 61 条 schema_migrations）
+      MIGRATIONS_PATH: /storage/migrations
+      # 跨实例订阅在跑的 run（阶段 2 两色并存时必需；阶段 1 单色也要，因为切流窗口里
+      # 旧色的 run 还没跑完）。本 redis 不发布宿主端口，故不设 requirepass。
+      REDIS_URI: redis://redis:6379/0
+      # Go core 监听/被连的地址（start_server.py 只用它来探就绪，默认也是这个值）。
+      # 只绑回环：core 与 Python 同容器，绝不对外。
+      LSD_GRPC_SERVER_ADDRESS: localhost:50051
+      # ⚠️ 阶段 2 的空闲色专属闸：0 = 纯 API、不领 run。当前色必须 10。
+      N_JOBS_PER_WORKER: "10"
+      # 正文库（会话 checkpoint）—— 与平台库分库
+      CHECKPOINT_DB_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@postgres:5432/nl2sql_checkpoint
+      WREN_BIN_PATH: wren
+      LANGGRAPH_API_URL: http://langgraph-api:2026
+      # P0-1：10 个 run 默认共用 1 个事件循环，任一同步阻塞（MCP stdio 子进程、
+      # wren CLI、每请求的 SQLite 写）会冻住其他 9 个 run 与所有 HTTP 请求且不报错。
+      BG_JOB_ISOLATED_LOOPS: "true"
+      # P0-4：显式关死 dev 旁路。environment 优先级高于 env_file，所以即使
+      # .env.prod 里写了 =1 也不生效（该值 = 全站变 dev/is_admin=True）。
+      NL2SQL_AUTH_DISABLED: "0"
+    # P0-6：防跑飞兜底，非容量规划值。MCP stdio 子进程与主进程同 cgroup，也算在这 8g 里。
+    mem_limit: 8g
+    volumes:
+      - agent_data:/app/data
+      # threads 元数据持久化：**旧版型**（inmem）的 pckl 在这里。阶段 1 起平台存储
+      # 改走 postgres、本卷不再被写；**保留不删**是为了回滚（切回 inmem 后 threads 全在）。
+      - nl2sql_api_meta:/app/.langgraph_api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:2026/ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # ── 跨实例 run 订阅（阶段 1 新增）──
+  # 只管「在跑的 run 把事件发给订阅者」这件瞬时的事（pub/sub），没有需要耐久的状态：
+  #  · 不发布宿主端口（同 postgres 的处理：compose 内网直达，宿主摸不到）；
+  #  · 不设 requirepass（没发布就没必要；将来若发布，必须补上）；
+  #  · maxmemory-policy=allkeys-lru：万一真顶到上限，丢的是瞬时事件（前端会重连补，
+  #    见 C 方案按需轮询），而不是让写入报错把流打断 —— 这台 redis 不是 langfuse
+  #    那种「丢了就是丢数据」的队列（那台用 noeviction，是对的，别照搬过来）。
+  redis:
+    image: docker.m.daocloud.io/redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--save", "900", "1"]
+    volumes:
+      - nl2sql_redis_data:/data
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  postgres:
+    image: docker.m.daocloud.io/postgres:14
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nl2sql
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-nl2sql_secret}
+      POSTGRES_DB: nl2sql_checkpoint
+    volumes:
+      - nl2sql_pg_data:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nl2sql -d nl2sql_checkpoint"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - langgraph-api
+
+  nginx:
+    image: docker.m.daocloud.io/nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      # P0-3：原 /report/ 静态直出已删除，nginx 不再需要读 agent_data。
+    depends_on:
+      - frontend
+      - langgraph-api
+
+volumes:
+  agent_data:
+  nl2sql_pg_data:
+  nl2sql_api_meta:
+  nl2sql_redis_data:
