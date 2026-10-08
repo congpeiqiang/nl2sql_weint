@@ -10,12 +10,25 @@
     docker exec nl2sql-app_langgraph-api_1 python /app/scripts/ops_drain.py            # 排空并等到清零/超时
     docker exec nl2sql-app_langgraph-api_1 python /app/scripts/ops_drain.py --budget 60
     docker exec nl2sql-app_langgraph-api_1 python /app/scripts/ops_drain.py --undrain  # 撤销（改主意/回退）
+    docker exec nl2sql-app_langgraph-api_1 python /app/scripts/ops_drain.py --budget 180 --json  # 发版脚本用
+
+⚠️ 蓝绿发版**不要**用旧镜像里那份（`/app/scripts/` 是随镜像走的，旧镜像里是旧逻辑）：
+   发版脚本会把**仓库里这一份** `docker cp` 进 `/tmp` 再 exec，保证判据一定是最新的。
 
 `--budget` 是**本方愿意等多久**（≠ 服务端预算 `NL2SQL_DRAIN_SECS`）：到点仍没清零就
 打印剩余数并退出 2，把"等不等"的决定留给发布脚本/人（那时停容器也仍是安全的：服务端会
 把同一份预算接着用完，不会二次长等）。
 
-退出码：0 = 已清零（可安全停容器）；2 = 预算用尽仍有任务在跑；1 = 出错（端点不可达等）。
+⚠️ **就绪判据是「remaining==0 **且** counter_trusted」**，不是只看 remaining。
+读不到计数时服务端会**兜底返回 0**（`drain.py:_read_workers` 的 fail-open），那是「不知道」
+而不是「已清零」—— 蓝绿发版脚本据此停容器就会腰斩在跑的 run，而日志上一切正常。
+服务端特意把 `counter_trusted` / `counter_source` 放进快照（`drain.py:211-234`，它的
+`drained` 也是这么算的），本脚本必须用上。2026-10-08 修正：此前只看 `remaining == 0`。
+
+`--json`：stdout **只**输出一行最终快照 JSON（给发版脚本解析/留痕用），退出码语义不变。
+
+退出码：0 = 已清零**且计数可信**（可安全停容器）；2 = 未就绪（预算用尽 / 计数不可用）；
+1 = 出错（端点不可达等）。
 """
 from __future__ import annotations
 
@@ -64,11 +77,26 @@ def _request(method: str, path: str, token: str) -> dict:
 
 
 def _fmt(state: dict) -> str:
+    trusted = "可信" if state.get("counter_trusted") else "⛔不可信"
     return (
         f"在跑 {state.get('remaining')} 个后台任务"
-        f"（draining={state.get('draining')}, drained={state.get('drained')}, "
-        f"原因={state.get('reason') or '-'}, 服务端预算={state.get('budget_secs')}s）"
+        f"（计数{trusted}/{state.get('counter_source') or '-'}, draining={state.get('draining')}, "
+        f"drained={state.get('drained')}, 原因={state.get('reason') or '-'}, "
+        f"服务端预算={state.get('budget_secs')}s）"
     )
+
+
+def _ready(state: dict) -> tuple[bool, str]:
+    """就绪判据：**在跑清零 且 计数可信**。见模块头「⚠️ 就绪判据」。"""
+    if state.get("remaining") != 0:
+        return False, f"仍有 {state.get('remaining')} 个后台任务在跑"
+    if not state.get("counter_trusted"):
+        return False, (
+            f"⛔ 计数不可用（来源={state.get('counter_source') or '-'}："
+            f"{state.get('counter_detail') or '-'}）—— 这个 0 是服务端的兜底值，"
+            f"不是「已清零」，据此停容器会腰斩在跑的 run"
+        )
+    return True, "在跑任务已清零，且计数可信"
 
 
 def main() -> int:
@@ -76,35 +104,52 @@ def main() -> int:
     ap.add_argument("--budget", type=int, default=180, help="本方最多等多少秒（默认 180）")
     ap.add_argument("--poll", type=float, default=5.0, help="轮询间隔秒（默认 5）")
     ap.add_argument("--undrain", action="store_true", help="撤销排空、恢复接单")
+    ap.add_argument("--json", action="store_true",
+                    help="stdout 只输出一行最终快照 JSON（供发版脚本解析/留痕；退出码语义不变）")
     args = ap.parse_args()
+
+    # 人类可读的过程行：`--json` 时改走 stderr，让 stdout 保持「一行合法 JSON」可解析。
+    def _log(msg: str) -> None:
+        print(msg, file=sys.stderr if args.json else sys.stdout)
 
     uid, token = _admin_token()
 
     if args.undrain:
         state = _request("DELETE", "/api/admin/drain", token)
-        print(f"✅ 已撤销排空（操作身份={uid}）：{_fmt(state)}")
+        _log(f"✅ 已撤销排空（操作身份={uid}）：{_fmt(state)}")
+        if args.json:
+            print(json.dumps(state, ensure_ascii=False))
         return 0
 
     # `?wait=0`：只置位、由本方轮询 —— 这样能看见"还剩几个"的过程，
     # 而不是盯着一个可能卡 180s 的请求 black box。
     state = _request("POST", "/api/admin/drain?wait=0", token)
-    print(f"🚧 已进入排空态（操作身份={uid}）：新提交的查询会收到 503 + 明确提示；{_fmt(state)}")
+    _log(f"🚧 已进入排空态（操作身份={uid}）：新提交的查询会收到 503 + 明确提示；{_fmt(state)}")
 
-    deadline = time.monotonic() + max(0, args.budget)
+    started = time.monotonic()
+    deadline = started + max(0, args.budget)
+    code = 2
     while True:
-        if state.get("remaining") == 0:
-            print(f"✅ 排空完成：在跑任务已清零（等了 {args.budget - max(0, deadline - time.monotonic()):.0f}s），可以停容器")
-            return 0
+        ok, why = _ready(state)
+        if ok:
+            _log(f"✅ 排空完成：{why}（等了 {time.monotonic() - started:.0f}s），可以停容器")
+            code = 0
+            break
         if time.monotonic() >= deadline:
-            print(
-                f"⏱️ 预算 {args.budget}s 用尽，仍有 {state.get('remaining')} 个后台任务在跑。\n"
-                f"   继续发版 = 这些 run 会被截断（这就是那批'半轮对话'的来源）。\n"
+            _log(
+                f"⏱️ 预算 {args.budget}s 用尽，未就绪：{why}。\n"
+                f"   继续停容器 = 那些 run 会被截断（这就是那批'半轮对话'的来源）。\n"
                 f"   想再等：重跑本脚本；想放弃：`--undrain` 恢复接单，或直接停容器（服务端会自己再等一轮）。"
             )
-            return 2
+            code = 2
+            break
         time.sleep(args.poll)
         state = _request("GET", "/api/admin/drain", token)
-        print(f"   …{_fmt(state)}")
+        _log(f"   …{_fmt(state)}")
+
+    if args.json:
+        print(json.dumps(state, ensure_ascii=False))
+    return code
 
 
 if __name__ == "__main__":

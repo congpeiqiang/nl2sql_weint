@@ -8,6 +8,10 @@
 - 同任务重试上限 `_MAX_ATTEMPTS`，超限置 failed 并留 last_error（可查）；
 - 幂等去重：同一 (trace_id, kind) 同一时刻至多 1 条在途（部分唯一索引），
   已 done/failed 不阻塞后续同 key 新任务。
+- **租约（2026-10-08，蓝绿阶段 2）**：崩槽恢复**只回收超过租约期的 running**
+  （`updated_at` 就是租约起点，默认 1800s，`NL2SQL_EVAL_JUDGE_LEASE_SECS` 可调）
+  ⇒ 两色并存时新色的 drainer 不会把旧色**正在跑**的 judge 打回 pending。详见
+  `reset_running_to_pending()` 与 `_STALE_RUNNING_SECS`。
 
 设计（对齐 feedback/store.py 先例）：
 - 单连接 `check_same_thread=False` + 模块级 `threading.RLock` + `PRAGMA journal_mode=WAL`
@@ -28,10 +32,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -50,6 +55,16 @@ _CLAIM_BATCH = 5           # 每轮领取任务数
 _IDLE_SLEEP = 0.5          # 空队列轮询间隔（秒）
 _RETRY_SLEEP = 1.0         # store 初始化异常退避（秒）
 _PAUSE_SLEEP = 30.0        # 评估开关关闭时的暂停轮询间隔（秒，不领取任务）
+# ── running 行的「租约」（2026-10-08，蓝绿阶段 2）─────────────────────
+# `claim()` 把行置 running 时写 `updated_at`，**执行期间不再刷新** ⇒ 它天然就是「租约起点」。
+# 超过 `_STALE_RUNNING_SECS` 还没收尾 ⇒ 认定持有者已死，允许被回收。**不需要新列。**
+# 为什么需要它：两色并存（蓝绿发版窗口）时，新色的 drainer 一启动就会调
+# `reset_running_to_pending()`；无条件复位会把**旧色正在跑的行**打回 pending ⇒ 两个 drainer
+# 把同一条 judge 跑两遍（双倍 token，两次结果互相覆盖）。改成只回收超租约的行即可消除。
+# 取值要**远大于**单条 judge 的耗时（一次 LLM 调用，秒级~分钟级），否则正常在跑的会被误回收；
+# 又要**远小于**「进程崩了以后多久才有人想起来补评」，所以给了 1800s 并在空队列时每 60s 复查一次。
+_STALE_RUNNING_SECS = 1800.0
+_RECLAIM_INTERVAL = 60.0   # 空队列时多久做一次「超租约回收」（秒）
 
 # `UPDATE … RETURNING` 需要 SQLite ≥ 3.35（2021-03）。见 claim() 的并发说明：
 # 有它才能让「领取」跨进程原子。老版本自动退回锁内两步法，不影响可用性。
@@ -86,6 +101,30 @@ _STORE_LOCK = threading.Lock()
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _lease_secs() -> float:
+    """running 租约时长（`NL2SQL_EVAL_JUDGE_LEASE_SECS` 覆盖）；非法值退回默认并告警。"""
+    raw = (os.environ.get("NL2SQL_EVAL_JUDGE_LEASE_SECS") or "").strip()
+    if not raw:
+        return _STALE_RUNNING_SECS
+    try:
+        v = float(raw)
+    except ValueError:
+        _logger.warning("[eval_queue] NL2SQL_EVAL_JUDGE_LEASE_SECS 不是数字（%r），按默认 %ss",
+                        raw, _STALE_RUNNING_SECS)
+        return _STALE_RUNNING_SECS
+    return v if v > 0 else _STALE_RUNNING_SECS
+
+
+def _lease_cutoff() -> str:
+    """租约截止时刻（ISO 字符串，用来筛「超租约未收尾」的 running 行）。
+
+    ⚠️ 口径必须与 `_now()` **逐字一致**（`timespec="seconds"` + `+00:00`）——
+    `updated_at < cutoff` 是**字符串比较**，口径不一致会静默错判（本仓在
+    `retention.py` 的 ISO cutoff 上踩过同型的坑）。
+    """
+    return (datetime.now(timezone.utc) - timedelta(seconds=_lease_secs())).isoformat(timespec="seconds")
 
 
 def _db_path() -> Path:
@@ -135,17 +174,38 @@ class EvalQueueStore:
                 _logger.debug("[eval_queue] enqueue 失败: %s", e)
                 return False
 
-    def reset_running_to_pending(self) -> int:
-        """崩溃恢复：上一进程残留的 running 置回 pending（幂等，worker 启动/重放前调用）。"""
+    def reset_running_to_pending(self, *, stale_only: bool = True) -> int:
+        """崩溃恢复：把**上一进程残留**的 running 置回 pending（幂等）。
+
+        `stale_only=True`（默认，守护 worker / 补评走这条）：只回收**超过租约期**的行。
+        判据是现成的 `updated_at`（claim 时写入、执行期不刷新 ⇒ 它就是租约起点）：
+        `state='running' AND updated_at < now - lease`。空/老的 `updated_at`（历史行）也落在这条
+        里 ⇒ 照样被回收。
+
+        `stale_only=False`：全量复位（今天的旧行为），**只给显式 `--force` 的运维动作**用。
+
+        ⚠️ 为什么默认必须只收超租约的：蓝绿两色并存时，新色的 drainer 一启动就会调本方法。
+        无条件复位会把**另一色正在跑的行**打回 pending ⇒ 两个 drainer 把同一条 judge 跑两遍
+        （双倍 token，两次结果互相覆盖）。这正是下面 `_RECLAIM_INTERVAL` / `_lease_secs()` 存在的原因。
+        """
         with _LOCK:
             try:
-                cur = self._conn.execute(
-                    "UPDATE eval_queue SET state='pending', updated_at=? WHERE state='running'",
-                    (_now(),),
-                )
+                if stale_only:
+                    cur = self._conn.execute(
+                        "UPDATE eval_queue SET state='pending', updated_at=?"
+                        " WHERE state='running' AND updated_at < ?",
+                        (_now(), _lease_cutoff()),
+                    )
+                    what = f"{cur.rowcount} 条**超租约**(>{_lease_secs():.0f}s)"
+                else:
+                    cur = self._conn.execute(
+                        "UPDATE eval_queue SET state='pending', updated_at=? WHERE state='running'",
+                        (_now(),),
+                    )
+                    what = f"{cur.rowcount} 条(全量/--force)"
                 self._conn.commit()
                 if cur.rowcount:
-                    _logger.info("[eval_queue] 恢复 %d 条 running→pending", cur.rowcount)
+                    _logger.info("[eval_queue] 恢复 running→pending: %s", what)
                 return cur.rowcount or 0
             except Exception as e:  # noqa: BLE001
                 _logger.warning("[eval_queue] reset running→pending 失败: %s", e)
@@ -310,8 +370,14 @@ def _run_row(store: EvalQueueStore, row: dict) -> None:
 
 
 def _drain_loop() -> None:
-    """守护 worker 主循环：领取 → 执行 → 落结果；空队列休眠。"""
+    """守护 worker 主循环：领取 → 执行 → 落结果；空队列休眠。
+
+    空队列分支里**定期**做一次「超租约回收」（`reset_running_to_pending(stale_only=True)`）：
+    旧实现只在 store 初始化时收一次，色一崩那条 running 就再没人回收了 —— 蓝绿发版会**换色**，
+    这正好是最需要它可靠的时候。
+    """
     store: EvalQueueStore | None = None
+    last_reclaim = 0.0
     while not _STOP.is_set():
         # 评估开关关闭 → 不领取（pending 保留，重开后续跑），也不初始化 store
         if not judge_enabled():
@@ -321,12 +387,19 @@ def _drain_loop() -> None:
             try:
                 store = _get_store()
                 store.reset_running_to_pending()
+                last_reclaim = time.monotonic()
             except Exception as e:  # noqa: BLE001
                 _logger.warning("[eval_queue] 初始化 store 失败，重试中: %s", e)
                 time.sleep(_RETRY_SLEEP)
                 continue
         batch = store.claim()
         if not batch:
+            if time.monotonic() - last_reclaim >= _RECLAIM_INTERVAL:
+                try:
+                    store.reset_running_to_pending()   # 默认 stale_only=True
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning("[eval_queue] 超租约回收失败: %s", e)
+                last_reclaim = time.monotonic()
             time.sleep(_IDLE_SLEEP)
             continue
         for row in batch:
@@ -341,16 +414,18 @@ def _drain_loop() -> None:
                 store.finish(row["id"], ok=False, error=str(e))
 
 
-def drain_all(runner: Callable | None = None) -> dict:
+def drain_all(runner: Callable | None = None, *, stale_only: bool = True) -> dict:
     """同步清空 pending（重启补评 / --replay / 测试用）。返回 {processed, failed}。
 
     与守护 worker 相同的领取/执行/收尾语义；单次调用直到无 pending 为止。
+    `stale_only=False`（`--replay --force`）才会把**别的进程正在跑的** running 行也复位 ——
+    两色并存时那是重复烧 token，只在明确要「全部重跑」时才用。
     """
     global _RUNNER
     if runner is not None:
         _RUNNER = runner
     store = _get_store()
-    store.reset_running_to_pending()
+    store.reset_running_to_pending(stale_only=stale_only)
     processed = failed = 0
     while True:
         batch = store.claim()
@@ -375,6 +450,9 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--status", action="store_true", help="打印各 state 计数")
     ap.add_argument("--replay", action="store_true",
                     help="同步清空 pending（崩溃补评；会触发真实 LLM-judge）")
+    ap.add_argument("--force", action="store_true",
+                    help="配合 --replay：**全量**复位 running（含别的进程正在跑的行）。"
+                         "默认只回收超租约的；两色并存时 --force 会让同一条 judge 被重复打分")
     args = ap.parse_args(argv)
     if args.status:
         print("eval_queue state counts:", _get_store().stats())
@@ -382,7 +460,7 @@ def _main(argv: list[str] | None = None) -> int:
     if args.replay:
         from agent.eval.evaluators import _execute_judge_task  # 惰性，防 import 环
 
-        res = drain_all(runner=_execute_judge_task)
+        res = drain_all(runner=_execute_judge_task, stale_only=not args.force)
         print("replay done:", res)
         return 0
     ap.print_help()

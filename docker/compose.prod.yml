@@ -23,15 +23,21 @@
 #  4. 平台库 `nl2sql_platform` 与正文库 `nl2sql_checkpoint` **分库**：`POSTGRES_DB`
 #     只会建第一个库，第二个必须手工 `CREATE DATABASE` 一次（写进手册）。
 #
-# ── 阶段 2 才会有的东西（此处不做，留位）──────────────────────────────
-#  · 两色 `langgraph-api` / `langgraph-api-b`，各指自己的 `LANGGRAPH_API_URL`，
-#    **只有当前色发布宿主端口**；空闲色 `N_JOBS_PER_WORKER=0`（否则新代码一启动
-#    就从共享队列领 run 上活）。
-#  · ⚠️ **迁移自动化**：官方 runtime 开机自动跑 `/storage/migrations`（阶段 0 实测：
-#    61 条 schema_migrations）。阶段 1 单色、且旧实例已停 ⇒ 自动迁移正是我们要的；
-#    但**阶段 2 必须把它改成受控步骤**（杠杆 `DB_MIGRATION_BY_CORE_API=false` 为默认，
-#    见 docs/prod环境/蓝绿发布_阶段0实测.md §五-1），否则新色一开机就改共享库
-#    schema，而旧色还在跑。
+# ── 阶段 2 已经在做（2026-10-08）：第二色与迁移的处置 ────────────────────
+#  · 第二色 `langgraph-api-b` **不写在本文件里**，而是 `docker/compose.colorB.yml`
+#    这个 overlay（只新增服务名 ⇒ 本文件的服务 config-hash 在数学上不可能变）。
+#    发版脚本是 `docs/prod环境/release-backend-bluegreen.ps1`，形态见
+#    `docs/prod环境/蓝绿发布_阶段2发版手册.md`。
+#  · ⚠️ **迁移自动化：决定「不改自动迁移，改约束」**。官方 runtime 开机自动跑
+#    `/storage/migrations`（阶段 0 实测 61 条 schema_migrations）；第二色一开机就会
+#    把它带的迁移打到共享生产库，而旧色还在跑。
+#    ⇒ 定下来的约束是 **expand-contract：迁移只能 add-only**（新表/新列/新索引，
+#      不删不改不重命名），而不是把自动迁移关掉走人工受控步骤。
+#      理由：受控步骤需要一个「迁移没跑完就不许接流」的额外状态机，而 add-only 让
+#      「迁移已跑、旧色还没停」这个中间态**本来就是可用的**（本仓自建表惯例
+#      `IF NOT EXISTS` + 逐列 `try` 已满足）。
+#    ⇒ 破坏性变更（删列/改类型）走不了蓝绿，用老脚本 `release-backend.ps1` 的停机窗口。
+#      （阶段 0 实测里的 `DB_MIGRATION_BY_CORE_API=false` 杠杆仍然有效，只是**不用**它。）
 #
 # ── 回滚 ──────────────────────────────────────────────────────────────
 #  把 `LANGGRAPH_RUNTIME_EDITION` / `DATABASE_URI` / `REDIS_URI` / `MIGRATIONS_PATH`
