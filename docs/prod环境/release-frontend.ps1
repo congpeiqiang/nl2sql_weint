@@ -118,7 +118,14 @@ Write-Host "== 5/6 服务器拼接 + 校验 BUILD_ID + 重建镜像 + 三步重�
 # `KeyError: 'ContainerConfig'`（见 release-backend.ps1 同批注释）。最轻的后果是
 # **一次前端发版顺手把后端重建一遍**（240s 排空 + ~26s 冷启），最重的就是 10-05 那次
 # 把 postgres 打死的形态。前端发版只该动前端。
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && rm -f ${tarFile}.part* && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend > /tmp/fe_build.log 2>&1; rc=`$?; tail -3 /tmp/fe_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi; docker-compose stop frontend; docker-compose rm -f frontend; docker-compose up -d --no-deps frontend"
+# ⚠️ 2026-10-08 追加：解压**前先 `rm -rf .next`**。tar 是"解压覆盖"语义，不删旧文件 ——
+# 上一版的 `static/chunks/*.js` 会一直留在服务器目录里被带进镜像。后果不是"占点磁盘"，
+# 而是**陈旧 HTML 引用旧 chunk 时仍然 404 不了**：浏览器/中间缓存给你旧首页，应用就静默
+# 跑旧代码，用户看到的仍是老 UI（10-08 排查"发了版却没生效"时实测：容器里同时存在
+# 新旧两个 chunk，旧的已无人引用但依然可被旧 HTML 命中）。
+# 只清 `.next`（纯构建产物）：`public/`、`package.json`、`yarn.lock`、`next.config.ts`、
+# `Dockerfile` 都不动 —— 后两个还是上面 scp 上来的明文版，绝不能被 tar 覆盖。
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && rm -f ${tarFile}.part* && rm -rf .next && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend > /tmp/fe_build.log 2>&1; rc=`$?; tail -3 /tmp/fe_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi; docker-compose stop frontend; docker-compose rm -f frontend; docker-compose up -d --no-deps frontend"
 if ($LASTEXITCODE -ne 0) { throw "前端镜像构建失败（完整日志：服务器 /tmp/fe_build.log）" }
 
 Write-Host "== 6/6 验证 ==" -ForegroundColor Cyan
