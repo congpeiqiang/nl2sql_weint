@@ -84,13 +84,19 @@ vim .env.prod
 ```bash
 cd /opt/nl2sql
 sudo docker compose build langgraph-api
-sudo docker compose up -d langgraph-api
+sudo docker compose up -d langgraph-api        # 首次部署：依赖还没建，这里**不能**加 --no-deps
 
 # 验证
 sleep 30
 curl http://localhost:2026/ok
 sudo docker compose logs langgraph-api | tail -20
 ```
+
+> **首次之外，一律 `--no-deps`**：`up -d <svc>` 会把 `depends_on` 的依赖一并纳入
+> 收敛计划。首次部署依赖尚不存在、正好需要它一起建；**已经在跑之后再裸 `up -d`**，
+> 就会去重建依赖 —— 在 `docker-compose` **v1** 的主机（如 64 生产）上这会直接抛
+> `KeyError: 'ContainerConfig'` 并且**是停掉之后才崩**（2026-10-05：postgres 因此停摆 55 分钟）。
+> 见 memory `compose-v1-up-existing-container-keyerror`。
 
 ### 2.6 开放端口（阿里云安全组）
 
@@ -155,7 +161,7 @@ cp /opt/nl2sql/docker/frontend/Dockerfile /opt/harness-deep-agents-ui/Dockerfile
 
 # 3. 构建并启动前端 + nginx
 cd /opt/nl2sql
-sudo docker compose up -d frontend nginx
+sudo docker compose up -d frontend nginx       # 首次创建；之后单独动前端用 `--no-deps`（见 §4.4）
 
 # 4. 验证
 curl http://localhost:3000          # 前端
@@ -180,7 +186,7 @@ ssh ecs-user@8.163.4.42
 # 3. 拉取 + 重建 + 重启（一条命令搞定）
 cd /opt/nl2sql
 git pull origin only_wrenai
-sudo docker compose up -d --build langgraph-api
+sudo docker compose up -d --build --no-deps langgraph-api
 ```
 
 > `--build` 会利用 Docker 缓存，只重建有改动的层。
@@ -210,7 +216,7 @@ git pull
 cp /opt/nl2sql/docker/frontend/Dockerfile ./Dockerfile
 
 cd /opt/nl2sql
-sudo docker compose up -d --build frontend
+sudo docker compose up -d --build --no-deps frontend
 ```
 
 ### 4.3 仅重启（不重建镜像）
@@ -231,11 +237,15 @@ sudo docker compose restart
 ```bash
 cd /opt/nl2sql
 vim .env.prod
-# 重启生效（不需要重建镜像）
-sudo docker compose up -d langgraph-api
+# 重建容器生效（不需要重建镜像）；`restart` 不重读 env，必须走 up -d
+sudo docker compose up -d --no-deps langgraph-api
 ```
 
-> `docker compose up -d` 会检测配置变化并重启容器。
+> `docker compose up -d` 会检测配置变化并重建容器。
+> ⚠️ **必须带 `--no-deps`**：不加会把 `depends_on` 的依赖也纳入收敛计划 ——
+> 轻则多重建一次 postgres，重则在 compose **v1** 主机上抛 `ContainerConfig`
+> KeyError 并把依赖停掉（2026-10-05 事故）。「只改一个 env」正是最容易漏 `--no-deps`
+> 的场景，因为看起来最轻量。
 
 ---
 
@@ -274,7 +284,7 @@ git log --oneline -10
 git checkout <commit-hash>
 
 # 重建并启动
-sudo docker compose up -d --build langgraph-api
+sudo docker compose up -d --build --no-deps langgraph-api
 ```
 
 ---

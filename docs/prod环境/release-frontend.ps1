@@ -112,7 +112,13 @@ Write-Host "== 5/6 服务器拼接 + 校验 BUILD_ID + 重建镜像 + 三步重�
 # 新前端容器的 IP 它自己会在 ≤10s 内发现，无需 reload 或重建。
 # 旧写法 `up -d frontend nginx` 是历史遗留：nginx 配置没变时 compose 只会打
 # "up-to-date" 不重建它，看似无害，但一旦真被重建就是**多引入一次 nginx 停机**。
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && rm -f ${tarFile}.part* && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend > /tmp/fe_build.log 2>&1; rc=`$?; tail -3 /tmp/fe_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi; docker-compose stop frontend; docker-compose rm -f frontend; docker-compose up -d frontend"
+# ⚠️ 2026-10-05 追加：`--no-deps` 同样必需。`frontend` 的 `depends_on: [langgraph-api]`
+# ⇒ 裸 `up -d frontend` 会把 **langgraph-api** 一并纳入收敛计划，compose v1 在
+# 「依赖的 config-hash 与 compose 文件不一致」时会去 recreate 它 ⇒ 撞
+# `KeyError: 'ContainerConfig'`（见 release-backend.ps1 同批注释）。最轻的后果是
+# **一次前端发版顺手把后端重建一遍**（240s 排空 + ~26s 冷启），最重的就是 10-05 那次
+# 把 postgres 打死的形态。前端发版只该动前端。
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && rm -f ${tarFile}.part* && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend > /tmp/fe_build.log 2>&1; rc=`$?; tail -3 /tmp/fe_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi; docker-compose stop frontend; docker-compose rm -f frontend; docker-compose up -d --no-deps frontend"
 if ($LASTEXITCODE -ne 0) { throw "前端镜像构建失败（完整日志：服务器 /tmp/fe_build.log）" }
 
 Write-Host "== 6/6 验证 ==" -ForegroundColor Cyan

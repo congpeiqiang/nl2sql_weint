@@ -79,7 +79,10 @@ docker-compose logs -f langgraph-api                # 后端日志
 docker-compose logs -f frontend                     # 前端日志
 docker-compose restart langgraph-api                # 重启后端
 # 注意：docker-compose v1 重建容器（up -d 改配置）会报 ContainerConfig KeyError，
-# 需用：stop → rm -f → up -d 三步
+# 需用：stop → rm -f → up -d --no-deps 三步
+# ⚠️ --no-deps 不是可选项：裸 `up -d <svc>` 会把 depends_on 的依赖一起收敛，
+#    依赖的 config-hash 陈旧时 compose 会去 recreate 依赖并撞同一个 KeyError
+#    （2026-10-05：裸 up -d langgraph-api 把 postgres 打死、停摆 55 分钟）。
 curl http://127.0.0.1:2026/ok                       # 健康检查
 docker exec nl2sql-app_postgres_1 psql -U nl2sql -d nl2sql_checkpoint -c "\dt"
 ```

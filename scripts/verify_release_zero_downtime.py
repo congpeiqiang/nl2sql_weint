@@ -19,8 +19,11 @@
   ① `docker/nginx.conf`：无 `upstream` 块、`resolver` 在 `http` 块、三个 `proxy_pass`
      全是**变量形式**、`proxy_redirect off` 在位；附**负对照**证明断言非恒真。
   ② `release-backend.ps1`：排空在 `stop` **之前**、探针**经 nginx**、不再盲等 75s、
-     **永不触碰 nginx 容器**。
-  ③ `release-frontend.ps1`：只 `up -d frontend`、不重建 nginx、两发经 nginx 的探针齐全。
+     **永不触碰 nginx 容器**、三步重启**带 `--no-deps`**（裸 `up -d` 会连 `depends_on`
+     的 postgres/redis 一起收敛 —— 2026-10-05 事故，见 memory
+     `compose-v1-up-existing-container-keyerror`）。
+  ③ `release-frontend.ps1`：只 `up -d --no-deps frontend`（`frontend` 的依赖是
+     langgraph-api，裸 `up -d` = 顺手重建后端）、不重建 nginx、两发经 nginx 的探针齐全。
   ④ 两个 `.ps1` 过 PowerShell 解析闸 —— 双引号串里 `"` 的转义符是**反引号**，`\"` 会
      提前闭合字符串（2026-09-26 这条坑让 release 脚本第 5 步整段没跑过，见 memory
      `powershell-doublequote-escape-release-step5`）。
@@ -162,6 +165,10 @@ def t2_backend_script() -> None:
           "旧镜像/端点不可达时只告警不拦发版（best-effort，`stop` 的信号式排空仍兜底）")
     check("docker-compose rm -f langgraph-api" in ps,
           "保留 `rm -f`（compose v1 对已存在容器直接 `up -d` 会 KeyError 崩）")
+    check("docker-compose up -d --no-deps langgraph-api" in ps,
+          "三步重启带 `--no-deps` —— 裸 `up -d langgraph-api` 会连 `depends_on` 的 "
+          "postgres/redis 一起纳入收敛计划，依赖 config-hash 陈旧时 compose v1 会去 recreate 它"
+          "并撞 `KeyError: 'ContainerConfig'`（2026-10-05：postgres 因此被打死、停摆 55 分钟）")
 
     check("127.0.0.1:8080/ok" in ps,
           "健康探针**经 nginx**（同时证明冷启完成 + nginx 已解析到新容器 —— 变量 proxy_pass 的端到端验收）")
@@ -178,7 +185,10 @@ def t3_frontend_script() -> None:
     section("③ release-frontend.ps1：不重建 nginx + 两发经 nginx 的探针")
     ps = _strip_comments(_read(_FRONTEND_PS))
 
-    check("docker-compose up -d frontend" in ps, "只 `up -d frontend`")
+    check("docker-compose up -d --no-deps frontend" in ps,
+          "只 `up -d --no-deps frontend` —— 裸 `up -d frontend` 会把 `depends_on` 的 "
+          "langgraph-api 一起纳入收敛计划（compose v1 上 = 一次前端发版顺手重建后端，"
+          "依赖 hash 陈旧时还会撞 `ContainerConfig` 崩，见 2026-10-05 事故）")
     check("up -d frontend nginx" not in ps,
           "**不再** `up -d frontend nginx` —— 配置没变时 compose 只打 up-to-date，一旦真被重建"
           "就是多引入一次 nginx 停机")

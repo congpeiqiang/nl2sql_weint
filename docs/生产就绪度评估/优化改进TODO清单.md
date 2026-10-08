@@ -541,9 +541,15 @@ Python 侧无任何写入点 → 「带 XFF」⟺「经过外部入口」。客�
    本次 `docker-compose up -d nginx` 报 `KeyError: 'ContainerConfig'`，nginx 先被 stop + 改名成
    `8464a7bba947_nl2sql-app_nginx_1` 然后 compose 崩溃 → **8080 直接中断（http_code=000）**。
    - 立即恢复：`docker start 8464a7bba947_nl2sql-app_nginx_1`
-   - 正确姿势：**先 `stop` + `rm -f` 再 `up -d`**（发版脚本对 langgraph-api 正是这么做的，所以它没事）；
-     或至少加 `--no-deps` 避免 compose 去 inspect 依赖容器。
+   - 正确姿势：**先 `stop` + `rm -f` 再 `up -d --no-deps`**（发版脚本对 langgraph-api 正是这么做的，所以它没事）。
    - **这条对发版脚本同样适用**：任何「对已存在容器直接 up -d」的步骤都会踩。
+   - **2026-10-05 补充（同源但更狠）**：`up -d <svc>` 会把 `depends_on` 的依赖**一并纳入收敛
+     计划** —— `--no-deps` 不是「避免 inspect」这种优化，而是**必需**：那次裸跑
+     `docker-compose up -d langgraph-api` 时，compose 判定依赖 `postgres` 需要 recreate
+     （postgres 容器携带的 config-hash 还是更早那份 compose 留下的，与本次改动无关）⇒ 撞同一个
+     `KeyError: 'ContainerConfig'` ⇒ **postgres 被打死、平台存储停摆 55 分钟**。
+     `release-backend.ps1` / `release-frontend.ps1` 都已补上 `--no-deps`（前端脚本尤其要，
+     因为 `frontend depends_on langgraph-api`：裸 `up -d frontend` = 一次前端发版顺手重建后端）。
 
 2. **从 Git Bash 里启动 PowerShell 跑发版脚本，`tar` 会解析到 Git 的 GNU tar**，
    报 `Cannot connect to D: resolve failed`（GNU tar 把 `D:` 当远程主机名）。

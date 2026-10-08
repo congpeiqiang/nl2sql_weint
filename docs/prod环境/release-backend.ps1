@@ -119,8 +119,16 @@ Write-Host "== 4/5 先协作式排空，再三步重启（v1 compose 需 stop/rm
 $ct = "nl2sql-app_langgraph-api_1"
 ssh @SshOpt "${SshUser}@${Server}" "docker exec $ct sh -lc 'test -f /app/scripts/ops_drain.py' 2>/dev/null && docker exec $ct python /app/scripts/ops_drain.py --budget 180 || echo 'SKIP ops_drain（旧镜像或不可达）—— 依赖 stop 时的信号式排空'"
 
+# ⚠️ 铁律：这里的 `up -d` 必须带 `--no-deps`（2026-10-05 事故）。compose v1 的
+# `up -d <svc>` 会把 `depends_on` 的依赖**一起纳入收敛计划**；postgres 容器里的
+# config-hash 与当前 compose 文件不一致（历史遗留，早于本次改动）⇒ compose 判定要
+# recreate 它 ⇒ 撞上 compose v1 + docker 29 的 `KeyError: 'ContainerConfig'`
+# （`compose/service.py:1579 get_container_data_volumes`，重建路径上镜像 inspect 没有
+# 该键）⇒ 当场把 postgres 打死、平台存储停摆 55 分钟。`--no-deps` 让本步永不触碰依赖。
+# 依赖（postgres/redis）带 `restart: unless-stopped`，正常发版时必在跑；若真被停掉，
+# 下面的 5/5 健康轮询会立刻失败，而不是被这里静默带过。
 $tDown = Get-Date
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && docker-compose stop langgraph-api && docker-compose rm -f langgraph-api && docker-compose up -d langgraph-api"
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && docker-compose stop langgraph-api && docker-compose rm -f langgraph-api && docker-compose up -d --no-deps langgraph-api"
 
 Write-Host "== 5/5 健康轮询（经 nginx 8080）==" -ForegroundColor Cyan
 # 单次 ssh 里跑轮询循环（别再每 2 秒开一次 ssh）。探的是**经 nginx** 的 /ok：

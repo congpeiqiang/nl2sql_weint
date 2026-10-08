@@ -22,8 +22,12 @@ postgres（nl2sql_checkpoint）127.0.0.1:5435
 | nl2sql-app_frontend_1 | node:20-alpine（产物化） | 内部 3000 | 无 |
 | nl2sql-app_langgraph-api_1 | python:3.13-slim | 2026 | workspace（db_config.json/语义库） |
 | nl2sql-app_postgres_1 | postgres:14（复用已有镜像） | 127.0.0.1:5435 | nl2sql_pg_data |
+| nl2sql-app_redis_1 | redis:7（阶段 1 起） | 不发布（内网） | nl2sql_redis_data |
 
-> **docker-compose v1 铁律**：容器已有同名时 `up -d` 会报 `KeyError: 'ContainerConfig'`（v1 与新版 Docker API 不兼容）。**凡涉及重建/改配置，一律三步**：`docker-compose stop <svc>` → `docker-compose rm -f <svc>` → `docker-compose up -d <svc>`。
+> **docker-compose v1 铁律两条**：
+> 1. 容器已有同名时 `up -d` 会报 `KeyError: 'ContainerConfig'`（v1 与新版 Docker API 不兼容）。**凡涉及重建/改配置，一律三步**：`docker-compose stop <svc>` → `docker-compose rm -f <svc>` → `docker-compose up -d <svc>`。
+> 2. ⚠️ **`up -d` 一律带 `--no-deps`**（2026-10-05 事故）：`up -d <svc>` 会把 `depends_on` 的依赖**一起纳入收敛计划**，服务自己的 `stop/rm` 救不了依赖 —— 依赖的 config-hash 若与 compose 文件不一致（历史遗留就会），compose 会去 recreate 它并撞上面那条 `ContainerConfig`。**裸 `up -d langgraph-api` 曾把 postgres 打死、停摆 55 分钟**（见 `docs/prod环境/蓝绿发布_阶段1切库手册.md` 文末复盘）。本手册所有命令均已带 `--no-deps`。
+> 3. 依赖的**首次**创建是例外：那时依赖还不存在，`--no-deps` 会让应用起在没有依赖的环境里（见「一、首次部署」第 4 步）。
 
 ---
 
@@ -94,10 +98,15 @@ docker-compose build langgraph-api     # 后端（uv sync，5-15 分钟）
 docker-compose build frontend          # 前端（yarn install + 拷贝 .next）
 ```
 
-### 4. 启动（三步法）
+### 4. 启动（依赖在前，逐个起）
 ```bash
-docker-compose up -d postgres nginx
-docker-compose up -d langgraph-api frontend   # 若报 ContainerConfig → stop/rm -f 后 up
+docker-compose up -d postgres redis            # ① 基础设施（首次无依赖可收敛，裸 up -d 是安全的）
+docker-compose up -d --no-deps langgraph-api   # ② 后端（此时 postgres/redis 已在跑）
+docker-compose up -d --no-deps frontend        # ③ 前端（依赖 langgraph-api）
+docker-compose up -d --no-deps nginx           # ④ 入口
+# ⚠️ 为什么从 ② 起都要 --no-deps：见文件头「v1 铁律」第 2 条。
+#    首次部署时依赖已由 ① 建好，所以 --no-deps 不会让应用起在空依赖上；
+#    若哪天跳过了 ①，先补 `docker-compose up -d postgres redis` 再走 ②~④。
 ```
 
 ### 5. checkpoint 表（代码已自动建表，无需手动初始化）
@@ -202,7 +211,7 @@ docker-compose build langgraph-api
 # P2-1 优雅停机：先排空（在跑的 run 跑完；新提交拿明确 503），再停
 docker exec nl2sql-app_langgraph-api_1 python /app/scripts/ops_drain.py --budget 210
 docker-compose stop -t 240 langgraph-api && docker-compose rm -f langgraph-api
-docker-compose up -d langgraph-api
+docker-compose up -d --no-deps langgraph-api     # --no-deps 必需，见文件头「v1 铁律」第 2 条
 sleep 60 && curl http://127.0.0.1:2026/ok
 docker logs nl2sql-app_langgraph-api_1 2>&1 | grep -E "MCP 工具加载完成|预检通过|error|\[drain\]"
 # 期望：✅ MCP [mcp-server-echarts]: 正常 / ✅ [sub] dbmcp: N tools loaded / ✅ 预检通过
@@ -283,7 +292,7 @@ docker cp skills nl2sql-app_langgraph-api_1:/app/data/shared/skills.new
 docker cp memory nl2sql-app_langgraph-api_1:/app/data/shared/memory.new
 docker exec nl2sql-app_langgraph-api_1 bash -c 'set -e; cd /app/data/shared; tar -czf /app/data/shared.bak-$(date +%Y%m%d-%H%M%S).tgz skills memory; rm -rf skills.old memory.old; mv skills skills.old; mv memory memory.old; mv skills.new skills; mv memory.new memory; rm -rf skills.old memory.old; find skills -name SKILL.md | wc -l'
 # 换 skills 不用重启；换 memory 要重启：
-# docker-compose stop -t 240 langgraph-api && docker-compose rm -f langgraph-api && docker-compose up -d langgraph-api
+# docker-compose stop -t 240 langgraph-api && docker-compose rm -f langgraph-api && docker-compose up -d --no-deps langgraph-api
 ```
 
 > 2026-09-24 手工执行过一次 skills 同步（`chart-saver` 2 个文件漂移，备份 `skills.bak-20260924-130243.tgz`，
@@ -524,7 +533,7 @@ cd /home/weint/apps/nl2sql/nl2sql-app/frontend
 tar -xf frontend_artifacts.tar && rm frontend_artifacts.tar
 cat .next/BUILD_ID          # 确认是新构建 ID
 cd .. && docker-compose build frontend
-docker-compose stop frontend && docker-compose rm -f frontend && docker-compose up -d frontend
+docker-compose stop frontend && docker-compose rm -f frontend && docker-compose up -d --no-deps frontend
 curl http://127.0.0.1:8080/   # 200 即更新完成
 ```
 
@@ -532,7 +541,7 @@ curl http://127.0.0.1:8080/   # 200 即更新完成
 ```bash
 cd /home/weint/apps/nl2sql/nl2sql-app
 vi .env.prod   # 改配置
-docker-compose stop langgraph-api && docker-compose rm -f langgraph-api && docker-compose up -d langgraph-api
+docker-compose stop langgraph-api && docker-compose rm -f langgraph-api && docker-compose up -d --no-deps langgraph-api
 # 无需重建镜像；前端若用到 NEXT_PUBLIC_* 则需重新构建前端
 ```
 > **AGENT_DATA_ROOT（外部数据根）**：容器内固定 `/app/data`，须与 `docker-compose.yml` 的 `agent_data:/app/data` 挂载一致。
@@ -646,7 +655,7 @@ docker-compose stop langgraph-api && docker-compose rm -f langgraph-api
 # 旧 workspace 卷内容 → 新 agent_data 卷的 workspace/ 子目录
 docker run --rm -v nl2sql-app_workspace:/old -v nl2sql-app_agent_data:/new \
   alpine sh -c "mkdir -p /new/workspace && cp -a /old/. /new/workspace/"
-docker-compose up -d langgraph-api
+docker-compose up -d --no-deps langgraph-api
 ```
 > 新部署（空卷）无需此步：`/app/data/workspace` 由后端**启动时的 `WorkspaceManager.__init__`** 建出骨架
 > （`report/ tmp/ nl2sql_process_data/ large_tool_results/ checkpoint/ feedback/` + 空 `db_config.json`）。
@@ -682,7 +691,8 @@ docker exec nl2sql-app_langgraph-api_1 grep sqlite-paths /app/data/logs/agent-se
 | 容器无限重启 | 后端：MCP 工具为空（未配置库）/ 前端：next.config.ts 加密 | 看日志；配 db_config.json；换明文 next.config.ts |
 | `未配置任何数据库` | dbmcp 子进程缺 env 或 store 为空 | 确认 mcp_tool.py 有 `**os.environ` 补丁；用 UI/store 配库 |
 | `relation "checkpoints" does not exist` | checkpoint 表未初始化（新部署空库） | 跑一次 `AsyncPostgresSaver.setup()` 建表（见首次部署第 5 节） |
-| `ContainerConfig KeyError` | docker-compose v1 重建 bug | stop → rm -f → up -d 三步 |
+| `ContainerConfig KeyError` | docker-compose v1 重建 bug | ① `stop → rm -f → up -d` 三步；② `up -d` 必须带 `--no-deps`，否则报错的可能是**依赖**（如 postgres）而非目标服务 |
+| 某服务被「顺手」重建/打死（自己没动它） | 裸 `up -d <svc>` 收敛了它的 `depends_on` 依赖 | 同上：`up -d --no-deps <svc>`；依赖的 hash 陈旧与否与「你这次改没改它」无关 |
 | `mcp-server-chart FAILED` / `mcp-echarts: No such file` | 图表 MCP 不可用 | 镜像需全局安装 mcp-echarts（Dockerfile 已加 `npm install -g mcp-echarts`）；代码仅保留 echarts（semiotic 已移除） |
 | Langfuse 404 prompt | Prompt 未在 Langfuse 创建 | UI 创建（label=production）或忽略（回退本地） |
 | 容器内 `ls` 中文文件名显示 `$'\345\277\220'` octal 转义 | 容器 shell 无 UTF-8 locale（镜像未带 LANG/LC_ALL=C.UTF-8，或容器未重建） | Dockerfile 已 `ENV LANG/LC_ALL=C.UTF-8`（2026-08-31）；重新发布后端（`release-backend.ps1` 重建镜像 + 三步重启）生效。验证：`docker exec nl2sql-app_langgraph-api_1 bash -c 'locale | grep LANG; ls /app/data/workspace/'`。**注意：只改 compose 的 `environment` 也必须重建容器（restart 不重新读 env）** |
