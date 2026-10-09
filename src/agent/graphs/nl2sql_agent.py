@@ -27,6 +27,7 @@ from agent.middlewares.langfuse_span import LangfuseSpanMiddleware
 from agent.middlewares.message_slimmer import MessageSlimmerMiddleware
 from agent.middlewares.knowledge_trim import KnowledgeTrimMiddleware
 from agent.middlewares.query_result_offload import QueryResultOffloadMiddleware
+from agent.middlewares.failure_circuit import FailureCircuitMiddleware
 from agent.middlewares.write_todos import WriteTodosProtocolMiddleware
 from agent.middlewares.progress_boundary import ProgressBoundaryMiddleware
 from agent.middlewares.caliber_gate import CaliberGateMiddleware
@@ -200,6 +201,24 @@ def dynamic_prompt(request: ModelRequest) -> str:
     except Exception:  # noqa: BLE001  路由注入失败不影响正常流程
         pass
 
+    # ── 工具失败收手铁律（**通用**，不分建没建模）──────────────────
+    # 2026-10-09：原来这句只在「未在语义层建模」分支里（见上面 else 分支）—— 已建模的库
+    # 反而没有护栏。trace ec484c693f 里 witops 是**已建模**库，用户把 `do_bug` 从语义库
+    # 删掉后，模型拿到 `table 'wren.public.do_bug' not found` 仍在 dry_run/run_sql/
+    # query_cube/dry_plan 之间改了 **18 次**、首败→末败 **406.7s**（整个 turn 才 433.9s），
+    # 最终因 402 余额耗尽收场，用户什么都没拿到。现提升为**通用**条款并补「第二次仍失败
+    # 必须收手」。与 FailureCircuitMiddleware 互补：提示词先劝一次，中间件按计数兜底。
+    prompt += (
+        "\n\n## 工具失败收手（重要）\n"
+        "工具报「对象不存在」（`table '…' not found` / `Unknown column '…'`）或明确的权限拒绝时：\n"
+        "- **换 SQL 写法、换引号、换参数都不会让不存在的对象出现**；改叫 dry_run / dry_plan / "
+        "run_sql / query_cube 也只是同一个根因换一种撞法。\n"
+        "- 先核实：用 `list_models()` / `get_mdl()` 看**真实**对象名，不要凭知识库注释或记忆里"
+        "出现过的名字猜（已停用的对象不在语义库里）。\n"
+        "- **同一个对象第二次仍然失败就必须收手**：要么换成确实存在的对象，要么**如实告诉用户"
+        "该数据当前查不到**。不要拿它试第 3 次、第 4 次。\n"
+    )
+
     # ── S3-1 口径护栏：注入权威默认口径（命中敏感术语才注入，未命中零干预）──
     try:
         from agent.settings.caliber_spec import caliber_constraint_text
@@ -281,6 +300,20 @@ _middleware = [
     # process_data dump 吃原始全量 payload，只有进 state 的消息被瘦身成
     # {row_count, rows:[前20样例], full_result_file}（与 main_agent MessageSlimmer 同构）。
     QueryResultOffloadMiddleware(),
+    # 同类失败熔断（2026-10-09）：同一「对象不存在」错误在本 run 内反复出现时，把
+    # ToolMessage 改写为可收手的信息并按次升级，第 3 次起硬闸拒绝再引用该对象。
+    # trace ec484c693f 实证：`table 'wren.public.do_bug' not found` 被 dry_run/run_sql/
+    # query_cube/dry_plan 各撞一遍共 **18 次**，首败→末败 **406.7s**（整个 turn 才 433.9s），
+    # 失败调用自身仅 33.5s ⇒ 其余全是模型围着同一个错误转圈（那轮以 402 余额耗尽收场，
+    # 用户没拿到答案）。三层旧护栏全漏：plan 期护栏只在「未建模」分支注入、Slimmer 去重
+    # 只认逐字节相同（微调 SQL 就绕过）且只省 context 不省调用、全仓无失败计数。
+    # 位置讲究（同 MessageSlimmer / QueryResultOffload 那两条注释的同一套口径）：
+    # ① 在 MessageSlimmer **内层**（index 更大）⇒ 本层后处理先跑，Slimmer 的体积判据/
+    #    md5 去重作用在**改写后**进 state 的那份文本上（否则两套账）；
+    # ② 在 LangfuseSpan **外层** ⇒ 内层后处理先跑，span output / LLM-judge /
+    #    process_data dump 仍吃**原始**报错（观测面不撒谎），status="error" 也得以保留。
+    # `NL2SQL_FAIL_CIRCUIT=off` 一键回退；阈值见其模块 docstring。
+    FailureCircuitMiddleware(),
     # M2 ② 结构化层：关键工具边界包 skill 级 span（skill 名作 metadata + vfs_path 定位）
     LangfuseSpanMiddleware(),
     dynamic_prompt,
