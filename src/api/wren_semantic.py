@@ -1613,6 +1613,52 @@ def _read_existing_models(project: Path) -> dict[str, dict]:
     return out
 
 
+def _declared_model_name(meta: Path) -> str | None:
+    """metadata.yml 里顶层 `name:` = 这个模型**对外声明的名字**（`_read_existing_models`
+    就是用它做键的）。目录名通常与它相等（真实库 48/48），但架构上不保证 ——
+    调用方按声明名点名删除时，得两个名字都认，否则就是静默 no-op。
+    """
+    import yaml as _yaml
+
+    try:
+        data = _yaml.safe_load(meta.read_text(encoding="utf-8")) or {}
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[wren_semantic] 读取 %s 失败: %s", meta, e)
+        return None
+    return str(data["name"]) if isinstance(data, dict) and data.get("name") else None
+
+
+# metadata.yml 里「一个列块的起始行」的**唯一判据**。
+# ⚠️ `_set_column_hidden`（改哪一列的开关）与 `_file_column_names`（文件里到底有哪些列）
+# 必须用它同一条：一旦分叉，「先跳过、再手术」两步就会静默错位 —— 要么跳过了其实能改的
+# 列（用户的勾选被无声吞掉），要么没跳过却改不动（又回到 409）。
+_COLUMN_NAME_RE = re.compile(r"^(\s*)-\s+name:\s*(.*?)\s*$")
+
+
+def _file_column_names(text: str) -> set[str]:
+    """metadata.yml 文本里出现的全部列名。
+
+    这是「这个模型**包含**哪些列」的权威：模型的列集合由文件决定，不由数据库决定 ——
+    DDL 后加了列而语义库没重建时，库里会比文件多出列（见 `_apply_model_selection`）。
+    """
+    out: set[str] = set()
+    for ln in text.splitlines():
+        m = _COLUMN_NAME_RE.match(ln)
+        if m:
+            out.add(m.group(2).strip("'\""))
+    return out
+
+
+def _join_preview(names: list[str], limit: int = 5) -> str:
+    """把一批列名渲染成日志/提示里的一小段：超长就截断并带上总数。
+
+    截断而不是全列出来，是因为这行要进前端提示框；但只写「等 N 个」用户没法对账，
+    所以两边都留：前 limit 个 + 总数。
+    """
+    shown = "、".join(names[:limit])
+    return shown if len(names) <= limit else f"{shown}…（共 {len(names)} 列）"
+
+
 def _set_column_hidden(text: str, col: str, hidden: bool) -> str:
     """在 metadata.yml **文本**里把某一列的隐藏开关打开/关掉。
 
@@ -1631,7 +1677,7 @@ def _set_column_hidden(text: str, col: str, hidden: bool) -> str:
     start = None
     indent = ""
     for i, ln in enumerate(lines):
-        m = re.match(r"^(\s*)-\s+name:\s*(.*?)\s*$", ln)
+        m = _COLUMN_NAME_RE.match(ln)
         if m and m.group(2).strip("'\"") == col:
             if start is not None:
                 raise ValueError(f"列 '{col}' 在文件中出现多次，无法确定要改哪一处")
@@ -1810,13 +1856,21 @@ def _apply_model_selection(
     include_relationships: bool,
     patch_existing: bool,
     prune: bool,
-) -> tuple[int, int, int]:
-    """按选择写 `models/` 与 `relationships.yml`。返回 (生成数, 删除数, 关系数)。
+    delete_tables: list[str] | None = None,
+) -> tuple[int, int, int, list[str]]:
+    """按选择写 `models/` 与 `relationships.yml`。
+
+    返回 `(生成数, 删除数, 关系数, 跳过的列)`；最后一项目前只可能由 ``patch_existing``
+    产生 —— 见下面第 2 步，格式是 `["表名.列名", …]`，空列表表示没有东西被跳过。
 
     ``patch_existing``：
       - False（新建流程）：已存在的模型文件**重写**（沿用旧行为，零回归）；
       - True（调整已有库）：已存在的文件只做**文本手术**改隐藏开关，手改过的描述、
         字段顺序、注释全部原样保留 —— 用 DB 内省结果重写会把这些抹掉。
+
+    ``prune`` / ``delete_tables`` 都是删目录，但**口径不同，别当同一个用**（见第 1 步）：
+    ``prune`` = 不在选择里的全删（含「数据库里已不存在的表」）；``delete_tables`` =
+    调用方逐表点名的明确删除（界面上「取消勾选」那种）。
 
     校验放在**本函数第一步**（不是交给调用方）：拒绝的请求保证一个字节都不落盘。
     卫语句 ``ValueError`` = 选择非法（可映射成 400）；``RuntimeError`` = 文件改不动（409）。
@@ -1832,18 +1886,33 @@ def _apply_model_selection(
     models_dir.mkdir(parents=True, exist_ok=True)
     generated = 0
     removed = 0
+    skipped: list[str] = []
     wanted = {s.lower() for s in selected_tables}
 
-    # 1) 不在选择里的表：按需删目录（只认「是 models/ 下的目录且带 metadata.yml」的，
-    #    不碰任何别的文件）
-    if prune:
-        for entry in sorted(models_dir.iterdir()):
-            if not entry.is_dir() or entry.name.lower() in wanted:
+    # 1) 删目录。**两种来源，别混成一个口径**（`delete_tables` 于 2026-10-08 加入）：
+    #    - `prune=True`（全局勾选）：不在选择里的一律删。这是唯一能清掉「数据库里已不存在
+    #      的表」的办法 —— 那种模型在调整对话框里根本没有勾选态可取消，只能靠这个全局开关；
+    #    - `delete_tables`（逐表点名）：用户在界面上**明确取消勾选**的已有模型。走这条是为了
+    #      让「取消勾选 ⇒ 保存即删」不必再让用户去勾一个默认关闭的全局框 —— 而那个框一旦被
+    #      顺手打开，会把孤儿模型一并带走（那些用户从没碰过，是静默误删）。
+    #    只认「models/ 下的目录且带 metadata.yml」，不碰任何别的文件；被选中的表一律不动
+    #    （哪怕调用方把同一个名字同时塞进两边，也不删）。
+    delete_set = {s.lower() for s in (delete_tables or [])}
+    for entry in sorted(models_dir.iterdir()):
+        if not entry.is_dir() or not (entry / "metadata.yml").is_file():
+            continue
+        name_l = entry.name.lower()
+        if name_l in wanted:
+            continue
+        if not prune and name_l not in delete_set:
+            # 前端点名用的是模型的**声明名**（`existing_models` 的键），而这里走的是目录名。
+            # 真实库 48/48 两者相等，但别的地方同步进来的库可能不等 —— 点名了却删不掉是静默
+            # no-op（正是这次要修的形态）。只在点名没命中目录名时才多读一次 yml。
+            declared = _declared_model_name(entry / "metadata.yml")
+            if declared is None or declared.lower() not in delete_set:
                 continue
-            if not (entry / "metadata.yml").is_file():
-                continue
-            _rmtree_force(entry)
-            removed += 1
+        _rmtree_force(entry)
+        removed += 1
 
     # 2) 逐表写 / 改
     for tbl_name in selected_tables:
@@ -1862,7 +1931,19 @@ def _apply_model_selection(
         if patch_existing and meta.is_file():
             # 原地打标：只改隐藏开关，其余字节不动
             text = meta.read_text(encoding="utf-8")
+            # 这个模型**实际包含**的列由文件说了算，不由数据库说了算。DDL 加了列而语义库
+            # 没重建时，`t.columns`（内省）会比文件多出列 —— 拿它去开隐藏开关必然定位不到。
+            # 2026-10-08 生产实撞（`witops-wrenai.do_table` 多出 `default_flag`）：那时这里
+            # 直接抛 409 ⇒ **一张表漂移就让「调整模型」每次都失败**（漂移表在选中范围内时；
+            # 排在它前面的表已经落盘了，所以失败还不是原子的），而且错误文案把「DB 漂移」
+            # 说成「该文件可能被手工改过结构」—— 文件是机器生成的，纯属冤枉。
+            # 现在的口径：文件里没有的列**跳过不碰**（它本来就不在模型里，无所谓可见性），
+            # 只把它点名带出去；真正改不动（如同名列出现多次）仍然报错，不猜。
+            in_file = _file_column_names(text)
             for c in t.columns:
+                if c.name not in in_file:
+                    skipped.append(f"{tbl_name}.{c.name}")
+                    continue
                 want_hidden = visible is not None and c.name not in visible
                 try:
                     text = _set_column_hidden(text, c.name, want_hidden)
@@ -1905,7 +1986,7 @@ def _apply_model_selection(
             encoding="utf-8",
         )
         relationships_generated = len(relationships)
-    return generated, removed, relationships_generated
+    return generated, removed, relationships_generated, skipped
 
 
 async def introspect_project(request: Request):
@@ -1997,8 +2078,11 @@ async def generate_models(request: Request):
 
     两种用法共用本端点（靠 `patch_existing` 区分）：
       - 新建流程：`{selected_tables, selected_columns?}` ⇒ 写新文件；
-      - 调整已有库：`{selected_tables, selected_columns?, patch_existing: true, prune: true}`
-        ⇒ 原地改隐藏开关 + 删掉不再要的表目录，手改过的模型文件内容不丢。
+      - 调整已有库：`{selected_tables, selected_columns?, patch_existing: true,
+        prune?: true, delete_tables?: [表名]}`
+        ⇒ 原地改隐藏开关 + 按需删掉不再要的表目录，手改过的模型文件内容不丢。
+        `delete_tables` = 用户在界面上明确取消勾选的模型（逐表点名）；`prune` = 不在选择里的
+        全删（含「数据库里已不存在的表」）。
     """
     denied = admin_guard(request, "生成模型")
     if denied:
@@ -2020,15 +2104,23 @@ async def generate_models(request: Request):
     # 未选中的表目录。默认 False = 新建流程的老行为（重写、不删）。
     patch_existing = bool(data.get("patch_existing", False))
     prune = bool(data.get("prune", False))
+    # 逐表点名的删除清单（调整对话框里「用户明确取消勾选」的模型）。与 prune 的区别见
+    # `_apply_model_selection` 第 1 步：prune 是「不在选择里的全删」，会把孤儿模型一起带走，
+    # 所以「取消勾选即删」必须走这条点名通道，不能靠前端顺手打开 prune。
+    delete_tables_in = data.get("delete_tables") or []
+    if not isinstance(delete_tables_in, list) or any(not isinstance(x, str) for x in delete_tables_in):
+        return json_response({"error": "delete_tables 需为 [表名] 形式"}, status=400)
+    delete_tables: list[str] = delete_tables_in
 
     if not selected_tables:
         return json_response({"error": "selected_tables 必填，至少选一张表"}, status=400)
     if selected_columns is not None and not isinstance(selected_columns, dict):
         return json_response({"error": "selected_columns 需为 {表名: [列名]} 形式"}, status=400)
-    if prune and not patch_existing:
+    if (prune or delete_tables) and not patch_existing:
         # 只删不保护是危险组合（调用方多半是漏传参数），明确拒绝
         return json_response(
-            {"error": "prune 必须与 patch_existing 同时使用（删除表目录前需先确认是调整已有库）"},
+            {"error": "prune / delete_tables 必须与 patch_existing 同时使用"
+                      "（删除表目录前需先确认是调整已有库）"},
             status=400,
         )
 
@@ -2060,19 +2152,20 @@ async def generate_models(request: Request):
     # P1-14：选 N 张表就写 N 个 models/<表>/metadata.yml（每个都要建目录 + 序列化 YAML 落盘），
     # 外加 relationships.yml —— 勾「全选」时是几百次写，整段搬线程（纯文件 I/O，长任务池）。
     # 字段级校验在 _apply_model_selection 第一步，保证被拒时一个字节都不落盘。
-    def _write_models() -> tuple[int, int, int]:
+    def _write_models() -> tuple[int, int, int, list[str]]:
         return _apply_model_selection(
             project, result, selected_tables, selected_columns,
             include_relationships=include_relationships,
             patch_existing=patch_existing,
             prune=prune,
+            delete_tables=delete_tables,
         )
 
     # 写的是构建的**输入**（models/*.yml）：拿项目的写锁，避免与「更新/重建」的
     # 暂存整目录拷贝交叉（那样会把半写的 model 文件烤进换入的副本）
     try:
         async with _project_lock(str(project.resolve())):
-            models_generated, models_removed, relationships_generated = await offload_long(_write_models)
+            models_generated, models_removed, relationships_generated, skipped = await offload_long(_write_models)
     except ValueError as e:
         # 选择非法（藏主键 / 藏关系列 / 列不存在）—— 已确认没落盘
         _logger.info("[wren_semantic] 拒绝字段选择: %s", e)
@@ -2082,14 +2175,36 @@ async def generate_models(request: Request):
         _logger.warning("[wren_semantic] 调整模型失败: %s", e)
         return json_response({"error": str(e)}, status=409)
 
-    return json_response({
+    # 「数据库里有、模型文件里没有」的列：本次**跳过**（模型包含哪些列由文件决定）。
+    # 不是错误，但必须说出来 —— 前端对话框是拿**数据库**列渲染的，这些列在里面看起来
+    # 就是个正常的、可能被勾成「可见」的列；不点名的话用户会以为它们在模型里，实际查不到。
+    # 按表归拢，日志和响应都用同一份。
+    skipped_by_table: dict[str, list[str]] = {}
+    for item in skipped:
+        tbl_name, _, col_name = item.partition(".")
+        skipped_by_table.setdefault(tbl_name, []).append(col_name)
+    if skipped_by_table:
+        _logger.warning(
+            "[wren_semantic] 调整模型：%d 个列在数据库里有、模型文件里没有，已跳过（对模型不可见）：%s",
+            len(skipped),
+            "；".join(f"{t}：{_join_preview(cs)}" for t, cs in skipped_by_table.items()),
+        )
+
+    payload: dict = {
         "ok": True,
         "generated": {
             "models": models_generated,
             "removed": models_removed,
             "relationships": relationships_generated,
         },
-    })
+    }
+    if skipped_by_table:
+        payload["warnings"] = [
+            f"{t}：数据库里有 {len(cs)} 列不在模型中（{_join_preview(cs)}）—— "
+            "这些列对模型不可见，本次已跳过；要纳入请对该表用「重新生成」"
+            for t, cs in skipped_by_table.items()
+        ]
+    return json_response(payload)
 
 
 async def knowledge_template(request: Request):

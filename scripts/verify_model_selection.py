@@ -16,6 +16,19 @@
    「不存在的模型」的关系，`wren context build` 直接 `references unknown model` 失败。
 5. **已有库不能重新生成**：用内省结果重写会抹掉手改的描述 ⇒ `patch_existing=True`
    走文本手术，只改隐藏开关。
+6. **「库里多出来的列」不能拿去做文本手术**：DDL 加了列而语义库没重建时，内省结果比
+   模型文件多出列。`patch_existing` 若按**内省列**逐个开隐藏开关，就会在那一列上定位失败、
+   让整张表 409 —— 而它的错误文案会把这口锅扣给「该文件可能被手工改过结构」，把
+   **DB 漂移**说成**手改**（2026-10-08 生产 `witops-wrenai.do_table` 多出 `default_flag`
+   实撞）。模型文件是「这个模型包含哪些列」的唯一权威 ⇒ 文件里没有的列**跳过不碰**、
+   但要如实点名回报（响应 `warnings` + 后端 WARNING），不能静默吞掉。
+7. **删除有两条通道，口径不同**：`prune=True` = 不在选择里的**全删**，它是唯一能清掉
+   「数据库里已不存在的表」的办法（那种模型在对话框里没有勾选态可取消）；`delete_tables`
+   = 调用方**逐表点名**（界面上「取消勾选」）。若让「取消勾选」也复用 `prune`，用户一旦
+   顺手打开那个全局框，就会把自己从没碰过的孤儿模型一并删掉（静默误删）。
+   （2026-10-08 生产实撞：前端在「新增模型后不重取 introspect」的旧快照下，全局框的候选
+   列表是空的 ⇒ 框是灰的、勾不上 ⇒ 取消勾选后保存**静默不删**。）
+
 
 本脚本用**真 wren**（`.venv` 里的 `wren`）在真实文件系统上构建并检查 `target/mdl.json`，
 而不是只断言「代码里调用了某个函数」。
@@ -42,6 +55,8 @@ sys.path.insert(0, str(SRC))
 
 from api.wren_semantic import (  # noqa: E402
     _apply_model_selection,
+    _declared_model_name,
+    _file_column_names,
     _read_existing_models,
     _relationship_fk_columns,
     _render_model_yaml,
@@ -349,8 +364,8 @@ def section_relationship_filter() -> None:
           "两端都选 ⇒ 两侧列都被记为关系列", fk_cols2)
 
     proj = make_project(WORK / "rel")
-    _, _, n = _apply_model_selection(proj, res, ["alpha"], None,
-                                     include_relationships=True, patch_existing=False, prune=False)
+    _, _, n, _ = _apply_model_selection(proj, res, ["alpha"], None,
+                                        include_relationships=True, patch_existing=False, prune=False)
     check(n == 0, "只选 alpha ⇒ relationships.yml 里 0 条关系", n)
     data = __import__("yaml").safe_load((proj / "relationships.yml").read_text(encoding="utf-8"))
     check(data.get("relationships") == [], "relationships.yml 内容为空列表", data)
@@ -387,9 +402,9 @@ def section_prune() -> None:
     (proj / "knowledge" / "glossary" / "术语表.md").write_text("# 术语\n", encoding="utf-8")
     check((proj / "models" / "beta" / "metadata.yml").is_file(), "先有 beta 模型")
 
-    gen, removed, _ = _apply_model_selection(proj, res, ["alpha"], None,
-                                             include_relationships=True,
-                                             patch_existing=True, prune=True)
+    gen, removed, _, _ = _apply_model_selection(proj, res, ["alpha"], None,
+                                                include_relationships=True,
+                                                patch_existing=True, prune=True)
     check(removed == 1, "removed 计数 = 1", removed)
     check(not (proj / "models" / "beta").exists(), "beta 目录已删除")
     check((proj / "models" / "alpha" / "metadata.yml").is_file(), "alpha 保留")
@@ -400,9 +415,9 @@ def section_prune() -> None:
     proj2 = make_project(WORK / "noprune")
     _apply_model_selection(proj2, res, ["alpha", "beta"], None,
                            include_relationships=True, patch_existing=False, prune=False)
-    _, removed2, _ = _apply_model_selection(proj2, res, ["alpha"], None,
-                                           include_relationships=True,
-                                           patch_existing=False, prune=False)
+    _, removed2, _, _ = _apply_model_selection(proj2, res, ["alpha"], None,
+                                               include_relationships=True,
+                                               patch_existing=False, prune=False)
     check(removed2 == 0 and (proj2 / "models" / "beta").exists(),
           "prune=False ⇒ 一个目录都不删（老行为）")
 
@@ -453,7 +468,7 @@ def section_wiring() -> None:
     # 用真内省结果跑一遍「藏一个普通列」，证明端到端不报错
     proj = make_project(WORK / "e2e")
     res = introspect_result()
-    gen, removed, n = _apply_model_selection(
+    gen, removed, n, _ = _apply_model_selection(
         proj, res, ["alpha", "beta"], {"alpha": ["id", "name"], "beta": ["id", "alpha_id"]},
         include_relationships=True, patch_existing=False, prune=False)
     check((gen, removed) == (2, 0), "两张表都写了、没删东西", (gen, removed))
@@ -461,6 +476,181 @@ def section_wiring() -> None:
     got = _read_existing_models(proj)
     check(got["alpha"]["hidden"] == ["old_flag"], "读回来与写出去一致", got["alpha"])
     check(got["beta"]["hidden"] == ["old_note"], "beta 也一致", got["beta"])
+
+
+# ── ⑩ 库里多出来的列（DDL 漂移）───────────────────────────────
+
+def _toggleable(text: str, name: str) -> bool:
+    """文件里的这个列名，`_set_column_hidden` 认不认得。"""
+    try:
+        _set_column_hidden(text, name, True)
+        return True
+    except ValueError:
+        return False
+
+
+def section_db_drift() -> None:
+    section("⑩ 库里多出来的列：跳过 + 点名，不再把「DB 漂移」误报成「文件被手改」")
+    res = introspect_result()
+    proj = make_project(WORK / "drift")
+    _apply_model_selection(proj, res, ["alpha"], None,
+                           include_relationships=True, patch_existing=False, prune=False)
+    meta = proj / "models" / "alpha" / "metadata.yml"
+    before = meta.read_text(encoding="utf-8")
+
+    # 对照：库与文件一致时，一个跳过项都不该有，也不许白改文件
+    _, _, _, skipped0 = _apply_model_selection(
+        proj, res, ["alpha"], None,
+        include_relationships=True, patch_existing=True, prune=False)
+    check(skipped0 == [], "库和文件一致 ⇒ 跳过列表为空（不是「内省列全算跳过」）", skipped0)
+    check(meta.read_text(encoding="utf-8") == before, "没有漂移时文件一个字节都没动")
+    check("new_flag" not in before, "夹具就绪：模型文件里没有 new_flag")
+
+    # 模拟 DDL 漂移：库给 alpha 加了一列、语义库没重建 ⇒ 内省结果比文件多出 new_flag
+    res.tables[0].columns.append(col("new_flag", comment="库里新加的列"))
+
+    # (a) 这张表没有任何列被藏（前端在「一列都没勾掉」时根本不发 selected_columns）
+    _, _, _, skipped_a = _apply_model_selection(
+        proj, res, ["alpha"], None,
+        include_relationships=True, patch_existing=True, prune=False)
+    check(skipped_a == ["alpha.new_flag"], "漂移列被如实点名（表名.列名）", skipped_a)
+    check(meta.read_text(encoding="utf-8") == before,
+          "漂移列**没被写进文件**：跳过就意味着这个文件与漂移前逐字相同",
+          meta.read_text(encoding="utf-8")[:200])
+
+    # (b) 前端真实形态：对话框拿**数据库**列渲染 ⇒ new_flag 在里面是个正常的、被勾成
+    #     「可见」的列；同时 old_flag 被勾掉。漂移列必须完全不影响结果。
+    _, _, _, skipped_b = _apply_model_selection(
+        proj, res, ["alpha"], {"alpha": ["id", "name", "new_flag"]},
+        include_relationships=True, patch_existing=True, prune=False)
+    after = meta.read_text(encoding="utf-8")
+    check(skipped_b == ["alpha.new_flag"], "同一次请求里仍然点名漂移列", skipped_b)
+    check(after == _set_column_hidden(before, "old_flag", True),
+          "结果与「没有漂移列」时**逐字相同**（漂移列对文件零影响）",
+          after)
+    check("new_flag" not in after, "没有把库里的新列顺手补进模型（口径：跳过就是不碰）")
+    check(_file_column_names(after) == {"id", "name", "old_flag"},
+          "文件的列集合与漂移前完全一致", _file_column_names(after))
+    check(len(after.splitlines()) == len(before.splitlines()) + 1,
+          "只多出隐藏开关那一行", (len(before.splitlines()), len(after.splitlines())))
+
+    # 两处判据必须同源：凡是 `_file_column_names` 说「在文件里」的列，`_set_column_hidden`
+    # 都得认（否则会出现「没跳过却改不动」）；反之文件里真没有的列必须是可跳过的。
+    judge = (
+        "columns:\n"
+        "- name: id\n  type: INTEGER\n  is_primary_key: true\n"
+        "- name: 'quoted_name'\n  type: VARCHAR\n"
+        "primary_key: id\n"
+    )
+    names = _file_column_names(judge)
+    check(names == {"id", "quoted_name"}, "_file_column_names 认得出带引号的列名", names)
+    check(all(_toggleable(judge, n) for n in names),
+          "文件里的每个列名 _set_column_hidden 都认得（两处判据同源，不会「跳过了其实能改的列」）",
+          [n for n in names if not _toggleable(judge, n)])
+    check(not _toggleable(judge, "ghost") and "ghost" not in names,
+          "文件里真没有的列：两边一致地判为「不在文件里」")
+
+    # 负对照：**真的**结构性坏文件（同名列出现多次）仍然硬报错 —— 跳过只针对「文件里没有
+    # 的列」，不针对「文件里有但认不出的列」。
+    bad = make_project(WORK / "drift_bad")
+    (bad / "models" / "alpha").mkdir()
+    (bad / "models" / "alpha" / "metadata.yml").write_text(
+        "name: alpha\ntable_reference:\n  table: alpha\ncolumns:\n"
+        "- name: id\n  type: INTEGER\n  is_primary_key: true\n"
+        "- name: name\n  type: VARCHAR\n"
+        "- name: name\n  type: VARCHAR\n",
+        encoding="utf-8",
+    )
+    try:
+        _apply_model_selection(bad, res, ["alpha"], None,
+                               include_relationships=True, patch_existing=True, prune=False)
+        check(False, "同名列文件应当抛 RuntimeError（409），不许跳过")
+    except RuntimeError as e:
+        check("出现多次" in str(e), "真·结构坏 ⇒ RuntimeError 且点出原因", e)
+    except ValueError as e:
+        check(False, "应当被包装成 RuntimeError(409) 而不是 ValueError(400)", e)
+
+    # 接线：跳过项必须**出得来**（响应 warnings + 后端 WARNING），否则等于静默吞掉
+    src = (SRC / "api" / "wren_semantic.py").read_text(encoding="utf-8")
+    check("in_file = _file_column_names(text)" in src,
+          "patch 分支先取「文件里有哪些列」再逐个手术")
+    check('payload["warnings"]' in src, "跳过项进入 generate-models 响应的 warnings")
+    check("在数据库里有、模型文件里没有" in src,
+          "同时打一条后端 WARNING（只回前端不够：日志里也要能查到）")
+
+
+# ── ⑪ 点名删除（界面上「取消勾选」）────────────────────────────
+
+def section_explicit_delete() -> None:
+    section("⑪ delete_tables：取消勾选即删，且不连坐孤儿模型")
+    res = introspect_result()
+    proj = make_project(WORK / "explicit_del")
+    _apply_model_selection(proj, res, ["alpha", "beta"], None,
+                           include_relationships=True, patch_existing=False, prune=False)
+    # 孤儿模型：库里有文件、数据库里已经没有这张表了（对话框列表里根本没有它，无从取消勾选）
+    ghost = proj / "models" / "gone_table"
+    ghost.mkdir()
+    (ghost / "metadata.yml").write_text(
+        "name: gone_table\ntable_reference:\n  table: gone_table\ncolumns:\n"
+        "- name: id\n  type: INTEGER\n  is_primary_key: true\n",
+        encoding="utf-8")
+
+    # 用户在界面上把 beta 取消勾选 ⇒ 点名删除。prune=False ⇒ 孤儿必须活着。
+    _, removed, _, _ = _apply_model_selection(
+        proj, res, ["alpha"], None, include_relationships=True,
+        patch_existing=True, prune=False, delete_tables=["beta"])
+    check(removed == 1, "点名 beta ⇒ removed=1", removed)
+    check(not (proj / "models" / "beta").exists(), "beta 目录已删")
+    check((ghost / "metadata.yml").is_file(),
+          "**孤儿模型没被连坐**（这就是它不能复用 prune 的原因）")
+    check((proj / "models" / "alpha" / "metadata.yml").is_file(), "alpha 保留")
+
+    # 反向：全局框那条通道（prune=True）依旧把孤儿一起清掉 —— 两者分工不同
+    _, removed, _, _ = _apply_model_selection(
+        proj, res, ["alpha"], None, include_relationships=True,
+        patch_existing=True, prune=True, delete_tables=None)
+    check(removed == 1 and not ghost.exists(),
+          "prune=True ⇒ 孤儿被清掉（全局框的职责，与点名删除分工不同）", removed)
+
+    # 目录名 ≠ 声明名时，按声明名点名也要删得掉（否则又是静默 no-op）
+    proj2 = make_project(WORK / "explicit_alias")
+    _apply_model_selection(proj2, res, ["alpha"], None,
+                           include_relationships=True, patch_existing=False, prune=False)
+    alias = proj2 / "models" / "alpha" / "metadata.yml"
+    alias.write_text(
+        alias.read_text(encoding="utf-8").replace("name: alpha", "name: alpha_alias", 1),
+        encoding="utf-8")
+    check(_declared_model_name(alias) == "alpha_alias",
+          "夹具就绪：声明名已改成 alpha_alias（目录名仍是 alpha）", _declared_model_name(alias))
+    _, removed2, _, _ = _apply_model_selection(
+        proj2, res, ["beta"], None, include_relationships=True,
+        patch_existing=True, prune=False, delete_tables=["alpha_alias"])
+    check(removed2 == 1 and not (proj2 / "models" / "alpha").exists(),
+          "按**声明名**点名 ⇒ 照样删得掉（前端手里的键就是声明名）", removed2)
+
+    # 防御：同一个名字既在「选中」又在「点名删除」里 ⇒ 以选中为准，不删
+    proj3 = make_project(WORK / "explicit_conflict")
+    _apply_model_selection(proj3, res, ["alpha"], None,
+                           include_relationships=True, patch_existing=False, prune=False)
+    _, removed3, _, _ = _apply_model_selection(
+        proj3, res, ["alpha"], None, include_relationships=True,
+        patch_existing=True, prune=False, delete_tables=["alpha"])
+    check(removed3 == 0 and (proj3 / "models" / "alpha" / "metadata.yml").is_file(),
+          "既选中又点名 ⇒ 以「选中」为准，不删（矛盾输入取安全的一边）", removed3)
+
+    # 点名一张不存在的模型 ⇒ 幂等 no-op，不报错
+    _, removed4, _, _ = _apply_model_selection(
+        proj3, res, ["alpha"], None, include_relationships=True,
+        patch_existing=True, prune=False, delete_tables=["__nope__"])
+    check(removed4 == 0, "点名不存在的模型 ⇒ 幂等（重复提交同一份清单不会炸）", removed4)
+
+    # 接线：端点解析 + 同一道守卫 + 透传
+    src = (SRC / "api" / "wren_semantic.py").read_text(encoding="utf-8")
+    check('data.get("delete_tables")' in src and "delete_tables=delete_tables" in src,
+          "端点解析 delete_tables 并透传给核心函数")
+    check("delete_tables 必须与 patch_existing 同时使用" in src,
+          "delete_tables 与 prune 同一道守卫（删除前必须确认是调整已有库）")
+    check('"delete_tables 需为 [表名] 形式"' in src, "类型闸：非字符串列表直接 400")
 
 
 def main() -> int:
@@ -478,6 +668,8 @@ def main() -> int:
         section_prune()
         section_patch_existing()
         section_wiring()
+        section_db_drift()
+        section_explicit_delete()
     finally:
         if os.environ.get("KEEP_WORK") != "1":
             shutil.rmtree(WORK, ignore_errors=True)
