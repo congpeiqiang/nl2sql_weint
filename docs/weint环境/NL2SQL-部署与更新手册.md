@@ -340,7 +340,7 @@ bash docs/prod环境/apply-nginx-request-id-patch.sh --rollback  # 回滚到最�
 > `docs/prod环境/` 承担 —— 旧路径跑不通（且 2026-10-05 前它内部写死的仓库根也多退了一层，见文件头注释）。
 > 另外它做的事是**整份 `docker/nginx.conf` 同步**（不止 P2-2 那几行）：2026-10-05 的**上游请求期解析**
 > （`resolver` + 变量 `proxy_pass`）也走它。改完必须**真打一次请求**验收 —— 变量形式下 `nginx -t`
-> 查不出主机名写错。细节见 [发布脚本.md §5「上游解析」](../prod环境/发布脚本.md)。
+> 查不出主机名写错。命令见 [发布脚本.md §6](../prod环境/发布脚本.md)。
 
 脚本做：核挂载 → md5 判差异（已一致就退出 0）→ 备份 `docker/nginx.conf.bak-<ts>` → **就地**写入
 （`cat > 同一 inode`）→ 比对 inode/md5 → `nginx -t`（失败自动回滚）→ `nginx -s reload` → 校验响应头

@@ -1,0 +1,107 @@
+# 蓝绿「第二色」overlay —— **dev 版（192.168.25.34）**，只在**发版窗口**里用，不常驻
+#
+# 用法（**必须同时给 base**，顺序不能反 —— 后者覆盖前者）：
+#   COLOR_B_JOBS=0  docker compose -f docker-compose.yml -f docker/compose.colorB.dev.yml up -d --no-deps langgraph-api-b   # 起空闲色
+#   COLOR_B_JOBS=10 docker compose -f docker-compose.yml -f docker/compose.colorB.dev.yml up -d --no-deps langgraph-api-b   # 提升为正式色
+#
+# 与 prod 的 `docker/compose.colorB.yml` **同构**，只有三处差异（下面每条都标了 ★dev）：
+#   ★dev-1 代码走 bind mount ⇒ 第二色挂**另一份 src**（`${COLOR_B_SRC:-/mydata/nl2sql/src-next}`），
+#          发版末段靠**目录轮换**把新代码变成常驻色。**dev 全程不换镜像**（与 prod 相反）。
+#   ★dev-2 compose 是 **v2 插件**，容器名用**连字符**（`nl2sql-app-langgraph-api-b-1`）；
+#          prod 是 v1 + 下划线。三条铁律里的 `--no-deps` 与「只新增服务名」照旧执行
+#          （`KeyError: 'ContainerConfig'` 那条是 v1 专属）。
+#   ★dev-3 `env_file` 是 **`.env.dev`**（`DEPLOY_ENV=dev` 在它里面）；照抄 prod 的 `.env.prod`
+#          会把 dev 带成 prod 语义。
+#
+# ⚠️⚠️ 本文件的**唯一铁律：只准新增服务名，不许出现任何既有服务的键**
+#      （`langgraph-api` / `postgres` / `redis` / `frontend` / `nginx` / `devdb`）。
+#      理由：base 里每个服务都参与 config-hash 计算，改了任何一个键都可能让 compose 判定
+#      「想 recreate」。只新增服务 ⇒ base 的 hash **在数学上不可能变**。
+#      `scripts/verify_dev_blue_green.py` 把这条件做成了机械化断言。
+#
+# ⚠️ 第二条铁律：**任何 docker compose 命令都必须带 `--no-deps`**。本服务故意**不写
+#      `depends_on`**（写了就会把 postgres/redis 拉进收敛计划）。它们此刻本来就跑着，
+#      不需要 B 去拉起。
+#
+# ⚠️ 第三条铁律：**改配置用 `stop && rm -f && up -d`，不要指望 `up -d` 帮你 recreate**
+#      （提升那一步就是这么写的）。对旧色的**停止**用裸 `docker stop/rm <容器名>`。
+#
+# ── 发版时序（详见 docs/dev环境/蓝绿发布_dev手册.md）─────────────────────
+#   起空闲色(B, N_JOBS=0) → 探测 → 提升(B, N_JOBS=10) → **切 nginx 一行 + reload**
+#   → 排空旧色 → 停旧色 → **轮换 src 目录** → 起回 A → 切回 A → 停 B。用户侧 0 个 5xx。
+#
+#  为什么「先切流再排空」是这套设计的要害：现有流程是「先排空再停」，排空期间新提交拿到
+#  **503**（`DrainGateMiddleware`）。503 也是 5xx，用户照样看得见。切流之后旧色再也收不到
+#  用户请求，排空就不再对任何人可见 ⇒ 这才是「零 5xx」而不是「把 502 换成 503」。
+#
+#  为什么「先起空闲色再提升」是必需的：`N_JOBS_PER_WORKER` 只在进程 import 期读一次
+#  （`langgraph_api/config/__init__.py:380`），没有运行期开关。一上来就用 10 起 B，会让
+#  **未经验证的新代码立刻从共享队列领到真实用户的 run**。
+#
+# ── 它为什么能和旧色安全并存 ─────────────────────────────────────────
+#  ① 共享 `agent_data` 上的多进程 SQLite：全仓共享库都是 WAL + `busy_timeout=15000`，
+#     并发写实测过（`busy_timeout=0` 必报 locked、`15000` 等 3.93s 成功）。
+#  ② `pending_terminal` 补写器的写是 HTTP 到**自己色**的 `LANGGRAPH_API_URL`
+#     （`pending_terminal.py:418`）⇒ 两色各写各的连接，行级唯一索引兜底，重复劳动无害。
+#  ③ `eval_queue` 的队列在**共享** agent_data 上，曾经的真危险是 drainer 启动时无条件
+#     `reset_running_to_pending()`（会把另一色正在跑的行打回 pending ⇒ 重复烧 token）。
+#     已改成**只回收超过租约期的行**（`eval_queue.py`，`updated_at` 就是租约起点）。
+#  ④ 开机自动迁移跑在 `DATABASE_URI` 指定的库上 ⇒ 两色指同一套库时，**新代码带的迁移会在
+#     起空闲色那一刻就打到共享库**，而旧色还在跑。这是这套设计**必须遵守的 expand-contract
+#     约束**：langgraph 官方迁移与本仓自建表迁移都只能 add-only（本仓惯例 `IF NOT EXISTS`
+#     + 逐列 try 已满足）。破坏性变更走不了蓝绿，用老路 `dev-release-backend.ps1` 的停机窗口。
+version: "3.8"
+
+services:
+  langgraph-api-b:
+    # ★dev-1：dev 不换镜像 ⇒ 直接引用 tag（prod 用 IMAGE_ID_PLACEHOLDER + sed 成实测 ID，
+    #   因为 prod 的发布本身就是「构建出一个新镜像」。dev 换的只有 src 目录）。
+    image: nl2sql-app_langgraph-api:latest
+    # ★dev-2：compose v2 会自动生成 `nl2sql-app-langgraph-api-b-1`；**显式写死**是为了让
+    #   发版脚本的容器名判据不随「目录被改名」而漂移。
+    container_name: nl2sql-app-langgraph-api-b-1
+    # ⚠️ 必须 `no`：`unless-stopped` 会让这个临时色在 docker 重启后**自己回来**，
+    #    长期占着内存与一条 postgres 连接，且没人记得它是什么。生命周期完全由发版脚本管。
+    restart: "no"
+    # ★dev-3：`.env.dev`，不是 `.env.prod`
+    env_file:
+      - .env.dev
+    environment:
+      # ── 与 base **逐字相同**：同一套库（B 提升后就是正式色）──
+      LANGGRAPH_RUNTIME_EDITION: postgres
+      DATABASE_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@postgres:5432/nl2sql_platform
+      MIGRATIONS_PATH: /storage/migrations
+      REDIS_URI: redis://redis:6379/0
+      CHECKPOINT_DB_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@postgres:5432/nl2sql_checkpoint
+      WREN_BIN_PATH: wren
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      MCP_ALLOW_DEGRADED: ${MCP_ALLOW_DEGRADED:-0}
+      # 指**自己**（服务名就是我）⇒ 所有自调用/补写器的 HTTP 写落回本色所连的库
+      LANGGRAPH_API_URL: http://langgraph-api-b:2026
+      # ── 这一个变量就是「空闲 / 正式」的唯一区别 ──
+      #   0 = 纯 API、不领 run（新代码已就绪但还没接过流量，绝不许先上活）
+      #  10 = 与 base 同值的正式色
+      # 默认 0 是**故意的**：忘了给 COLOR_B_JOBS 就等于起了一个空闲色，而不是偷偷上了正式色。
+      N_JOBS_PER_WORKER: "${COLOR_B_JOBS:-0}"
+      # ⚠️ **故意不设 `DB_MIGRATION_BY_CORE_API`** —— 保持默认行为（开机自动迁移），
+      #    这样新代码带的迁移会在起空闲色时就应用到共享库。**前提是迁移必须 add-only**（文件头 ④）。
+    # 与 base 同值：B 提升后就是正式色，限额不该比 base 松
+    stop_grace_period: 240s
+    volumes:
+      # **共享**：会话/知识/反馈/队列等运行期数据，两色必须看同一份
+      - /mydata/nl2sql/data/agent_data:/app/data
+      # **独占**：绝不碰在跑那色的 `.langgraph_api`
+      - /mydata/nl2sql/data/api_meta_b:/app/.langgraph_api
+      # ★dev-1 的核心：第二色挂**待发布的那份 src**。默认 `src-next`；
+      #   **回退**时把 `COLOR_B_SRC` 指到 `src-prev-<stamp>` 即可复用同一套机械。
+      - "${COLOR_B_SRC:-/mydata/nl2sql/src-next}:/app/src"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:2026/ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    # 注意：**没有 `ports`**（第二色绝不发布宿主端口 —— 发布出去就能被 LAN 直连，不带 token
+    # 即成 internal 身份，整套用户隔离归零）、**没有 `depends_on`**（见文件头铁律二）、
+    # **没有 `build:`**（dev 从不构建镜像）、**没有 `mem_limit`**（base 也没声明，两边保持一致）。

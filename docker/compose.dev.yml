@@ -1,0 +1,172 @@
+# NL2SQL DEV 环境（weint 服务器 192.168.25.34）—— 蓝绿前置就位后的形态
+#
+# ⚠️ **这是 34 上 `docker-compose.yml` 的仓库参照副本，不是生效文件。**
+#    线上真身：/mydata/nl2sql/nl2sql-app/docker-compose.yml（手工维护，发版脚本不覆盖）。
+#    改这里不等于改线上；改线上请用本文件做「同 inode 就地覆盖」（见 docs/dev环境/蓝绿发布_dev手册.md）。
+#    本文件存在的**唯一理由**：34 的 compose 此前完全没有版本控制，
+#    `scripts/verify_dev_blue_green.py` 的静态闸没法离线跑。
+#
+# 架构：nginx:8080 → frontend:3000 + langgraph-api:2026 → postgres(nl2sql_checkpoint +
+#       nl2sql_platform) + redis + devdb(Chinook 样例库)
+# 镜像：由生产 64 搬运而来（nl2sql-app_*:latest），**34 无外网故永不构建**
+# 数据：全部 bind 挂载到 /mydata/nl2sql（不占 docker named volume）
+# 工具：compose **v2 插件**（容器名用连字符 `nl2sql-app-*-1`，不是 prod 的下划线）
+#
+# ── 本形态相对 2026-09-21 版改了什么（一次性停机窗口里做完）──────────────
+#  1. 平台存储从 inmem pckl 换成 **postgres 版型**：`LANGGRAPH_RUNTIME_EDITION=postgres`
+#     + `DATABASE_URI=<平台库>`。理由与 prod 阶段 1 完全相同：inmem 每容器一份 pckl、
+#     每 10s 整份覆盖写（last-writer-wins）⇒ **两色并存必互相抹数据**，蓝绿无从谈起。
+#     旧的 pckl 目录**归档保留**（mv 成 `api_meta.inmem-<stamp>`，不删），便于回退。
+#  2. 新增 `redis` 服务：管**跨实例订阅在跑的 run**（切流后浏览器在新色上仍能收到
+#     旧色在跑 run 的 token 流）。
+#  3. `nl2sql_api_meta:/app/.langgraph_api` 挂载**保留不删** —— 平台存储改走 postgres 后
+#     本目录不再被写，留着是给「切回 inmem」这条回退路兜底。
+#  4. 平台库 `nl2sql_platform` 与正文库 `nl2sql_checkpoint` **分库**：`POSTGRES_DB`
+#     只会建第一个库，第二个必须手工 `CREATE DATABASE` 一次（写进手册）。
+#
+# ── 与 prod 参照副本（compose.prod.yml）的**故意差异** ──────────────────
+#  · 无 `build:`（34 无外网；镜像从 64 `docker save | docker load` 搬来）
+#  · 挂载全是 bind（不占 named volume），含 redis 的 `/mydata/nl2sql/data/redis`
+#  · 多一个 `devdb`（Chinook 样例库）—— dev 专属，prod 没有
+#  · 无 `NL2SQL_AUTH_DISABLED`（dev 靠 `.env.dev` 里的 `DEPLOY_ENV=dev` 说话）
+#  · 端口仍是 2026 / 8080 / 5435 / 5434（与 prod 同号 ⇒ 动手前**先确认机器**）
+#
+# ── 顺带闭掉的两个口子（prod 早就修了，dev 一直没跟上）──────────────────
+#  · **P0-2**：`langgraph-api` 原写 `"2026:2026"` ⇒ LAN 上任何人不带 token、不带
+#    X-Forwarded-For 直连即被认成 internal 身份，会话归属的四个 @auth.on 钩子对 internal
+#    全部放行 ⇒ 整套用户隔离归零。nginx 走服务名连后端，绑回环不受影响。
+#  · **P0-3**：nginx 原来还挂着 `agent_data:/app/data:ro` 给 `location /report/` 用
+#    （`alias … + autoindex on`）⇒ 未登录即可列出并下载全站报告。该 location 已随
+#    `docker/nginx.conf` 整份换成仓库那份而消失，挂载一并删除。
+version: "3.8"
+
+services:
+  langgraph-api:
+    image: nl2sql-app_langgraph-api:latest
+    # 与 prod 同值（`compose.prod.yml:52`）。发版脚本用 `docker stop -t 240` 显式给足，
+    # 但**别的**停法（`compose stop` 不带 -t、宿主机/daemon 重启）只认这里 ——
+    # 缺了它就是 docker 默认 10s 后 SIGKILL，在跑的 run 当场被砍。
+    stop_grace_period: 240s
+    # P0-2：只绑回环（见文件头）
+    ports:
+      - "127.0.0.1:2026:2026"
+    env_file:
+      - .env.dev
+    environment:
+      # ── 平台存储：postgres 版型 ──
+      LANGGRAPH_RUNTIME_EDITION: postgres
+      DATABASE_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@postgres:5432/nl2sql_platform
+      # 官方 runtime 开机自动跑迁移的目录（镜像里带，见 Dockerfile:109）
+      MIGRATIONS_PATH: /storage/migrations
+      # 跨实例订阅在跑的 run（两色并存时必需；本 redis 不发布宿主端口，故不设 requirepass）
+      REDIS_URI: redis://redis:6379/0
+      # ⚠️ 蓝绿的空闲色闸：0 = 纯 API、不领 run。当前色必须 10。
+      #    `N_JOBS_PER_WORKER` 只在**进程 import 期**读一次 ⇒ 提升只能靠带新 env 重建容器。
+      N_JOBS_PER_WORKER: "10"
+      CHECKPOINT_DB_URI: postgresql://nl2sql:${PG_PASSWORD:-nl2sql_secret}@postgres:5432/nl2sql_checkpoint
+      WREN_BIN_PATH: wren
+      LANGGRAPH_API_URL: http://langgraph-api:2026
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      # dev 引导开关：初始无数据库时 dbmcp 拒绝加载 → 预检不过、容器自杀重启。
+      # 仅在「首次配数据库」时临时置 1，配好后回 0（与生产同一道门禁）。
+      MCP_ALLOW_DEGRADED: ${MCP_ALLOW_DEGRADED:-0}
+    volumes:
+      - /mydata/nl2sql/data/agent_data:/app/data
+      # 平台存储已改走 postgres，本目录不再被写；保留挂载仅供「切回 inmem」回退
+      - /mydata/nl2sql/data/api_meta:/app/.langgraph_api
+      # dev 专属源码挂载：改代码只需换文件（镜像里的 .venv / start_server.py 不动）。
+      # 蓝绿的第二色挂 `${COLOR_B_SRC:-/mydata/nl2sql/src-next}` —— 见 compose.colorB.dev.yml。
+      - /mydata/nl2sql/src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:2026/ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # ── 跨实例 run 订阅（与 prod 同款，只是数据目录走 bind）──
+  # 只管「在跑的 run 把事件发给订阅者」这件瞬时的事（pub/sub），没有需要耐久的状态：
+  #  · 不发布宿主端口（同 postgres 的处理：compose 内网直达，宿主摸不到）；
+  #  · 不设 requirepass（没发布就没必要）；
+  #  · maxmemory-policy=allkeys-lru：万一顶到上限，丢的是瞬时事件（前端会重连补），
+  #    而不是让写入报错把流打断。
+  redis:
+    image: docker.m.daocloud.io/redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--save", "900", "1"]
+    volumes:
+      - /mydata/nl2sql/data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  postgres:
+    image: docker.m.daocloud.io/postgres:14
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nl2sql
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-nl2sql_secret}
+      POSTGRES_DB: nl2sql_checkpoint
+    volumes:
+      - /mydata/nl2sql/data/pg:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nl2sql -d nl2sql_checkpoint"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  # ── dev 自带样例库（Chinook，PostgreSQL 方言）──
+  # 与生产零共用：不给它连生产的 WIT/chinook，dev 自己起一份，随时可重建。
+  # 首次初始化时 postgres 会按文件名字典序执行 /docker-entrypoint-initdb.d/*.sql，
+  # 故数据文件已重命名为 01_schema.sql / 02_data.sql（先建表后灌数）。
+  devdb:
+    image: docker.m.daocloud.io/postgres:14
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: ${DEVDB_PASSWORD:-dev_chinook_pw}
+      POSTGRES_DB: chinook
+    volumes:
+      - /mydata/nl2sql/data/devdb:/var/lib/postgresql/data
+      - /mydata/nl2sql/data/devdb-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d chinook"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  frontend:
+    image: nl2sql-app_frontend:latest
+    restart: unless-stopped
+    depends_on:
+      - langgraph-api
+
+  nginx:
+    image: docker.m.daocloud.io/nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      # 与仓库 `docker/nginx.conf` **逐字相同**（上游请求期解析 ⇒ 换容器免 reload；
+      # 切流点 = `set $backend_up` 那一行）。P0-3 的报告静态直出已删除，
+      # nginx 不再需要读 agent_data，故那个 `:ro` 挂载也一并删掉了。
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - langgraph-api

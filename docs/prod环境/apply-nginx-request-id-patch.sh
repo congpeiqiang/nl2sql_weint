@@ -21,7 +21,7 @@
 #      也不必停服（`nginx -s reload` 不打断已建立的连接）。
 #   ⚠️ 反向的一条：改完**必须真打一次请求**才算了事 —— 变量形式 proxy_pass **不做启动期
 #      解析**，主机名写错 `nginx -t` 也发现不了（见本步第 5 节的 /ok 探针与
-#      docs/prod环境/发布脚本.md「上游解析与发版顺序」）。
+#      docs/prod环境/发布脚本.md §6）。
 #
 # 用法（在本机 Git Bash 里跑；服务器需已配好 SSH key ⇒ 全程不弹口令）：
 #   bash docs/prod环境/apply-nginx-request-id-patch.sh            # 应用 + 校验
@@ -32,7 +32,10 @@ set -euo pipefail
 SSH_TARGET="${NL2SQL_SSH:-weint@192.168.25.64}"
 APP_DIR="${NL2SQL_APP_DIR:-/home/weint/apps/nl2sql/nl2sql-app}"
 CONF_REL="docker/nginx.conf"
-NGINX_CT="nl2sql-app_nginx_1"
+# 容器名可覆盖：prod 是 compose v1 的 `nl2sql-app_nginx_1`（下划线），
+# dev(34) 是 compose v2 的 `nl2sql-app-nginx-1`（连字符）。
+# 默认值不变 ⇒ 不带变量跑时行为与以前逐字相同。
+NGINX_CT="${NL2SQL_NGINX_CT:-nl2sql-app_nginx_1}"
 HTTP_PORT="${NL2SQL_NGINX_PORT:-8080}"
 
 # 仓库根：向上找到含 $CONF_REL 的那一层。
