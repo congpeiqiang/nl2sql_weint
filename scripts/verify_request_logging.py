@@ -530,8 +530,8 @@ async def t6_negative_and_wiring() -> None:
 
     nginx = (_REPO / "docker" / "nginx.conf").read_text(encoding="utf-8")
     # 带分号才是真指令（注释里也出现过同样的字符串，不带分号）
-    check(nginx.count("proxy_set_header X-Request-ID $rid;") == 3,
-          "nginx 三个 location 都透传 X-Request-ID",
+    check(nginx.count("proxy_set_header X-Request-ID $rid;") == 4,
+          "nginx 四个 location 都透传 X-Request-ID（2026-10-08 起 `/_next/static/` 独立成一 location）",
           f"count={nginx.count('proxy_set_header X-Request-ID $rid;')}")
     check("rid=$rid" in nginx and "access_log" in nginx, "nginx 访问日志含 rid（边缘侧同一枚 id）")
     check("$request_time" in nginx, "nginx 访问日志含请求耗时")

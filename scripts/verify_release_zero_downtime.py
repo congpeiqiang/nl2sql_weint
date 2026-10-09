@@ -127,24 +127,27 @@ def t1_nginx_conf() -> None:
 
     i_set_b = nginx.find("set $backend_up")
     i_set_f = nginx.find("set $frontend_up")
-    check(i_set_b > i_server, "`set $backend_up` 在 `server` 块内（三个 location 继承、每请求求值）")
+    check(i_set_b > i_server, "`set $backend_up` 在 `server` 块内（四个 location 继承、每请求求值）")
     check(i_set_f > i_server, "`set $frontend_up` 在 `server` 块内")
     check('"langgraph-api:2026"' in nginx, "后端上游**带端口**（只写 host 会默认走 80）")
     check('"frontend:3000"' in nginx, "前端上游带端口")
 
     passes = re.findall(r"(?m)^\s*proxy_pass\s+([^;]+);", nginx)
-    check(len(passes) == 3, "三个 location 的 proxy_pass 都还在", f"{passes}")
+    check(len(passes) == 4, "四个 location 的 proxy_pass 都还在（2026-10-08 起 `/_next/static/` 从 `location /` 拆出，故 3→4）", f"{passes}")
     check(bool(passes) and all(p.startswith("http://$") for p in passes),
           "全部是**变量形式** —— 漏掉任何一处就退回启动期解析（那处会永久 502）", f"{passes}")
     check(nginx.count("proxy_pass http://$backend_up;") == 2,
           "两处后端 location 用 `$backend_up`（`location /api/` 与 LangGraph 原生路由）")
-    check(nginx.count("proxy_pass http://$frontend_up;") == 1, "前端 location 用 `$frontend_up`")
+    check(nginx.count("proxy_pass http://$frontend_up;") == 2,
+          "两处前端 location 用 `$frontend_up`（`/_next/static/` 与 `location /`）")
     check(not re.search(r"proxy_pass\s+http://\$\w+\s*\$", nginx),
           "**没有**给 proxy_pass 补 URI（`$request_uri`/`$uri$is_args$args`）—— 无 URI 时静态"
           "与变量形式走同一条分支（转发 unparsed_uri），补上反而切到 URI-as-is 分支 = 回归")
     check("proxy_redirect off;" in nginx,
           "显式 `proxy_redirect off` —— 变量形式下该默认行为被 nginx 静默关闭，写出来免得后人误会")
-    check("location /api/" in nginx and "location / {" in nginx, "`/api/` 与 `/` 两个 location 都还在")
+    check("location /api/" in nginx and "location / {" in nginx
+          and "location /_next/static/" in nginx,
+          "`/api/`、`/` 与 `/_next/static/` 三个都还在（第四个是 LangGraph 原生路由那条正则 location）")
 
 
 # ── ② release-backend.ps1 ───────────────────────────────────
