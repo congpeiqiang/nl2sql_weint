@@ -1182,11 +1182,29 @@ async def associate_local(request: Request):
     if not path or not target_db:
         return json_response({"error": "path 与 target_db 必填"}, status=400)
     p = Path(path)
-    if not p.is_dir() or not (p / "wren_project.yml").is_file():
-        return json_response({"error": "目录不存在或缺少 wren_project.yml"}, status=400)
+    # ⚠ 这里的「本地」= **后端这台机器**的本地。后端跑在容器里，客户端填一个 Windows 盘符路径
+    # （如 `D:\code_work_space\...`）到这边只是一个**名字里带反斜杠的文件**，is_dir() 必然 False。
+    # 2026-10-09 实撞：用户据此去查自己项目的规范，查了半天 —— 文案必须点明是哪台机器，
+    # 且要把「目录不存在」「目录在但缺 yml」「目录不在 workspace 内」三件事分开说。
+    if not p.is_dir():
+        return json_response(
+            {
+                "error": f"后端机器上没有这个目录：{path}"
+                "（这里要填**后端服务器**上的绝对路径，不是你这台电脑的路径）"
+            },
+            status=400,
+        )
+    if not (p / "wren_project.yml").is_file():
+        return json_response(
+            {"error": f"目录存在，但根目录缺少 wren_project.yml：{p}"}, status=400
+        )
     if not _is_within(p, _workspace_root()):
         return json_response(
-            {"error": f"目录必须在 workspace 内: {_workspace_root()}"}, status=400
+            {
+                "error": f"目录必须在后端 workspace 内：{_workspace_root()}"
+                f"（当前填的是 {p.resolve()}）"
+            },
+            status=400,
         )
     try:
         get_store().get(target_db)  # 校验目标库存在
