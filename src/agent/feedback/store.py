@@ -701,13 +701,18 @@ class FeedbackStore:
                 self._conn.commit()
             return cur.rowcount or 0
 
-    def reopen_annotation(self, thread_id: str, message_id: str) -> AnnotationRecord | None:
-        """把终态 good 撤回为 queued（「撤回入集」专用入口）。不存在返回 None。
+    def reopen_annotation(self, thread_id: str, message_id: str, *,
+                          from_status: str = "good") -> AnnotationRecord | None:
+        """把终态包回 queued（「撤回入集 / 移出 BadCase」专用入口）。不存在返回 None。
 
         为什么必须另开方法：update_annotation 的「终态不可回退」是 badcase/good/
         rejected 三条终态共用的护栏（防止误操作把已定稿的标注改回去）。撤回是
         唯一合法的回退场景，且要连带清空金标字段——写成一个语义明确的动作，
         不去松动那条护栏。
+
+        `from_status` 缺省 `good`（Good Set 撤回），移出 BadCase 显式传 `"badcase"`。
+        **默认值不变 ⇒ 两个既有调用方语义零变化**；这是「新开一个口子（badcase）」，
+        不是把旧护栏松掉——其它状态照样回不来。
 
         清空 gold_sql/gold_result/bad_type/annotator/auto_good，是因为这些字段
         描述的是「已入集的那个决定」，撤回后条目回到「待判断」，留着会让详情页
@@ -720,8 +725,8 @@ class FeedbackStore:
             ).fetchone()
             if row is None:
                 return None
-            if self._row_to_annotation(row).status != "good":
-                return None  # 只撤 good；其余状态不该走这条路
+            if self._row_to_annotation(row).status != from_status:
+                return None  # 只退 from_status 这一种；其余状态不该走这条路
             self._conn.execute(
                 "UPDATE feedback_annotation SET status='queued', is_valid=NULL,"
                 " gold_sql='', gold_result='', bad_type='', annotator='',"

@@ -74,6 +74,7 @@ def build_app() -> Starlette:
     from api.auth_middleware import AuthMiddleware
     from api import (
         db_config,
+        feedback_annotation,
         feedback_stats,
         message_feedback,
         report_file,
@@ -97,6 +98,9 @@ def build_app() -> Starlette:
         *trace_routes.routes,
         *db_config.routes,
         *wren_semantic.routes,
+        # 标注页的删除/移出端点（全部 require_admin）。**必须挂进来**：不挂的话
+        # REFUSE_NONADMIN 的探测会落到 404（走不进守卫）而误判成「守住了」。
+        *feedback_annotation.routes,
     ]
     return AuthMiddleware(Starlette(routes=routes))
 
@@ -171,6 +175,10 @@ REFUSE_NONADMIN = [
     ("GET", "/api/mcp/status", None),
     ("POST", "/api/mcp/reload", None),
     ("POST", "/api/db-configs/somedb/test", {"host": "10.0.0.1", "port": 6379}),
+    # 移出 BadCase：非管理员必须挡在守卫上（`require_admin` 在摸 body/Langfuse 之前
+    # 就 return，所以带上再离谱的 body 也不会触网）。
+    ("POST", "/api/feedback/annotations/revoke-badcase",
+     {"item_id": "x", "trace_id": "t", "thread_id": "th", "message_id": "m"}),
 ]
 
 # 登录即可（非管理员也要能进）：公钥不是机密，语义库只读浏览对已授权用户开放，

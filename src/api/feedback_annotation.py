@@ -10,6 +10,7 @@
     POST /api/feedback/annotations/{tid}/{mid}/confirm          {gold_sql, bad_type, note} → BadCase
     POST /api/feedback/annotations/{tid}/{mid}/confirm-good     {sql} → Good Set（正向样本）
     POST /api/feedback/annotations/{tid}/{mid}/revoke-good      撤回入集（删数据集条目 + 回 queued）
+    POST /api/feedback/annotations/revoke-badcase              移出 BadCase（按 item_id 删条目 + 状态置 invalid）
     GET  /api/feedback/dataset-stats                            数据集规模 + 金标缺口 + 队列深度
 
 状态机（store.ANNOTATION_STATUSES）：
@@ -1006,6 +1007,36 @@ class _DeleteUnresolved(Exception):
     """能定位到候选条目但不敢确定删哪条（存量条目无 message_id 且多条）。"""
 
 
+def _list_dataset_items(dataset_name: str, trace_id: str, limit: int = 100) -> list:
+    """按 `source_trace_id` 拉某数据集下的候选条目（一次阻塞 HTTP，调用方负责 offload）。
+
+    撤回 good / 移出 badcase 共用的第一跳。Langfuse 的 `api.dataset_items.list` 支持
+    `source_trace_id` 过滤，但它只给出「属于这条 trace 的候选」——**删哪一条仍由调用方
+    各自判定**（good 认 message_id、badcase 认 item_id），所以这里不做任何取舍。
+    """
+    from agent.trace.langfuse_client import get_client
+
+    resp = get_client().api.dataset_items.list(
+        dataset_name=dataset_name, source_trace_id=trace_id, limit=limit
+    )
+    return list(resp.data or [])
+
+
+def _delete_items(items: list) -> int:
+    """逐个 `dataset_items.delete`，返回成功删除条数（拿不到 id 的条目跳过，不计数）。"""
+    from agent.trace.langfuse_client import get_client
+
+    client = get_client()
+    deleted = 0
+    for it in items:
+        item_id = str(getattr(it, "id", "") or "")
+        if not item_id:
+            continue
+        client.api.dataset_items.delete(item_id)
+        deleted += 1
+    return deleted
+
+
 def _delete_goodcase_items(ann, trace_id: str, source: str = "") -> int:
     """删除该消息在 Dataset:goodcase 的条目，返回删除条数。定位不了则抛 _DeleteUnresolved。
 
@@ -1019,13 +1050,7 @@ def _delete_goodcase_items(ann, trace_id: str, source: str = "") -> int:
     """
     if not trace_id:
         raise _DeleteUnresolved("拿不到 trace_id，无法定位数据集条目")
-    from agent.trace.langfuse_client import get_client
-
-    client = get_client()
-    resp = client.api.dataset_items.list(
-        dataset_name="goodcase", source_trace_id=trace_id, limit=100
-    )
-    items = list(resp.data or [])
+    items = _list_dataset_items("goodcase", trace_id)
     if source:
         items = [
             it for it in items
@@ -1046,14 +1071,29 @@ def _delete_goodcase_items(ann, trace_id: str, source: str = "") -> int:
             f"该 trace 下有 {len(items)} 条 Good Case 且都没有 message_id，"
             "无法确定该删哪条"
         )
-    deleted = 0
-    for it in targets:
-        item_id = str(getattr(it, "id", "") or "")
-        if not item_id:
-            continue
-        client.api.dataset_items.delete(item_id)
-        deleted += 1
-    return deleted
+    return _delete_items(targets)
+
+
+def _remove_badcase_item(trace_id: str, item_id: str) -> tuple[int, int]:
+    """删 Dataset:badcase 里**指定 item_id** 的那一条，返回 (删除条数, 该 trace 剩余条数)。
+
+    用 item_id 而不是 message_id / 「唯一条」回退：同一条 trace 下**可能同时挂着两条**
+    （collect_badcase 自动采过一条，之后人工又确认出一条，两者 source_trace_id 相同），
+    回退判据会歧义。前端列表里的每一条都带 item_id，两类来源都有。
+
+    返回「剩余条数」是要紧的：`badcase_status.json` 是**按 trace 键**的，只要该 trace 下
+    还有别的 BadCase 条目，就不能把状态置 invalid —— 那会把兄弟条目一起踢出回归集。
+
+    条目已不在数据集 → `(0, len(items))`，与 good 那条路的 `deleted==0` 同义：不算错。
+    """
+    if not trace_id or not item_id:
+        raise _DeleteUnresolved("缺少 trace_id / item_id，无法定位 BadCase 条目")
+    items = _list_dataset_items("badcase", trace_id)
+    targets = [it for it in items if str(getattr(it, "id", "") or "") == item_id]
+    if not targets:
+        return 0, len(items)
+    deleted = _delete_items(targets)
+    return deleted, len(items) - deleted
 
 
 def withdraw_auto_good(thread_id: str, message_id: str) -> int:
@@ -1141,6 +1181,115 @@ async def revoke_good_annotation(request: Request):
     payload = {"ok": True, "annotation": updated.to_mapping(), "deleted_items": deleted}
     if warning:
         payload["warning"] = warning
+    return json_response(payload)
+
+
+async def remove_badcase_annotation(request: Request):
+    from api._common import require_admin
+    require_admin(request)
+    """POST /api/feedback/annotations/revoke-badcase —— 把一条 BadCase 移出。
+
+    body: `{"item_id": …, "trace_id": …, "thread_id": …, "message_id": …}`（后两个可空）。
+
+    与 `revoke-good` 同构之处：Langfuse 侧**真删条目**（数据集是评测基准，留一条错标就是
+    毒化），并把 `badcase_status.json` 的该 trace 置 `invalid` 让它不再进回归集。
+
+    三处刻意的差异：
+    1. **定位键是 dataset `item_id`**，不是 message_id。自动采集条（collect_badcase）
+       根本没有 message_id，且同一条 trace 可能同时挂着 auto 与 user-annotation 两条，
+       「唯一条」回退会歧义。
+    2. **本地标注行是「若有则回退」**：自动采集条本就没有本地行，`get_annotation` 返回
+       None **是正常情况**，不像 revoke-good 那样 409。
+    3. **状态标记只能在「该 trace 已无 BadCase 条目」时才关**，且**只置 invalid、绝不删条目**
+       —— `badcase_status` 是按 trace 键的，提前关会连兄弟条目一起踢出回归集；而
+       `run_experiment` 对「查不到的 trace」是 fail-open（默认收录），删了反而重新进集。
+    """
+    data = await parse_body(request)
+    item_id = str(data.get("item_id", "") or "").strip()
+    trace_id = str(data.get("trace_id", "") or "").strip()
+    thread_id = str(data.get("thread_id", "") or "").strip()
+    message_id = str(data.get("message_id", "") or "").strip()
+    if not item_id or not trace_id:
+        return json_response(
+            {"error": "缺少 item_id / trace_id，无法定位 BadCase 条目",
+             "reason": "bad_request"},
+            status=400,
+        )
+
+    warns: list[str] = []
+    deleted = 0
+    remaining = 0
+    try:
+        from agent.trace.langfuse_client import langfuse_enabled
+
+        if langfuse_enabled():
+            # 同步 SDK（list + delete，至少一次网络往返）→ 别占事件循环
+            deleted, remaining = await asyncio.to_thread(
+                _remove_badcase_item, trace_id, item_id
+            )
+            if not deleted:
+                warns.append("数据集里没找到对应条目（可能已被手工删除）")
+        else:
+            warns.append("Langfuse 已禁用，数据集条目未删除")
+    except _DeleteUnresolved as e:
+        return json_response(
+            {"error": f"{e}；请到 Langfuse 数据集 UI 手动删除后重试", "reason": "ambiguous"},
+            status=409,
+        )
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[annotation] 移出 BadCase 时删除数据集条目失败: %s", e)
+        return json_response(
+            {"error": f"删除数据集条目失败（{e}）；本地未回退，可重试或去 Langfuse UI 手动删",
+             "reason": "delete_failed"},
+            status=502,
+        )
+
+    # 关状态标记：**只在该 trace 已无 BadCase 条目时**（badcase_status 按 trace 键）。
+    # 失败只降级成 warning，**不回滚已删条目** —— 条目删了就已经不在回归集里了。
+    status_closed = False
+    if remaining == 0:
+        try:
+            from agent.eval.badcase_status import mark as _mark_badcase
+
+            status_closed = bool(await offload(
+                _mark_badcase, trace_id, "invalid",
+                f"移出 BadCase（标注页，item={item_id[:12]}）",
+            ))
+            if not status_closed:
+                warns.append("badcase_status 未关闭（trace_id 前缀歧义？），请手动 mark invalid")
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("[annotation] 移出 BadCase 时关闭状态标记失败: %s", e)
+            warns.append("badcase_status 未关闭，请手动 mark invalid")
+    else:
+        warns.append(f"该 trace 下还有 {remaining} 条 BadCase，状态未关闭")
+
+    # 本地回退：自动采集条没有本地行，`None` 是正常情况，不是错误。
+    updated = None
+    local_reopened = False
+    if thread_id and message_id:
+        ann = await offload(store.get_annotation, thread_id, message_id)
+        if ann is None:
+            pass
+        elif ann.status == "badcase":
+            updated = await offload(
+                store.reopen_annotation, thread_id, message_id, from_status="badcase"
+            )
+            local_reopened = updated is not None
+        else:
+            warns.append(f"本地状态为 {ann.status}，未回退")
+
+    _logger.info("[annotation] 移出 BadCase trace=%s item=%s deleted=%s remaining=%s closed=%s",
+                 trace_id[:12], item_id[:12], deleted, remaining, status_closed)
+    payload = {
+        "ok": True,
+        "deleted_items": deleted,
+        "remaining_items": remaining,
+        "local_reopened": local_reopened,
+        "status_closed": status_closed,
+        "annotation": updated.to_mapping() if updated else None,
+    }
+    if warns:
+        payload["warning"] = "；".join(warns)
     return json_response(payload)
 
 
@@ -1551,4 +1700,8 @@ routes: list[BaseRoute] = [
           confirm_good_annotation, methods=["POST"]),
     Route("/api/feedback/annotations/{thread_id}/{message_id}/revoke-good",
           revoke_good_annotation, methods=["POST"]),
+    # 移出 BadCase：按 dataset item_id 定位（自动采集条没有 message_id），故是字面量段
+    # 而非 /{tid}/{mid} 下的子路径。与 /annotations/clear 同型（段数不同，不与上面冲突）。
+    Route("/api/feedback/annotations/revoke-badcase",
+          remove_badcase_annotation, methods=["POST"]),
 ]
