@@ -396,6 +396,21 @@ def main():
     # Setup environment
     setup_environment()
 
+    # 运行时猴子补丁（Phase 2-3）：集中应用 4 个补丁（check_progress / sync_launcher /
+    # deepagents_async_config_patch / filesystem_backend_patch）。必须在预检
+    # （preflight_check 会 import mcp_tool）与图加载之前 —— 补丁要早于 deepagents 的
+    # 工具构建与 backend 实例化。幂等，main_agent 里还有一次兜底调用。
+    try:
+        from agent.bootstrap import apply_patches
+
+        apply_patches()
+    except Exception as e:  # noqa: BLE001  补丁失败要吵，但不该只在这里拦住启动
+        print(f"\n🚫 运行时补丁应用失败: {e}", flush=True)
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
+
     # 文件日志目录：确保存在（uvicorn log_config 的 FileHandler 需要；core 的日志也落这儿）
     log_file = resolve_log_file()
     log_file.parent.mkdir(parents=True, exist_ok=True)

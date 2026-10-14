@@ -5,14 +5,13 @@ from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
-# 增强 check_async_task 返回详细进度（必须在 create_deep_agent 之前导入）
-import agent.subagents.check_progress  # noqa: F401
-# 自动同步子智能体 todos 到主智能体 state（零前端改动方案）
-import agent.subagents.sync_launcher  # noqa: F401
-# 透传父 run 的 configurable 到异步子 agent run（前端选库 db_name 才能到达子 agent）
-import agent.middlewares.deepagents_async_config_patch
-# 修复 Windows/Py3.13 下 _resolve_path 的 `\\?\` 前缀误报越界（必须早于实例化导入）
-import agent.utils.filesystem_backend_patch  # noqa: F401
+# 运行时猴子补丁集中入口（Phase 2-3）。原先这 4 个补丁靠下方分散的 `# noqa: F401`
+# import 触发；现在集中到 bootstrap.apply_patches()，并在 start_server.py 早期显式调用。
+# 此处保留一次兜底调用：走 `langgraph dev` / 直接 import main_agent 的入口不经过
+# start_server.py，少了这一行补丁就静默不生效（幂等，重复调用无副作用）。
+from agent.bootstrap import apply_patches
+
+apply_patches()
 
 from deepagents import create_deep_agent, AsyncSubAgent, DeepAgentState
 from deepagents.backends import FilesystemBackend, CompositeBackend
