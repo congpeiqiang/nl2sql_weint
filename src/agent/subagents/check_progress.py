@@ -1511,295 +1511,374 @@ def _add_incremental(result: dict, thread_values: dict, since: Optional[int]) ->
         result["new_messages_truncated"] = True
 
 
-def apply_patch():
-    """Monkey-patch deepagents async_subagents 模块。幂等。"""
-    global _PATCHED
-    if _PATCHED:
-        return
-    _PATCHED = True
+# ══════════════════════════════════════════════════════════════════════
+# deepagents async_subagents 替换件（Phase 2-2a 从 apply_patch 内嵌提升）
+#
+# 提升动机：apply_patch 曾长到 537 行，但其中约 500 行都在内嵌 def 里，真正的
+# 『装哪几个件』只有几十行 —— 读的人得先翻过 500 行才看得到装配骨架。
+#
+# ⚠️ 这些名字必须留在**本模块**：`scripts/verify_*.py` 有 8 个脚本按模块路径
+# 读它们，`from x import *` 传不了下划线开头的名字。回归见
+# `src/test/unit/test_check_progress_patch.py`。
+# ══════════════════════════════════════════════════════════════════════
 
-    try:
-        from deepagents.middleware import async_subagents as _mod
-    except ImportError:
-        _logger.warning("[check_progress] deepagents not found, skip patch")
-        return
-
-    # ── 1. 替换 _build_check_result：支持 running 中间态 ──────────────
-    def _enhanced_build_check_result(run, thread_id, thread_values, full=False):
-        result = {"status": run["status"], "thread_id": thread_id}
-        messages = (
-            thread_values.get("messages", [])
-            if isinstance(thread_values, dict)
-            else []
-        )
-        # 终态改判（2026-09-28 生产事故）：run 级 status 是 SDK 的事，**内容**里可能躺着
-        # 一条失败终局（超时/额度耗尽/未配模型被中间件吞成友好文案后，图照常 END ⇒
-        # run 报 success）。不读戳的话，主 agent 会拿到 `status: "success"` + 一段超时
-        # 文案，只能在自己的推理里写「marked as success, but the result is actually a
-        # timeout error」——契约错，不是模型的错。判定链见 agent/utils/failure_signal.py。
-        #
-        # ⚠️ 只在 run 已经 success 时读戳：running 时绝不降级（戳可能是上一轮遗留的，
-        # 把在跑的 run 判失败会制造新事故）。
-        if result["status"] == "success":
-            _mark = last_failed_mark(messages)
-            if _mark:
-                _st = run_status_for(_mark["kind"])
-                _detail = detail_of(_mark)
-                _logger.warning(
-                    "[check_progress] 子 run success 但末条是失败终局（kind=%s）→ 改判 %s",
-                    _mark["kind"], _st,
-                )
-                run = {**run, "status": _st, "error": _detail or run.get("error")}
-                result["status"] = _st
-                result["error_kind"] = _mark["kind"]
-                if _detail:
-                    result["error"] = _detail
-        if run["status"] == "success":
-            sql = ""  # 无消息时保持未定义安全（下面 if messages 分支才赋值）
-            if messages:
-                # 结果锚点 = 最后一条有实质内容的 AI 消息（不再机械取 messages[-1]）：
-                # 子 agent 以工具调用收尾是结构性必然，末条必是短收尾语（见
-                # _pick_result_message 注释）。下标一并回传便于排查取错了哪条。
-                _src_idx, raw_content, _picked = _pick_result_message(messages)
-                summarized = _summarize_result(raw_content, full=bool(full))
-                result["result"] = summarized
-                result["result_size"] = {
-                    "chars": len(raw_content),
-                    "summarized": len(raw_content)
-                    > (_MAX_RESULT_CHARS_FULL if full else _MAX_RESULT_CHARS),
-                }
-                result["result_source"] = {
-                    "index": _src_idx,
-                    "total": len(messages),
-                    "picked": _picked,
-                }
-                if full:
-                    result["full"] = True
-            else:
-                result["result"] = "(completed with no output messages)"
-            # 报告装配需要真实执行 SQL：从子线程消息提取最后一次 run_sql 附到 result.sql
-            sql = _extract_last_sql(messages)
-            # SQL 来源判决（cube_metric / cube_metric+llm_outer / llm_from_schema /
-            # unknown）—— **写在 if/else 分支之前**，让「有 run_sql」与「纯 Cube
-            # 快速通道」两条路都带上标记（报告侧据此决定出不出一行「SQL 生成来源」）。
-            # 判据唯一实现在 agent.utils.process_audit.judge_sql_origin，manifest /
-            # check 结果 / 报告三处共用同一份，不在这里重写第二套。审计旁路。
+def _enhanced_build_check_result(run, thread_id, thread_values, full=False):
+    result = {"status": run["status"], "thread_id": thread_id}
+    messages = (
+        thread_values.get("messages", [])
+        if isinstance(thread_values, dict)
+        else []
+    )
+    # 终态改判（2026-09-28 生产事故）：run 级 status 是 SDK 的事，**内容**里可能躺着
+    # 一条失败终局（超时/额度耗尽/未配模型被中间件吞成友好文案后，图照常 END ⇒
+    # run 报 success）。不读戳的话，主 agent 会拿到 `status: "success"` + 一段超时
+    # 文案，只能在自己的推理里写「marked as success, but the result is actually a
+    # timeout error」——契约错，不是模型的错。判定链见 agent/utils/failure_signal.py。
+    #
+    # ⚠️ 只在 run 已经 success 时读戳：running 时绝不降级（戳可能是上一轮遗留的，
+    # 把在跑的 run 判失败会制造新事故）。
+    if result["status"] == "success":
+        _mark = last_failed_mark(messages)
+        if _mark:
+            _st = run_status_for(_mark["kind"])
+            _detail = detail_of(_mark)
+            _logger.warning(
+                "[check_progress] 子 run success 但末条是失败终局（kind=%s）→ 改判 %s",
+                _mark["kind"], _st,
+            )
+            run = {**run, "status": _st, "error": _detail or run.get("error")}
+            result["status"] = _st
+            result["error_kind"] = _mark["kind"]
+            if _detail:
+                result["error"] = _detail
+    if run["status"] == "success":
+        sql = ""  # 无消息时保持未定义安全（下面 if messages 分支才赋值）
+        if messages:
+            # 结果锚点 = 最后一条有实质内容的 AI 消息（不再机械取 messages[-1]）：
+            # 子 agent 以工具调用收尾是结构性必然，末条必是短收尾语（见
+            # _pick_result_message 注释）。下标一并回传便于排查取错了哪条。
+            _src_idx, raw_content, _picked = _pick_result_message(messages)
+            summarized = _summarize_result(raw_content, full=bool(full))
+            result["result"] = summarized
+            result["result_size"] = {
+                "chars": len(raw_content),
+                "summarized": len(raw_content)
+                > (_MAX_RESULT_CHARS_FULL if full else _MAX_RESULT_CHARS),
+            }
+            result["result_source"] = {
+                "index": _src_idx,
+                "total": len(messages),
+                "picked": _picked,
+            }
+            if full:
+                result["full"] = True
+        else:
+            result["result"] = "(completed with no output messages)"
+        # 报告装配需要真实执行 SQL：从子线程消息提取最后一次 run_sql 附到 result.sql
+        sql = _extract_last_sql(messages)
+        # SQL 来源判决（cube_metric / cube_metric+llm_outer / llm_from_schema /
+        # unknown）—— **写在 if/else 分支之前**，让「有 run_sql」与「纯 Cube
+        # 快速通道」两条路都带上标记（报告侧据此决定出不出一行「SQL 生成来源」）。
+        # 判据唯一实现在 agent.utils.process_audit.judge_sql_origin，manifest /
+        # check 结果 / 报告三处共用同一份，不在这里重写第二套。审计旁路。
+        try:
+            from agent.utils.process_audit import judge_sql_origin
+            _origin = judge_sql_origin(messages, sql)
+            result["sql_origin"] = _origin.get("origin")
+            result["sql_origin_evidence"] = _origin.get("evidence") or {}
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[check_progress] SQL 来源判定失败: %s", f"{type(e).__name__}: {e}")
+        if sql:
+            result["sql"] = sql
+            # 真正下发目标库的物理 SQL：进程内复算后附指针 + 小字段。
+            # result["sql"] 是模型写的**语义层** SQL（引用 MDL 视图，粘进 MySQL
+            # 跑不了），物理 SQL 另起一节，两者都留、互不覆盖。
+            _tool_name, _ = _selected_sql_exec_meta(messages, sql)
+            _project, _conn = _resolve_wren_ctx(_tool_name)
+            _has_plan = _attach_physical_plan(
+                result,
+                plan_run_sql(_project, _conn, sql,
+                             _selected_sql_call_limit(messages, sql)),
+                "run_sql", _tool_name or "run_sql",
+            )
+            # 通道感知 SQL 注记（_build_sql_note）：wren 语义层通道的 SQL 是
+            # wren/PG 方言（引擎编译为目标库执行），「可直接运行」不成立 →
+            # 附方言转换提示；直连通道多行明细仍附旧版口径注（别拿明细去对
+            # 186/174 之类汇总数）。
+            _note = _build_sql_note(messages, sql)
+            if _note and _has_plan:
+                _note += _SEE_PHYSICAL_NOTE
+            if _note:
+                result["sql_note"] = _note
+            # sql-generation process_data 回填为产出 run_sql（若 dry_run 与
+            # 实际执行 SQL 不一致），保证中间产物与前端/报告 SQL 同源
+            _backfill_process_data_sql(messages, sql)
+            # S3-2 口径后置护栏：最终 SQL 命中「禁止表」→ 告警（软提醒，随 check
+            # 结果透传给主 agent，主 agent 决定改默认口径或说明依据）
             try:
-                from agent.utils.process_audit import judge_sql_origin
-                _origin = judge_sql_origin(messages, sql)
-                result["sql_origin"] = _origin.get("origin")
-                result["sql_origin_evidence"] = _origin.get("evidence") or {}
-            except Exception as e:  # noqa: BLE001
-                _logger.debug("[check_progress] SQL 来源判定失败: %s", f"{type(e).__name__}: {e}")
-            if sql:
-                result["sql"] = sql
-                # 真正下发目标库的物理 SQL：进程内复算后附指针 + 小字段。
-                # result["sql"] 是模型写的**语义层** SQL（引用 MDL 视图，粘进 MySQL
-                # 跑不了），物理 SQL 另起一节，两者都留、互不覆盖。
-                _tool_name, _ = _selected_sql_exec_meta(messages, sql)
-                _project, _conn = _resolve_wren_ctx(_tool_name)
+                from agent.settings.caliber_spec import caliber_sql_warning
+                _warn = caliber_sql_warning(sql, _current_db_name())
+                if _warn:
+                    result["caliber_warning"] = _warn
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            # 无 run_sql 但走了 Cube 快速通道 → 附「查询定义」（报告里作为
+            # 物理 SQL 的语义层来源保留）。run_sql 通道仍以真实 SQL 为准，两者互斥。
+            _cube = _extract_last_cube_call(messages)
+            if _cube:
+                result["cube_query"] = "\n".join(_cube["lines"])
+                # `sql_kind` 是历史字段、全仓**无活读者**（删除只制造兼容风险，
+                # 故保留原样）。它与新的 `sql_origin` 的关系一句话说清：
+                # `sql_kind == "cube"` ⇔ `sql_origin == "cube_metric"`；手写/混合
+                # 路径下 `sql_kind` 靠「键缺席」表达，这正是它无法区分混合路径、
+                # 需要 `sql_origin` 补位的原因。
+                result["sql_kind"] = "cube"
+                # 原始定义 + 工具名透传给 build_report：报告「业务口径」两层
+                # （LLM 摘要 + 模板结构）要靠它们查 cube 元数据里的中文描述。
+                # 传工具名而非项目路径：保持 result 可 JSON 序列化，且报告侧
+                # 用同一个 resolve_wren_ctx 自行解析（失败则降级，不影响出报告）。
+                result["cube_args"] = _cube.get("args") or {}
+                result["cube_tool"] = _cube.get("tool") or ""
+                _project, _conn = _resolve_wren_ctx(_cube["tool"])
                 _has_plan = _attach_physical_plan(
                     result,
-                    plan_run_sql(_project, _conn, sql,
-                                 _selected_sql_call_limit(messages, sql)),
-                    "run_sql", _tool_name or "run_sql",
+                    plan_cube_sql(_project, _conn, _cube["args"]),
+                    "cube", str(_cube["args"].get("cube") or _cube["tool"]),
                 )
-                # 通道感知 SQL 注记（_build_sql_note）：wren 语义层通道的 SQL 是
-                # wren/PG 方言（引擎编译为目标库执行），「可直接运行」不成立 →
-                # 附方言转换提示；直连通道多行明细仍附旧版口径注（别拿明细去对
-                # 186/174 之类汇总数）。
-                _note = _build_sql_note(messages, sql)
-                if _note and _has_plan:
-                    _note += _SEE_PHYSICAL_NOTE
-                if _note:
-                    result["sql_note"] = _note
-                # sql-generation process_data 回填为产出 run_sql（若 dry_run 与
-                # 实际执行 SQL 不一致），保证中间产物与前端/报告 SQL 同源
-                _backfill_process_data_sql(messages, sql)
-                # S3-2 口径后置护栏：最终 SQL 命中「禁止表」→ 告警（软提醒，随 check
-                # 结果透传给主 agent，主 agent 决定改默认口径或说明依据）
-                try:
-                    from agent.settings.caliber_spec import caliber_sql_warning
-                    _warn = caliber_sql_warning(sql, _current_db_name())
-                    if _warn:
-                        result["caliber_warning"] = _warn
-                except Exception:  # noqa: BLE001
-                    pass
-            else:
-                # 无 run_sql 但走了 Cube 快速通道 → 附「查询定义」（报告里作为
-                # 物理 SQL 的语义层来源保留）。run_sql 通道仍以真实 SQL 为准，两者互斥。
-                _cube = _extract_last_cube_call(messages)
-                if _cube:
-                    result["cube_query"] = "\n".join(_cube["lines"])
-                    # `sql_kind` 是历史字段、全仓**无活读者**（删除只制造兼容风险，
-                    # 故保留原样）。它与新的 `sql_origin` 的关系一句话说清：
-                    # `sql_kind == "cube"` ⇔ `sql_origin == "cube_metric"`；手写/混合
-                    # 路径下 `sql_kind` 靠「键缺席」表达，这正是它无法区分混合路径、
-                    # 需要 `sql_origin` 补位的原因。
-                    result["sql_kind"] = "cube"
-                    # 原始定义 + 工具名透传给 build_report：报告「业务口径」两层
-                    # （LLM 摘要 + 模板结构）要靠它们查 cube 元数据里的中文描述。
-                    # 传工具名而非项目路径：保持 result 可 JSON 序列化，且报告侧
-                    # 用同一个 resolve_wren_ctx 自行解析（失败则降级，不影响出报告）。
-                    result["cube_args"] = _cube.get("args") or {}
-                    result["cube_tool"] = _cube.get("tool") or ""
-                    _project, _conn = _resolve_wren_ctx(_cube["tool"])
-                    _has_plan = _attach_physical_plan(
-                        result,
-                        plan_cube_sql(_project, _conn, _cube["args"]),
-                        "cube", str(_cube["args"].get("cube") or _cube["tool"]),
-                    )
-                    # 取到物理 SQL → 定义节改注「来源」；取不到 → 如实说没有
-                    _note = _CUBE_DEF_NOTE if _has_plan else _CUBE_NOTE
-                    if not _cube.get("ok"):
-                        # 全是失败调用：定义节展示的就是没跑成功的那次，如实标注
-                        _note += _CUBE_ALL_FAILED_NOTE
-                    elif _cube.get("skipped_failed"):
-                        # 锚点跳过失败调用 → 说明展示的不是最后一次，防读者误判
-                        _note += _CUBE_SKIPPED_NOTE.format(n=_cube["skipped_failed"])
-                    result["sql_note"] = _note
-            # 大结果全量文件指针（QueryResultOffload 落盘）附到 result，
-            # build_report 读盘后把完整结果表嵌入报告正文（0 模型开销）
-            full_files = _collect_full_result_files(messages)
-            if full_files:
-                result["full_result_files"] = full_files
-            # 中间产物审计：写 manifest + 平台合成的 routing / cube_summary。
-            # 之所以在这里（而不是 langfuse_span 的工具边界）—— 这里是唯一同时具备
-            # 「完整子任务消息 + 已算好的锚点 SQL + 用户最终会看到的那份 check 结果」
-            # 的地方；工具边界一次只有一条工具消息，看不到全貌。
-            # `write_process_artifacts` 自带 fail-open，异常只意味着没有审计件。
-            try:
-                from agent.middlewares.langfuse_span import _active_workspace_path
-                from agent.utils.process_audit import write_process_artifacts
-                # 问题身份走 `_question_identity`（metadata → trace_bind 子任务绑定）：
-                # 本处所在的是**续跑 run**，其 metadata 结构性没有 user_question（见该函数 docstring）
-                _qid, _uq = _question_identity(thread_id)
-                _ptrs = write_process_artifacts(
-                    root=_active_workspace_path(),
-                    session_thread_id=_session_thread_id(),
-                    sub_thread_id=thread_id,
-                    messages=messages,
-                    question_id=_qid,
-                    user_question=_uq,
-                    db_name=_current_db_name(),
-                    status="success",
-                    producing_sql=sql,
-                    result=result,
-                )
-                if _ptrs.get("manifest"):
-                    # 小指针（~100 字节），让主 agent/事后审计知道审计件在哪
-                    result["process_manifest"] = _ptrs["manifest"]
-            except Exception as e:  # noqa: BLE001
-                _logger.debug("[check_progress] 写中间产物审计失败: %s", f"{type(e).__name__}: {e}")
-            # S8 答案指纹：随本次 check 结果一起写回主 agent state（图内 Command），
-            # 供追问归因读取。**与 manifest 各自 fail-open**，互不拖累。
-            _attach_answer_fingerprint(result, messages, thread_id)
-        elif run["status"] == "error":
-            error_detail = run.get("error")
-            result["error"] = (
-                str(error_detail) if error_detail
-                else "The async subagent encountered an error."
+                # 取到物理 SQL → 定义节改注「来源」；取不到 → 如实说没有
+                _note = _CUBE_DEF_NOTE if _has_plan else _CUBE_NOTE
+                if not _cube.get("ok"):
+                    # 全是失败调用：定义节展示的就是没跑成功的那次，如实标注
+                    _note += _CUBE_ALL_FAILED_NOTE
+                elif _cube.get("skipped_failed"):
+                    # 锚点跳过失败调用 → 说明展示的不是最后一次，防读者误判
+                    _note += _CUBE_SKIPPED_NOTE.format(n=_cube["skipped_failed"])
+                result["sql_note"] = _note
+        # 大结果全量文件指针（QueryResultOffload 落盘）附到 result，
+        # build_report 读盘后把完整结果表嵌入报告正文（0 模型开销）
+        full_files = _collect_full_result_files(messages)
+        if full_files:
+            result["full_result_files"] = full_files
+        # 中间产物审计：写 manifest + 平台合成的 routing / cube_summary。
+        # 之所以在这里（而不是 langfuse_span 的工具边界）—— 这里是唯一同时具备
+        # 「完整子任务消息 + 已算好的锚点 SQL + 用户最终会看到的那份 check 结果」
+        # 的地方；工具边界一次只有一条工具消息，看不到全貌。
+        # `write_process_artifacts` 自带 fail-open，异常只意味着没有审计件。
+        try:
+            from agent.middlewares.langfuse_span import _active_workspace_path
+            from agent.utils.process_audit import write_process_artifacts
+            # 问题身份走 `_question_identity`（metadata → trace_bind 子任务绑定）：
+            # 本处所在的是**续跑 run**，其 metadata 结构性没有 user_question（见该函数 docstring）
+            _qid, _uq = _question_identity(thread_id)
+            _ptrs = write_process_artifacts(
+                root=_active_workspace_path(),
+                session_thread_id=_session_thread_id(),
+                sub_thread_id=thread_id,
+                messages=messages,
+                question_id=_qid,
+                user_question=_uq,
+                db_name=_current_db_name(),
+                status="success",
+                producing_sql=sql,
+                result=result,
             )
-            # 失败路径也留一份 manifest，闭合审计记录缺口（否则「跑挂了的那些问题」
-            # 在审计目录里完全不存在，只剩产物孤儿目录）。
-            # status != "success" ⇒ 不写 routing / cube_summary（没有可判的路由结论）。
-            # producing_sql 传空 ⇒ `sql_origin` 如实落 `unknown`，不猜。
-            try:
-                from agent.middlewares.langfuse_span import _active_workspace_path
-                from agent.utils.process_audit import write_process_artifacts
-                # 同成功路径：问题身份走 `_question_identity`（失败件也要能按问题归属）
-                _qid, _uq = _question_identity(thread_id)
-                _ptrs = write_process_artifacts(
-                    root=_active_workspace_path(),
-                    session_thread_id=_session_thread_id(),
-                    sub_thread_id=thread_id,
-                    messages=messages,
-                    question_id=_qid,
-                    user_question=_uq,
-                    db_name=_current_db_name(),
-                    status="error",
-                    producing_sql="",
-                    result=result,
-                )
-                if _ptrs.get("manifest"):
-                    result["process_manifest"] = _ptrs["manifest"]
-            except Exception as e:  # noqa: BLE001
-                _logger.debug("[check_progress] 写失败审计件失败: %s", f"{type(e).__name__}: {e}")
-            # 失败路径镜像一份（与成功路径同源同形状）：`final_sql` 空、`sql_origin`
-            # 多半 `unknown`，但 `db_name` / 问题身份 / `windows` 一样有效 —— 追问归因
-            # 时这几格照样要用（方案 §4.9「失败分支镜像一份」）。
-            _attach_answer_fingerprint(result, messages, thread_id)
-        elif run["status"] == "interrupted":
-            # 审批闸门已移除（2026-08-28 起 sql_approval 只读硬拦截、不再 raise
-            # interrupt），当前 interrupted 是 deepagents 上下文压缩等「会自恢复的
-            # 瞬时暂停」。归一为 running，让主 agent 继续轮询 check_async_task，
-            # 而非误判「等待 SQL 审批」。
-            result["status"] = "running"
-            result["note"] = (
-                "The subagent is briefly paused (e.g. context summarization) and "
-                "will resume automatically. Do NOT cancel or re-delegate; check "
-                "again later."
-            )
-        # running / 其他中间态：提取进度（thread_values 一并传入 → 权威源 state.todos 优先）
-        if messages or (isinstance(thread_values, dict) and thread_values.get("todos")):
-            _extract_progress(result, messages, thread_values)
-        return result
-
-    _mod._build_check_result = _enhanced_build_check_result
-
-    # ── 1b. 替换 _build_check_command：json.dumps 加 ensure_ascii=False ──
-    def _enhanced_build_check_command(result, task, tool_call_id):
-        from langgraph.types import Command
-        from langchain_core.messages import ToolMessage
-
-        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        last_updated_at = (
-            now if task["status"] != result["status"] else task["last_updated_at"]
+            if _ptrs.get("manifest"):
+                # 小指针（~100 字节），让主 agent/事后审计知道审计件在哪
+                result["process_manifest"] = _ptrs["manifest"]
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[check_progress] 写中间产物审计失败: %s", f"{type(e).__name__}: {e}")
+        # S8 答案指纹：随本次 check 结果一起写回主 agent state（图内 Command），
+        # 供追问归因读取。**与 manifest 各自 fail-open**，互不拖累。
+        _attach_answer_fingerprint(result, messages, thread_id)
+    elif run["status"] == "error":
+        error_detail = run.get("error")
+        result["error"] = (
+            str(error_detail) if error_detail
+            else "The async subagent encountered an error."
         )
-        updated_task = {
-            "task_id": task["task_id"],
-            "agent_name": task["agent_name"],
-            "thread_id": task["thread_id"],
-            "run_id": task["run_id"],
-            "status": result["status"],
-            "created_at": task["created_at"],
-            "last_checked_at": now,
-            "last_updated_at": last_updated_at,
-        }
-        # M-T5c：保留 description（_tasks_reducer 整条替换，不补会被抹掉）
-        if task.get("description"):
-            updated_task["description"] = task["description"]
-        # 同款：这几个键是 watcher（sync_subagent_todos）写在 async_tasks 里的，本函数
-        # 重建整条 → 不显式带上就被主 agent 的一次轮询抹掉。`error` 是失败原因（前端与
-        # 失败汇报读它），`failure_reported` 是跨线程/重启的去重标记（抹掉会导致同一条
-        # 失败被再汇报一次）。
-        for _k in ("error", "error_kind", "failure_reported"):
-            if task.get(_k) is not None and _k not in updated_task:
-                updated_task[_k] = task[_k]
-        # S8 答案指纹：**先 pop 再 dumps** —— 这个键是 state 内部通道，绝不能出现在给
-        # 模型看的 ToolMessage 正文里（否则会被当成可用输入去读/编）。同一份 `result`
-        # 既产出消息又产出 state 更新，是本函数作为「两条路径唯一漏斗」的既有性质。
-        _fp = result.pop(_FP_KEY, None)
-        update: dict = {
-            "messages": [ToolMessage(
-                json.dumps(result, ensure_ascii=False, indent=2),
-                tool_call_id=tool_call_id,
-            )],
-            "async_tasks": {task["task_id"]: updated_task},
-        }
-        if isinstance(_fp, dict) and _fp:
-            # 按 task_id 键控 + `_merge_dict_by_key` reducer：并发多查询各写各的键，
-            # 与 query_headers / subagent_steps_map 同一套机制（不会互相覆盖）。
-            update["answer_fingerprints"] = {task["task_id"]: _fp}
-        return Command(update=update)
+        # 失败路径也留一份 manifest，闭合审计记录缺口（否则「跑挂了的那些问题」
+        # 在审计目录里完全不存在，只剩产物孤儿目录）。
+        # status != "success" ⇒ 不写 routing / cube_summary（没有可判的路由结论）。
+        # producing_sql 传空 ⇒ `sql_origin` 如实落 `unknown`，不猜。
+        try:
+            from agent.middlewares.langfuse_span import _active_workspace_path
+            from agent.utils.process_audit import write_process_artifacts
+            # 同成功路径：问题身份走 `_question_identity`（失败件也要能按问题归属）
+            _qid, _uq = _question_identity(thread_id)
+            _ptrs = write_process_artifacts(
+                root=_active_workspace_path(),
+                session_thread_id=_session_thread_id(),
+                sub_thread_id=thread_id,
+                messages=messages,
+                question_id=_qid,
+                user_question=_uq,
+                db_name=_current_db_name(),
+                status="error",
+                producing_sql="",
+                result=result,
+            )
+            if _ptrs.get("manifest"):
+                result["process_manifest"] = _ptrs["manifest"]
+        except Exception as e:  # noqa: BLE001
+            _logger.debug("[check_progress] 写失败审计件失败: %s", f"{type(e).__name__}: {e}")
+        # 失败路径镜像一份（与成功路径同源同形状）：`final_sql` 空、`sql_origin`
+        # 多半 `unknown`，但 `db_name` / 问题身份 / `windows` 一样有效 —— 追问归因
+        # 时这几格照样要用（方案 §4.9「失败分支镜像一份」）。
+        _attach_answer_fingerprint(result, messages, thread_id)
+    elif run["status"] == "interrupted":
+        # 审批闸门已移除（2026-08-28 起 sql_approval 只读硬拦截、不再 raise
+        # interrupt），当前 interrupted 是 deepagents 上下文压缩等「会自恢复的
+        # 瞬时暂停」。归一为 running，让主 agent 继续轮询 check_async_task，
+        # 而非误判「等待 SQL 审批」。
+        result["status"] = "running"
+        result["note"] = (
+            "The subagent is briefly paused (e.g. context summarization) and "
+            "will resume automatically. Do NOT cancel or re-delegate; check "
+            "again later."
+        )
+    # running / 其他中间态：提取进度（thread_values 一并传入 → 权威源 state.todos 优先）
+    if messages or (isinstance(thread_values, dict) and thread_values.get("todos")):
+        _extract_progress(result, messages, thread_values)
+    return result
 
-    _mod._build_check_command = _enhanced_build_check_command
+def _enhanced_build_check_command(result, task, tool_call_id):
+    from langgraph.types import Command
+    from langchain_core.messages import ToolMessage
 
-    # ── 2. 替换 _build_check_tool：running 时也拉取 thread state ──────
-    _orig_build_check_tool = _mod._build_check_tool
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    last_updated_at = (
+        now if task["status"] != result["status"] else task["last_updated_at"]
+    )
+    updated_task = {
+        "task_id": task["task_id"],
+        "agent_name": task["agent_name"],
+        "thread_id": task["thread_id"],
+        "run_id": task["run_id"],
+        "status": result["status"],
+        "created_at": task["created_at"],
+        "last_checked_at": now,
+        "last_updated_at": last_updated_at,
+    }
+    # M-T5c：保留 description（_tasks_reducer 整条替换，不补会被抹掉）
+    if task.get("description"):
+        updated_task["description"] = task["description"]
+    # 同款：这几个键是 watcher（sync_subagent_todos）写在 async_tasks 里的，本函数
+    # 重建整条 → 不显式带上就被主 agent 的一次轮询抹掉。`error` 是失败原因（前端与
+    # 失败汇报读它），`failure_reported` 是跨线程/重启的去重标记（抹掉会导致同一条
+    # 失败被再汇报一次）。
+    for _k in ("error", "error_kind", "failure_reported"):
+        if task.get(_k) is not None and _k not in updated_task:
+            updated_task[_k] = task[_k]
+    # S8 答案指纹：**先 pop 再 dumps** —— 这个键是 state 内部通道，绝不能出现在给
+    # 模型看的 ToolMessage 正文里（否则会被当成可用输入去读/编）。同一份 `result`
+    # 既产出消息又产出 state 更新，是本函数作为「两条路径唯一漏斗」的既有性质。
+    _fp = result.pop(_FP_KEY, None)
+    update: dict = {
+        "messages": [ToolMessage(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            tool_call_id=tool_call_id,
+        )],
+        "async_tasks": {task["task_id"]: updated_task},
+    }
+    if isinstance(_fp, dict) and _fp:
+        # 按 task_id 键控 + `_merge_dict_by_key` reducer：并发多查询各写各的键，
+        # 与 query_headers / subagent_steps_map 同一套机制（不会互相覆盖）。
+        update["answer_fingerprints"] = {task["task_id"]: _fp}
+    return Command(update=update)
 
+def _reapply_task_descriptions(out, state):
+    from langgraph.types import Command
+
+    if not isinstance(out, Command):
+        return out
+    upd = out.update or {}
+    new_tasks = upd.get("async_tasks")
+    if not isinstance(new_tasks, dict) or not new_tasks:
+        return out
+    old_tasks = (state or {}).get("async_tasks") or {}
+    merged = {}
+    for tid, entry in new_tasks.items():
+        old = old_tasks.get(tid) or {}
+        if (
+            isinstance(entry, dict)
+            and not entry.get("description")
+            and old.get("description")
+        ):
+            entry = dict(entry)
+            entry["description"] = old["description"]
+        merged[tid] = entry
+    if merged != new_tasks:
+        upd["async_tasks"] = merged
+    return out
+
+def _relaunch_sync_after_redispatch(task_id, runtime, out):
+    """update_async_task 重派发后重建进度同步器（P0）。
+
+    deepagents 的 update_async_task 走 runs.create(multitask_strategy="interrupt")
+    换 run，但**不拉任何 sync watcher**；而 watcher 只由 start_async_task 拉起，
+    且终态写入后只多活 ~10s 就退出。于是重派发后 async_tasks[task] 变回 "running"、
+    active_queries=true、subagent_steps_map 冻结在中间态 —— 前端卡片永久「执行中」
+    （trace a6f86bbd）。这里照抄 api 侧 _ensure_sync_watcher（sql_approval.py /
+    task_cancel.py）的存活检查写法：只在 watcher 已退出时拉起（launch_sync 非幂等）。
+
+    pin_run_id=True：只跟踪刚创建的 run，避免窗口期读到旧 run 的终态。
+    """
+    try:
+        from agent.subagents.sync_subagent_todos import (
+            is_sync_alive,
+            launch_sync,
+        )
+
+        if is_sync_alive(task_id):
+            return  # watcher 还活着，它自己会看到新 run
+        entry = ((getattr(out, "update", None) or {}).get("async_tasks") or {}).get(
+            task_id
+        )
+        if not isinstance(entry, dict):
+            entry = (
+                (getattr(runtime, "state", None) or {}).get("async_tasks") or {}
+            ).get(task_id)
+        if not isinstance(entry, dict):
+            return
+        if str(entry.get("status") or "") != "running":
+            return  # 只有「刚被改回 running」的重派发才需要重建 watcher
+        # runtime.state 是图状态通道（不含 thread_id），主线程 id 只能从 config 取
+        cfg = (getattr(runtime, "config", None) or {}).get("configurable") or {}
+        main_thread_id = cfg.get("thread_id") or getattr(
+            getattr(runtime, "execution_info", None), "thread_id", None
+        )
+        if not main_thread_id:
+            _logger.warning(
+                "[check_progress] 重派发但取不到主线程 id，跳过 watcher 拉起: %s",
+                str(task_id)[:8],
+            )
+            return
+        launch_sync(
+            main_thread_id,
+            task_id,
+            str(entry.get("agent_name") or "nl2sql"),
+            entry,
+            pin_run_id=True,
+        )
+        _logger.info(
+            "[check_progress] 重派发后重建 sync watcher: sub=%s run=%s",
+            str(task_id)[:8],
+            str(entry.get("run_id"))[:8],
+        )
+    except Exception as e:  # noqa: BLE001
+        # watcher 拉起失败绝不能让工具调用失败
+        _logger.warning("[check_progress] 重建 sync watcher 失败: %s", f"{type(e).__name__}: {e}")
+
+def _make_patched_build_check_tool(mod, orig_build_check_tool):
+    """_patched_build_check_tool 的工厂。
+
+    参数 = apply_patch 时期的两个闭包捕获：deepagents async_subagents 模块
+    与被替换的原函数。显式化之后，本文件里「谁依赖什么」不必再往上翻
+    500 行才能看出来。
+    """
     def _patched_build_check_tool(clients):
-        tool = _orig_build_check_tool(clients)
+        tool = orig_build_check_tool(clients)
 
         # ── sync ──
         def _check_sync(
@@ -1808,7 +1887,7 @@ def apply_patch():
             since: Optional[int] = None,
             full: Optional[bool] = None,
         ):
-            task = _mod._resolve_tracked_task(task_id, runtime)
+            task = mod._resolve_tracked_task(task_id, runtime)
             if isinstance(task, str):
                 return task
             client = clients.get_sync(task["agent_name"])
@@ -1830,11 +1909,11 @@ def apply_patch():
                 except Exception:
                     pass
 
-            result = _mod._build_check_result(
+            result = mod._build_check_result(
                 run, task["thread_id"], thread_values, full=bool(full)
             )
             _add_incremental(result, thread_values, since)
-            return _mod._build_check_command(result, task, runtime.tool_call_id)
+            return mod._build_check_command(result, task, runtime.tool_call_id)
 
         # ── async ──
         async def _check_async(
@@ -1843,7 +1922,7 @@ def apply_patch():
             since: Optional[int] = None,
             full: Optional[bool] = None,
         ):
-            task = _mod._resolve_tracked_task(task_id, runtime)
+            task = mod._resolve_tracked_task(task_id, runtime)
             if isinstance(task, str):
                 return task
             client = clients.get_async(task["agent_name"])
@@ -1886,11 +1965,11 @@ def apply_patch():
             # `get_config()` 读本请求的 db_name/thread_id，而 contextvars 只有
             # to_thread 会传播（见 utils/offload 文件头）。
             result = await offload(
-                _mod._build_check_result, run, task["thread_id"], thread_values,
+                mod._build_check_result, run, task["thread_id"], thread_values,
                 full=bool(full),
             )
             _add_incremental(result, thread_values, since)
-            return _mod._build_check_command(result, task, runtime.tool_call_id)
+            return mod._build_check_command(result, task, runtime.tool_call_id)
 
         tool.func = _check_sync
         tool.coroutine = _check_async
@@ -1908,144 +1987,96 @@ def apply_patch():
             "finished task's result is fixed, so re-running it produces no new data."
         )
         return tool
+    return _patched_build_check_tool
 
-    _mod._build_check_tool = _patched_build_check_tool
+def _make_patched_build_update_tool(orig):
+    """_patched_build_update_tool 的工厂。
+
+    参数 = 被替换的原 _build_update_tool（原先以默认参数 `_orig=` 传，提升后
+    必须由 apply_patch 显式给出——模块级拿不到 `_mod`）。
+    """
+    def _patched_build_update_tool(agent_map, clients):
+        tool = orig(agent_map, clients)
+        orig_func, orig_coro = tool.func, tool.coroutine
+
+        def _w(task_id: str, message: str, runtime: Annotated[ToolRuntime, InjectedToolArg()]):
+            out = _reapply_task_descriptions(
+                orig_func(task_id, message, runtime), runtime.state
+            )
+            _relaunch_sync_after_redispatch(task_id, runtime, out)
+            return out
+
+        async def _aw(task_id: str, message: str, runtime: Annotated[ToolRuntime, InjectedToolArg()]):
+            out = _reapply_task_descriptions(
+                await orig_coro(task_id, message, runtime), runtime.state
+            )
+            _relaunch_sync_after_redispatch(task_id, runtime, out)
+            return out
+
+        tool.func, tool.coroutine = _w, _aw
+        return tool
+    return _patched_build_update_tool
+
+def _make_patched_build_list_tasks_tool(orig):
+    """_patched_build_list_tasks_tool 的工厂。
+
+    参数 = 被替换的原 _build_list_tasks_tool。同上行，理由一致。
+    """
+    def _patched_build_list_tasks_tool(clients):
+        tool = orig(clients)
+        orig_func, orig_coro = tool.func, tool.coroutine
+
+        def _w(runtime: Annotated[ToolRuntime, InjectedToolArg()], status_filter=None):
+            return _reapply_task_descriptions(
+                orig_func(runtime, status_filter), runtime.state
+            )
+
+        async def _aw(runtime: Annotated[ToolRuntime, InjectedToolArg()], status_filter=None):
+            return _reapply_task_descriptions(
+                await orig_coro(runtime, status_filter), runtime.state
+            )
+
+        tool.func, tool.coroutine = _w, _aw
+        return tool
+    return _patched_build_list_tasks_tool
+
+
+def apply_patch():
+    """Monkey-patch deepagents async_subagents 模块。幂等。
+
+    Phase 2-2a：原先内嵌在本函数里的 7 个装配件已提升为模块级（见上方那段）。
+    本函数只剩「取原函数 → 装替换件」的骨架，一眼能看清补了什么。
+    """
+    global _PATCHED
+    if _PATCHED:
+        return
+    _PATCHED = True
+
+    try:
+        from deepagents.middleware import async_subagents as _mod
+    except ImportError:
+        _logger.warning("[check_progress] deepagents not found, skip patch")
+        return
+
+    # ── 1. 替换 _build_check_result / _build_check_command：支持 running 中间态 ──
+    _mod._build_check_result = _enhanced_build_check_result
+    _mod._build_check_command = _enhanced_build_check_command
+
+    # ── 2. 替换 _build_check_tool：running 时也拉取 thread state ──
+    # 顺序不可颠倒：先把原函数取出来，再装替换件。
+    _mod._build_check_tool = _make_patched_build_check_tool(
+        _mod, _mod._build_check_tool
+    )
 
     # ── 3. 替换 _build_update_tool / _build_list_tasks_tool：description 耐久 ──
     # deepagents 的 update_async_task / list_async_tasks 重建 AsyncTask 时丢掉
-    # description，且 _tasks_reducer 是整条替换 → 前端任务描述会被抹掉（M-T5c）。
-    # 这里在返回前把旧 state 里的 description 补回（check_async_task 已单独修）。
-    def _reapply_task_descriptions(out, state):
-        from langgraph.types import Command
-
-        if not isinstance(out, Command):
-            return out
-        upd = out.update or {}
-        new_tasks = upd.get("async_tasks")
-        if not isinstance(new_tasks, dict) or not new_tasks:
-            return out
-        old_tasks = (state or {}).get("async_tasks") or {}
-        merged = {}
-        for tid, entry in new_tasks.items():
-            old = old_tasks.get(tid) or {}
-            if (
-                isinstance(entry, dict)
-                and not entry.get("description")
-                and old.get("description")
-            ):
-                entry = dict(entry)
-                entry["description"] = old["description"]
-            merged[tid] = entry
-        if merged != new_tasks:
-            upd["async_tasks"] = merged
-        return out
-
-    def _relaunch_sync_after_redispatch(task_id, runtime, out):
-        """update_async_task 重派发后重建进度同步器（P0）。
-
-        deepagents 的 update_async_task 走 runs.create(multitask_strategy="interrupt")
-        换 run，但**不拉任何 sync watcher**；而 watcher 只由 start_async_task 拉起，
-        且终态写入后只多活 ~10s 就退出。于是重派发后 async_tasks[task] 变回 "running"、
-        active_queries=true、subagent_steps_map 冻结在中间态 —— 前端卡片永久「执行中」
-        （trace a6f86bbd）。这里照抄 api 侧 _ensure_sync_watcher（sql_approval.py /
-        task_cancel.py）的存活检查写法：只在 watcher 已退出时拉起（launch_sync 非幂等）。
-
-        pin_run_id=True：只跟踪刚创建的 run，避免窗口期读到旧 run 的终态。
-        """
-        try:
-            from agent.subagents.sync_subagent_todos import (
-                is_sync_alive,
-                launch_sync,
-            )
-
-            if is_sync_alive(task_id):
-                return  # watcher 还活着，它自己会看到新 run
-            entry = ((getattr(out, "update", None) or {}).get("async_tasks") or {}).get(
-                task_id
-            )
-            if not isinstance(entry, dict):
-                entry = (
-                    (getattr(runtime, "state", None) or {}).get("async_tasks") or {}
-                ).get(task_id)
-            if not isinstance(entry, dict):
-                return
-            if str(entry.get("status") or "") != "running":
-                return  # 只有「刚被改回 running」的重派发才需要重建 watcher
-            # runtime.state 是图状态通道（不含 thread_id），主线程 id 只能从 config 取
-            cfg = (getattr(runtime, "config", None) or {}).get("configurable") or {}
-            main_thread_id = cfg.get("thread_id") or getattr(
-                getattr(runtime, "execution_info", None), "thread_id", None
-            )
-            if not main_thread_id:
-                _logger.warning(
-                    "[check_progress] 重派发但取不到主线程 id，跳过 watcher 拉起: %s",
-                    str(task_id)[:8],
-                )
-                return
-            launch_sync(
-                main_thread_id,
-                task_id,
-                str(entry.get("agent_name") or "nl2sql"),
-                entry,
-                pin_run_id=True,
-            )
-            _logger.info(
-                "[check_progress] 重派发后重建 sync watcher: sub=%s run=%s",
-                str(task_id)[:8],
-                str(entry.get("run_id"))[:8],
-            )
-        except Exception as e:  # noqa: BLE001
-            # watcher 拉起失败绝不能让工具调用失败
-            _logger.warning("[check_progress] 重建 sync watcher 失败: %s", f"{type(e).__name__}: {e}")
-
+    # description，且 _tasks_reducer 是整条替换 → 前端任务描述被抹掉（M-T5c）。
     _orig_update = getattr(_mod, "_build_update_tool", None)
     _orig_list = getattr(_mod, "_build_list_tasks_tool", None)
-
     if _orig_update:
-
-        def _patched_build_update_tool(agent_map, clients, _orig=_orig_update):
-            tool = _orig(agent_map, clients)
-            orig_func, orig_coro = tool.func, tool.coroutine
-
-            def _w(task_id: str, message: str, runtime: Annotated[ToolRuntime, InjectedToolArg()]):
-                out = _reapply_task_descriptions(
-                    orig_func(task_id, message, runtime), runtime.state
-                )
-                _relaunch_sync_after_redispatch(task_id, runtime, out)
-                return out
-
-            async def _aw(task_id: str, message: str, runtime: Annotated[ToolRuntime, InjectedToolArg()]):
-                out = _reapply_task_descriptions(
-                    await orig_coro(task_id, message, runtime), runtime.state
-                )
-                _relaunch_sync_after_redispatch(task_id, runtime, out)
-                return out
-
-            tool.func, tool.coroutine = _w, _aw
-            return tool
-
-        _mod._build_update_tool = _patched_build_update_tool
-
+        _mod._build_update_tool = _make_patched_build_update_tool(_orig_update)
     if _orig_list:
-
-        def _patched_build_list_tasks_tool(clients, _orig=_orig_list):
-            tool = _orig(clients)
-            orig_func, orig_coro = tool.func, tool.coroutine
-
-            def _w(runtime: Annotated[ToolRuntime, InjectedToolArg()], status_filter=None):
-                return _reapply_task_descriptions(
-                    orig_func(runtime, status_filter), runtime.state
-                )
-
-            async def _aw(runtime: Annotated[ToolRuntime, InjectedToolArg()], status_filter=None):
-                return _reapply_task_descriptions(
-                    await orig_coro(runtime, status_filter), runtime.state
-                )
-
-            tool.func, tool.coroutine = _w, _aw
-            return tool
-
-        _mod._build_list_tasks_tool = _patched_build_list_tasks_tool
+        _mod._build_list_tasks_tool = _make_patched_build_list_tasks_tool(_orig_list)
 
     _logger.info("[check_progress] patched check_async_task for detailed progress")
 

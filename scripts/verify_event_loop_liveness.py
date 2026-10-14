@@ -514,8 +514,11 @@ def _context_reading_funcs(src: str) -> set[str]:
       · 传递：`_enhanced_build_check_result` 自己不调 `get_config()`，它是通过
         `_current_db_name()` 读的；
       · 别名：真正被搬走的那个名字是 `_mod._build_check_result`（deepagents 的宿主
-        模块 + 本仓替换函数的赋值别名，见 check_progress.py:1239），裸函数名根本不在
-        调用点里出现 —— 只看裸 `Name` 的检查器会把这个洞留成"通过"。
+        模块 + 本仓替换函数的赋值别名，见 check_progress.apply_patch 里
+        `_mod._build_check_result = _enhanced_build_check_result` 一行），裸函数名根本
+        不在调用点里出现 —— 只看裸 `Name` 的检查器会把这个洞留成"通过"。
+        （此处**不写行号**：Phase 2-2a 把 apply_patch 的装配件提升到模块级，行号已经
+        漂过两次了。）
     """
     tree = ast.parse(src)
     bodies: dict[str, list[ast.AST]] = {}
