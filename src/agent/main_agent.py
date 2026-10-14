@@ -265,14 +265,35 @@ trace_recorder = TraceRecorderMiddleware(
     agent_type="chat_agent",
 )
 
+# 主 Agent 中间件链（外→内）——提取为模块级变量供测试断言顺序。
+# vfs_path_resolver 放列表末尾（最内层、紧贴模型）：后处理在 langfuse_span /
+# trace_recorder 等外层记录之前完成，保证 trace、checkpoint、前端看到同一份真实路径。
+MAIN_AGENT_MIDDLEWARE: list = [
+    ModelRequiredMiddleware(),
+    QuotaErrorMiddleware(),
+    ModelTimeoutMiddleware(),
+    execute_guard,
+    chart_owner,
+    skills_middleware,
+    query_keywords_middleware,
+    thinking_toggle_middleware,
+    message_slimmer,
+    knowledge_trim,
+    db_context_middleware,
+    DanglingToolCallsMiddleware(),
+    dynamic_prompt,
+    TokenMeterMiddleware(),
+    trace_recorder,
+    LangfuseSpanMiddleware(agent_name="chat_agent"),
+    vfs_path_resolver,
+]
+
 agent = create_deep_agent(
     model=_agent_model,
     tools=[*mcp_tools, build_report_tool, attribution_analyze_tool],
     subagents=[nl2sql_async],
     memory=["/shared/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
-    # vfs_path_resolver 放列表末尾（最内层、紧贴模型）：后处理在 langfuse_span /
-    # trace_recorder 等外层记录之前完成，保证 trace、checkpoint、前端看到同一份真实路径。
-    middleware=[ModelRequiredMiddleware(), QuotaErrorMiddleware(), ModelTimeoutMiddleware(), execute_guard, chart_owner, skills_middleware, query_keywords_middleware, thinking_toggle_middleware, message_slimmer, knowledge_trim, db_context_middleware, DanglingToolCallsMiddleware(), dynamic_prompt, TokenMeterMiddleware(), trace_recorder, LangfuseSpanMiddleware(agent_name="chat_agent"), vfs_path_resolver],
+    middleware=MAIN_AGENT_MIDDLEWARE,
     backend=composite_backend,
     permissions=FILE_PERMISSIONS,  # 文件读写安全控制：只读根，仅 workspace/{report,tmp,nl2sql_process_data} 可写
     system_prompt=SYSTEM_PROMPT,

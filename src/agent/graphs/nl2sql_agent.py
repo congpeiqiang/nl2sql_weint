@@ -244,6 +244,9 @@ def dynamic_prompt(request: ModelRequest) -> str:
 # 注意：WriteTodosProtocolMiddleware 必须放在用户 middleware 列表末尾——
 # 内层后追加的 system 文本落在最终 system prompt 末尾，才能压过
 # TodoListMiddleware 默认的"简单任务可跳过 write_todos"指引（见 write_todos.py 模块 docstring）。
+# NL2SQL 子 Agent 中间件链——提取为模块级变量供测试断言顺序。
+# 构建分两阶段：先 base list（下方），再 append/insert 门禁层（底部）。
+# 最终列表赋值给 NL2SQL_MIDDLEWARE 供外部导入。
 _middleware = [
     # 运行期工具注册表接线（新增/删除库免重启）：并入新库工具、摘除已下线工具、
     # 执行时改道到注册表里的当前实例。必须在最外层——先并入，再交给内层
@@ -342,10 +345,13 @@ _middleware.insert(0, ModelTimeoutMiddleware())
 # deepseek_model（那读的是全局/共享 store = 别账号的 key）。命中时不调用 handler。
 _middleware.insert(0, ModelRequiredMiddleware())
 
+# 导出最终列表供测试断言顺序
+NL2SQL_MIDDLEWARE: list = _middleware
+
 agent = create_deep_agent(
     model=deepseek_model,
     tools=resolved_tools,
-    middleware=_middleware,
+    middleware=NL2SQL_MIDDLEWARE,
     backend=composite_backend,
     permissions=NL2SQL_FILE_PERMISSIONS,  # 文件读写安全控制：读收窄（禁 conversation_history/report 等跨线程目录），写仅 workspace（独立 graph，须单独传）
     # 注意：不在此处硬编码 imdb——当前数据库由下方 dynamic_prompt 从 configurable
