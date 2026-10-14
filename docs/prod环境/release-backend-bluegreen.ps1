@@ -621,8 +621,13 @@ $localMd5 = (Get-FileHash -Algorithm MD5 -Path $tar).Hash.ToLower()
 # 解压前先清掉旧代码目录：tar 解压**不删**「仓库里已删」的文件（2026-09-20 事故：
 # 老副本 + 丢 import 的新文件共存，制造出「补丁在、import 不在」的假象）。
 # scripts/ 不动（线上可能有仓库里没有的运维脚本）；src/agent/workspace 是运行时数据回退目录，先移出再放回。
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && echo '${localMd5}  backend_release.tar.gz' | md5sum -c - && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api 2>&1 | tail -3"
-if ($LASTEXITCODE -ne 0) { Die "构建失败（含 md5 对账不过 = 服务器上有残片/传输损坏：清 ${AppDir}/backend_release.tar.gz* 后重跑）" }
+# ⚠️ 构建**绝不能**写成 `docker-compose build 2>&1 | tail -3`（2026-10-14 假成功事故）：
+#   管道的退出码是 tail 的 ⇒ build 炸了（langgraph-api dist-info 缺失、版本闸 assert 失败）
+#   ssh 照样回 0，脚本拿着**旧镜像 ID** 走完 12 步「发版成功」，线上代码原地不动。
+#   定式与 release-frontend.ps1（2026-09-10 修的同款坑）一致：落盘日志 + 显式取 rc + 非 0 就 exit rc。
+#   前面 && 链里任何一步（md5/tar）失败也会让 `$?` 带上其非 0 rc ⇒ 同一个闸全兜住。
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && echo '${localMd5}  backend_release.tar.gz' | md5sum -c - && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api > /tmp/be_build.log 2>&1; rc=`$?; tail -3 /tmp/be_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi"
+if ($LASTEXITCODE -ne 0) { Die "构建失败（rc 见上：md5 对账不过 = 服务器上有残片/传输损坏，清 ${AppDir}/backend_release.tar.gz* 后重跑；BUILD_FAILED = 看服务器 /tmp/be_build.log）" }
 
 $newImageId = ((ssh @SshOpt "${SshUser}@${Server}" "docker image inspect -f '{{.Id}}' ${Proj}_${ASvc}") -join "").Trim()
 if (-not $newImageId -or $newImageId -notlike "sha256:*") { Die "取不到新镜像 ID（拿到的是 '$newImageId'）" }

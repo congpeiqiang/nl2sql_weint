@@ -124,9 +124,11 @@ Write-Host "== 3/5 服务器拼接 + 解压 + 重建镜像 ==" -ForegroundColor 
 # 发版进程被杀时其在途 scp 会把残片在本轮清理**之后**落上服务器 ⇒ cat part* 拼出
 # 「合法 gzip 流 + 尾部垃圾」，tar rc=2 且炸点在 `rm -rf backend/src` 之后。
 # md5 对账放在一切删除动作之前 ⇒ 包不干净就地停住，既有树不动。
+# ⚠️ 构建绝不能写 `docker-compose build 2>&1 | tail -3`：管道退出码是 tail 的，build 炸了
+#   ssh 照样回 0（2026-10-14 蓝绿脚本假成功事故同款）。定式=落盘 + 显式 rc（同 release-frontend.ps1）。
 $localMd5 = (Get-FileHash -Algorithm MD5 -Path $tar).Hash.ToLower()
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && echo '${localMd5}  backend_release.tar.gz' | md5sum -c - && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api 2>&1 | tail -3"
-if ($LASTEXITCODE -ne 0) { throw "构建失败（含 md5 对账不过 = 服务器上有残片/传输损坏：清 backend_release.tar.gz* 后重跑）" }
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && echo '${localMd5}  backend_release.tar.gz' | md5sum -c - && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api > /tmp/be_build.log 2>&1; rc=`$?; tail -3 /tmp/be_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi"
+if ($LASTEXITCODE -ne 0) { throw "构建失败（rc 见上：md5 对账不过 = 残片/传输损坏，清 backend_release.tar.gz* 后重跑；BUILD_FAILED = 看服务器 /tmp/be_build.log）" }
 
 Write-Host "== 4/5 先协作式排空，再三步重启（v1 compose 需 stop/rm/up）==" -ForegroundColor Cyan
 # 排空必须在 stop 之前：这时进程还在正常接连接，新提交能被**明确拒绝**（503 + Retry-After
