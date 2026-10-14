@@ -200,18 +200,24 @@ async def _lifespan(app: "Starlette"):
     await _metrics.stop()
 
 
+# CORS 允许的前端 Origin（逗号分隔）。未设置时使用开发默认值。
+# 生产环境应在 .env 或 compose 中配置 NL2SQL_CORS_ORIGINS。
+_CORS_ORIGINS = [
+    o.strip()
+    for o in (
+        os.environ.get("NL2SQL_CORS_ORIGINS") or
+        "http://localhost:3000,http://localhost:8080,http://192.168.25.64:8080,http://192.168.25.34:8080"
+    ).split(",")
+    if o.strip()
+]
+
 app = Starlette(
     routes=ROUTES,
     middleware=[
         # CORS 必须最外层：跨域 cookie 需要 Allow-Credentials + 精确 Origin
         Middleware(
             CORSMiddleware,
-            allow_origins=[
-                "http://localhost:3000",
-                "http://localhost:8080",
-                "http://192.168.25.64:8080",
-                "http://192.168.25.34:8080",
-            ],
+            allow_origins=_CORS_ORIGINS,
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
