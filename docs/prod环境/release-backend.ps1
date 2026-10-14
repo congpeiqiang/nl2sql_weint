@@ -53,7 +53,11 @@ tar -czf $tar `
   --exclude=.env --exclude=.env.prod --exclude=.env.dev `
   --exclude=src/agent/workspace-temp `
   --exclude=src/agent/shared/model_config.json `
+  --exclude=benchmarks `
   -C $LocalRoot .
+# ↑ benchmarks：BIRD Mini-Dev 基准数据（4.1GB，未跟踪、本机评测用，2026-10-14 起）。
+#   tar 按文件系统打包不看 git ⇒ 不排它整包进：gzip 后 1522MB、3046 个 0.5MB 分片、
+#   上传 1 小时+，且把与运行无关的 4GB 铺进生产 backend/。当天蓝绿发版实测撞到后停跑补排。
 # ↑ workspace / workspace-temp：运行时残留，容器读 AGENT_DATA_ROOT，不读这两份。
 #   2026-09-25：两个目录都已从仓库删除 ⇒ 这两条排除项是空转兜底（留着的理由是
 #   删了要在两台机器上重验 tar 行为，不值当）。
@@ -116,8 +120,13 @@ Write-Host "== 3/5 服务器拼接 + 解压 + 重建镜像 ==" -ForegroundColor 
 #   - src/agent/workspace 是 **AGENT_DATA_ROOT 未配置时**的运行时数据回退目录（默认工作区 +
 #     db_config.json + feedback SQLite），tar 本来就排除它，故先移出、解压后放回：无论生产
 #     是否配了 AGENT_DATA_ROOT 都不会丢数据。
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api 2>&1 | tail -3"
-if ($LASTEXITCODE -ne 0) { throw "构建失败" }
+# 拼接完整性闸（2026-10-14 事故后加，与 release-backend-bluegreen.ps1 同款）：上一轮
+# 发版进程被杀时其在途 scp 会把残片在本轮清理**之后**落上服务器 ⇒ cat part* 拼出
+# 「合法 gzip 流 + 尾部垃圾」，tar rc=2 且炸点在 `rm -rf backend/src` 之后。
+# md5 对账放在一切删除动作之前 ⇒ 包不干净就地停住，既有树不动。
+$localMd5 = (Get-FileHash -Algorithm MD5 -Path $tar).Hash.ToLower()
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && echo '${localMd5}  backend_release.tar.gz' | md5sum -c - && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api 2>&1 | tail -3"
+if ($LASTEXITCODE -ne 0) { throw "构建失败（含 md5 对账不过 = 服务器上有残片/传输损坏：清 backend_release.tar.gz* 后重跑）" }
 
 Write-Host "== 4/5 先协作式排空，再三步重启（v1 compose 需 stop/rm/up）==" -ForegroundColor Cyan
 # 排空必须在 stop 之前：这时进程还在正常接连接，新提交能被**明确拒绝**（503 + Retry-After

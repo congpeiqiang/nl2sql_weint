@@ -583,7 +583,11 @@ tar -czf $tar `
   --exclude=.env --exclude=.env.prod --exclude=.env.dev `
   --exclude=src/agent/workspace-temp `
   --exclude=src/agent/shared/model_config.json `
+  --exclude=benchmarks `
   -C $LocalRoot .
+# ↑ benchmarks：BIRD Mini-Dev 基准数据（4.1GB，未跟踪、本机评测用）。2026-10-14
+#   实测漏排的后果：gzip 后包体 1522MB ⇒ 3046 个分片，上传要 1 小时+，还会把
+#   与运行无关的 4GB 铺进生产 backend/。理由详见 release-backend.ps1 同位置注释。
 if ($LASTEXITCODE -ne 0) { Die "打包失败" }
 $tarMB = [math]::Round((Get-Item $tar).Length/1MB, 2)
 Ok "   打包完成：$tarMB MB（gzip 后）"
@@ -608,11 +612,17 @@ for ($i = 0; $i -lt $nPart; $i++) {
 Ok "   全部 $nPart 片已上传（共 $tarMB MB）"
 
 Say "== 3/12 服务器拼接 + 解压 + 构建镜像 =="
+# 拼接完整性闸（2026-10-14 事故后加）：上一轮发版进程被杀时，其在途的 scp 子进程
+# 把残片（part1206）在本轮 step-2 清理**之后**落上服务器 ⇒ cat part* 拼出
+# 「合法 gzip 流 + 尾部垃圾」（gzip: trailing garbage ignored），tar rc=2，且炸点
+# 在 `rm -rf backend/src` **之后** ⇒ 服务器 backend/src 被删空。md5 对账放在一切
+# 删除动作之前 ⇒ 包不干净就地停住，既有树不动，清残片后重跑即可。
+$localMd5 = (Get-FileHash -Algorithm MD5 -Path $tar).Hash.ToLower()
 # 解压前先清掉旧代码目录：tar 解压**不删**「仓库里已删」的文件（2026-09-20 事故：
 # 老副本 + 丢 import 的新文件共存，制造出「补丁在、import 不在」的假象）。
 # scripts/ 不动（线上可能有仓库里没有的运维脚本）；src/agent/workspace 是运行时数据回退目录，先移出再放回。
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api 2>&1 | tail -3"
-if ($LASTEXITCODE -ne 0) { Die "构建失败" }
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir} && cat backend_release.tar.gz.part* > backend_release.tar.gz && rm -f backend_release.tar.gz.part* && echo '${localMd5}  backend_release.tar.gz' | md5sum -c - && rm -rf /tmp/nl2sql_ws_keep && mkdir -p /tmp/nl2sql_ws_keep && if [ -d backend/src/agent/workspace ]; then mv backend/src/agent/workspace /tmp/nl2sql_ws_keep/ ; fi && rm -rf backend/src && tar -xzf backend_release.tar.gz -C backend && if [ -d /tmp/nl2sql_ws_keep/workspace ]; then mv /tmp/nl2sql_ws_keep/workspace backend/src/agent/workspace ; fi && rm -rf /tmp/nl2sql_ws_keep && rm -f backend_release.tar.gz && docker-compose build langgraph-api 2>&1 | tail -3"
+if ($LASTEXITCODE -ne 0) { Die "构建失败（含 md5 对账不过 = 服务器上有残片/传输损坏：清 ${AppDir}/backend_release.tar.gz* 后重跑）" }
 
 $newImageId = ((ssh @SshOpt "${SshUser}@${Server}" "docker image inspect -f '{{.Id}}' ${Proj}_${ASvc}") -join "").Trim()
 if (-not $newImageId -or $newImageId -notlike "sha256:*") { Die "取不到新镜像 ID（拿到的是 '$newImageId'）" }

@@ -61,3 +61,6 @@ src/agent/workspace-temp/large_tool_results/
 src/agent/workspace-temp/nl2sql_process_data/
 # 各工作区 Wren 查询历史（LanceDB，运行时生成）
 src/agent/workspace-temp/*/.wren/
+
+# BIRD Mini-Dev 基准数据（4.1GB，本机评测用；未跟踪，发版 tar 亦排除）
+benchmarks/
