@@ -4,14 +4,6 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-
-[tool.pytest.ini_options]
-testpaths = ["src/test"]
-asyncio_mode = "auto"
-markers = [
-    "integration: marks tests requiring live services (deselect with '-m \"not integration\"')",
-]
-
 dependencies = [
     "click>=8.4.2",
     "clickhouse-driver>=0.2.11",
@@ -33,4 +25,14 @@ dependencies = [
     "pyyaml>=6.0.3",
     "vanna[mysql]>=2.0.2",
     "wrenai[clickhouse,memory,postgres]>=0.13.0",
+]
+
+# ⚠️ 任何 [tool.*] 表头都必须放在 dependencies 之后：TOML 里表头会改变其后所有键的归属，
+#    写在 [project] 中间会把 dependencies 吞进 tool 表（2026-10-14 事故：3491a6a 把本块
+#    插在 dependencies 之前 ⇒ [project] 零依赖 ⇒ uv sync 不装 langgraph-api ⇒ 镜像版本闸炸）。
+[tool.pytest.ini_options]
+testpaths = ["src/test"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests requiring live services (deselect with '-m \"not integration\"')",
 ]
