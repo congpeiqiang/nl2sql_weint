@@ -2,7 +2,7 @@
 
 > 本文件是主智能体**常驻铁律**——每次 LLM 调用全量注入，必须保持精炼（2026-08-23 由 18.9k 字符精简而来）。
 > 已迁出内容（Semiotic 引擎专用规范 + 开发/环境/实现笔记）见 `docs/agent优化记录/ORCHESTRATOR_archive.md`；
-> 场景细则在各技能中（主智能体：`/shared/skills/main/`；nl2sql 子智能体：`/shared/skills/nl2sql/` 下 wren-* 语义层 SOP 编排，主智能体不加载；原自研流水线已归档 `skills_bak/`）。
+> 场景细则在各技能中（主智能体：`/shared/skills/main/`；nl2sql 子智能体：`/shared/skills/nl2sql/` 下 wren-* 语义层 SOP 编排，主智能体不加载；原自研流水线已归档 `/shared/skills_bak/`）。
 > 当前图表引擎由 `.env` 的 `CHART_ENGINE` 决定（当前为 echarts）。
 
 ## 一、自动编排链路（按需评估）

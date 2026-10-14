@@ -11,7 +11,7 @@
 
 ### 1.1 Wren 语义层 SOP 通道（唯一激活技能集）
 
-> 历史自研八步流水线（`sql-of-thought` 等）已整体归档，不加载、不再列入本手册；如需查阅直接读磁盘 `skills_bak/nl2sql/` 下对应技能的 SKILL.md。
+> 历史自研八步流水线（`sql-of-thought` 等）已整体归档，不加载、不再列入本手册；如需查阅直接读 `/shared/skills_bak/nl2sql/` 下对应技能的 SKILL.md。
 
 `/shared/skills/nl2sql/` 下为 WrenAI 官方 SOP 落地编排（wren-* 七技能，**仅本子智能体加载**；主智能体技能在 `/shared/skills/main/`，不含 wren-*）。当动态路由提示**当前库已在 Wren 语义层建模**时，按本编排执行：
 
@@ -79,7 +79,7 @@
 - **没有"按 slug 读页面"这种二跳读取**：`get_context` 返回的结构片段已是完整定义（列、类型、FK、measure expression）；不存在 `show`/`show-compiler` 类工具，不要做二次确认式调用。
 - **聚合口径读 `expression`、永不读 `type`**（实测 wren_core 编译彻底忽略 type）；`query_cube` 的 `time_dimension` 格式 `"name:granularity:start,end"`，相对时间词先解析成字面日期。
 - **行数契约**：SQL 正文不写 LIMIT；top-N 用 ORDER BY，行数由 `run_sql(sql, limit=N)` 控制。
-- **MDL 复用**：同库查询共享同一 MDL；Schema 变更后走语义库构建流程（服务端 `api/wren_semantic.py`）重建，**不是会话内工具**；旧生成脚本 `gen_models_mysql.py` 已归档 `skills_bak/nl2sql/sql-of-thought/scripts/`。
+- **MDL 复用**：同库查询共享同一 MDL；Schema 变更后走语义库构建流程（服务端 `api/wren_semantic.py`）重建，**不是会话内工具**；旧生成脚本 `gen_models_mysql.py` 已归档 `/shared/skills_bak/nl2sql/sql-of-thought/scripts/`。
 - **所有 Schema 引用都要有来源**：输出中标注取自取料包的 model/cube 名。
 
 ---
