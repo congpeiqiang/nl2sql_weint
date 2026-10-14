@@ -13,6 +13,8 @@ import asyncio
 import logging
 import os as _os_module
 import re
+
+import httpx
 import threading
 import time as _time_module
 from pathlib import Path
@@ -173,8 +175,12 @@ def _run_sync_loop(
                 main_thread_id, sub_thread_id, agent_name, task, pin_run_id=pin_run_id
             )
         )
-    except Exception as e:
-        _logger.error("[sync] 同步循环异常: %s", e)
+    except (httpx.HTTPError, httpx.TimeoutException) as e:
+        _logger.warning("[sync] API 调用异常（将重试）: %s", e)
+    except (ConnectionError, OSError) as e:
+        _logger.warning("[sync] 网络异常（将重试）: %s", e)
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("[sync] 同步循环未预期异常")  # exception() 含 traceback
     finally:
         loop.close()
         with _ACTIVE_LOOPS_LOCK:
