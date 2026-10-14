@@ -231,8 +231,9 @@ def fetch_question(thread_id: str) -> str:
     if not thread_id:
         return ""
     import httpx
+    from api._common import _api_base_url
 
-    base = (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
+    base = _api_base_url()
     try:
         # trust_env=False：本调用恒为服务内部自调用，直连目标；否则会读
         # HTTP(S)_PROXY 被代理劫持（judge worker 每任务挂满 10s 超时，队列排空极慢）。

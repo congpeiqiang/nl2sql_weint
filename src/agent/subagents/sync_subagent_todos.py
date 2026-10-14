@@ -211,10 +211,11 @@ def _sync_update_state(thread_id: str, values: dict):
     判定（生产 trace 01a09ed5）。机制与判据回归见 `scripts/verify_phantom_next.py`；
     **读 `state.next` 的新代码必须同时看 `last_message_is_final`**。
     """
-    import os as _os
     from langgraph_sdk import get_client as _get_async_client
 
-    _api_url = _os.getenv("LANGGRAPH_API_URL", "http://localhost:2026")
+    from api._common import _api_base_url
+
+    _api_url = _api_base_url()
     # 在独立事件循环中执行 async update_state（to_thread 线程内）
     def _do():
         import asyncio as _aio
@@ -246,14 +247,15 @@ async def _async_sync_loop(
     （query_headers / subagent_steps_map / active_queries / async_tasks 单 key），
     通过 LangGraph reducer 合并，避免多线程互相覆盖。
     """
-    import os
     import time
     from langgraph_sdk import get_client
+
+    from api._common import _api_base_url
 
     # 用 HTTP client 而非 ASGI in-process：sync 线程是独立守护线程，
     # 没有主进程的 ASGI 应用上下文，get_client(url=None) 的 get_state 会
     # 报 'NoneType' object is not callable，导致 keyed 字段写入不可靠。
-    _api_url = os.getenv("LANGGRAPH_API_URL", "http://localhost:2026")
+    _api_url = _api_base_url()
     client = get_client(url=_api_url)
     # 等待子智能体的 run 创建完成
     await asyncio.sleep(3)

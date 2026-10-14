@@ -415,7 +415,9 @@ async def _replay_row(store, row: dict, max_age: float, *, dry_run: bool, out: d
         )
         return
 
-    api_url = os.getenv("LANGGRAPH_API_URL", "http://localhost:2026")
+    from api._common import _api_base_url
+
+    api_url = _api_base_url()
     client = get_client(url=api_url)
 
     # 判定 1：子线程最新 run 必须还是 watcher 盯的那一个，且已是终态。
