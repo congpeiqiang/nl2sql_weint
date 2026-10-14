@@ -33,7 +33,7 @@ import httpx
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from api._common import json_response
+from api._common import _api_base_url as _base_url, json_response
 from agent.utils.offload import offload
 from agent.utils.prom_metrics import metered_rlock
 
@@ -73,10 +73,6 @@ _schema_ready = False
 _REFRESH_TTL = float(os.getenv("THREAD_FTS_REFRESH_TTL", "5"))
 _last_refresh_at = 0.0
 _refresh_lock = asyncio.Lock()
-
-
-def _base_url() -> str:
-    return (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
 
 
 # ── 消息文本提取 ────────────────────────────────────────────────────────

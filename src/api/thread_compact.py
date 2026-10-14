@@ -36,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import BaseRoute, Route
 
-from api._common import json_response
+from api._common import _api_base_url as _base_url, json_response
 
 _logger = logging.getLogger(__name__)
 
@@ -74,10 +74,6 @@ _SUMMARY_SYSTEM_PROMPT = """你是一个对话摘要助手。请将以下对话�
 
 # 估算 token 数（粗略：4 字符 ≈ 1 token）
 _CHARS_PER_TOKEN = 4
-
-
-def _base_url() -> str:
-    return (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
 
 
 def _msg_text(msg: dict) -> str:

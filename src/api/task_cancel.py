@@ -29,7 +29,7 @@ import httpx
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from api._common import json_response, parse_body
+from api._common import _api_base_url as _base_url, json_response, parse_body
 
 _logger = logging.getLogger(__name__)
 
@@ -40,10 +40,6 @@ _UUID_RE = re.compile(
 # deepagents 的 run 终态集（async_subagents._TERMINAL_STATUSES），与 sync 一致
 _TERMINAL_STATUSES = {"success", "error", "cancelled", "timeout", "interrupted"}
 _MAIN_WRITE_RETRIES = 3
-
-
-def _base_url() -> str:
-    return (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
 
 
 async def _read_main_entry(

@@ -29,7 +29,7 @@ from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
 from agent.utils.offload import offload
-from api._common import json_response, parse_body
+from api._common import _api_base_url as _base_url, json_response, parse_body
 
 _logger = logging.getLogger(__name__)
 
@@ -40,10 +40,6 @@ _MAX_SCAN_CHECKPOINTS = 500
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
 )
-
-
-def _base_url() -> str:
-    return (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
 
 
 async def _delete_thread_quiet(http: httpx.AsyncClient, base: str, thread_id: str):

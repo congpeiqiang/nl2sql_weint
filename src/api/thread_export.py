@@ -30,15 +30,13 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import BaseRoute, Route
 
+from api._common import _api_base_url as _base_url
+
 _logger = logging.getLogger(__name__)
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
 )
-
-
-def _base_url() -> str:
-    return (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
 
 
 def _sanitize_filename(s: str) -> str:

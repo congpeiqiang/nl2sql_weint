@@ -38,7 +38,7 @@ from agent.feedback.store import (
     get_store,
 )
 from agent.utils.offload import offload, offload_long
-from api._common import json_response, parse_body, require_admin, require_thread
+from api._common import _api_base_url as _base_url, json_response, parse_body, require_admin, require_thread
 
 _logger = logging.getLogger(__name__)
 
@@ -48,10 +48,6 @@ _logger = logging.getLogger(__name__)
 _REVOKE_BATCH_LIMIT = 100
 
 store = get_store()
-
-
-def _base_url() -> str:
-    return (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
 
 
 def _msg_text(msg: dict) -> str:

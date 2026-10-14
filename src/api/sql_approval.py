@@ -28,7 +28,7 @@ import httpx
 from starlette.requests import Request
 from starlette.routing import BaseRoute, Route
 
-from api._common import json_response, parse_body, require_user
+from api._common import _api_base_url as _base_url, json_response, parse_body, require_user
 
 _logger = logging.getLogger(__name__)
 
@@ -38,10 +38,6 @@ _UUID_RE = re.compile(
 
 _VALID_DECISION_TYPES = {"approve", "reject", "edit"}
 _MAIN_WRITE_RETRIES = 3
-
-
-def _base_url() -> str:
-    return (os.environ.get("LANGGRAPH_API_URL") or "http://localhost:2026").rstrip("/")
 
 
 def _validate_decisions(decisions) -> str | None:
