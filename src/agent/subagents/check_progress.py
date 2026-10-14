@@ -689,7 +689,7 @@ def _cube_produced_data(messages) -> bool:
                     and not r["args"].get("sql_only")):
                 return True
     except Exception as e:  # noqa: BLE001  审计旁路，探测失败不改变任何行为
-        _logger.debug("[check_progress] Cube 通道探测失败: %s", e)
+        _logger.debug("[check_progress] Cube 通道探测失败: %s", f"{type(e).__name__}: {e}")
     return False
 
 
@@ -1035,7 +1035,7 @@ def _attach_physical_plan(result: dict, plan: dict, kind: str, label: str) -> bo
             root = _active_workspace_path()
             ptr = write_plan_file(root, _session_thread_id(), kind, label, sql)
         except Exception as e:  # noqa: BLE001  落盘失败仍有内联兜底
-            _logger.debug("[check_progress] 物理 SQL 落盘异常: %s", e)
+            _logger.debug("[check_progress] 物理 SQL 落盘异常: %s", f"{type(e).__name__}: {e}")
 
         result["dialect"] = plan.get("dialect") or ""
         result["dialect_sql_chars"] = len(sql)
@@ -1049,7 +1049,7 @@ def _attach_physical_plan(result: dict, plan: dict, kind: str, label: str) -> bo
             result["dialect_sql"] = sql
         return True
     except Exception as e:  # noqa: BLE001  fail-open
-        _logger.debug("[check_progress] 物理 SQL 附加失败: %s", e)
+        _logger.debug("[check_progress] 物理 SQL 附加失败: %s", f"{type(e).__name__}: {e}")
         return False
 
 
@@ -1208,7 +1208,7 @@ def _current_db_name() -> str:
             len(cands),
         )
     except Exception as e:  # noqa: BLE001  兜底失败 = 维持原行为（空串）
-        _logger.debug("[check_progress] 会话账本兜底失败: %s", e)
+        _logger.debug("[check_progress] 会话账本兜底失败: %s", f"{type(e).__name__}: {e}")
     return ""
 
 
@@ -1240,7 +1240,7 @@ def _question_identity(thread_id: str = "") -> tuple[str, str]:
         qid = str(_question_id() or "")
         uq = str(_user_question() or "")
     except Exception as e:  # noqa: BLE001  读 config 不是错误路径（离线/测试）
-        _logger.debug("[check_progress] 读问题身份失败: %s", e)
+        _logger.debug("[check_progress] 读问题身份失败: %s", f"{type(e).__name__}: {e}")
     if qid and uq:
         return qid, uq
     if thread_id:
@@ -1249,7 +1249,7 @@ def _question_identity(thread_id: str = "") -> tuple[str, str]:
 
             hit = get_store().get_task(str(thread_id))
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[check_progress] 查 trace_bind 子任务绑定失败: %s", e)
+            _logger.debug("[check_progress] 查 trace_bind 子任务绑定失败: %s", f"{type(e).__name__}: {e}")
             hit = None
         if hit:
             # get_task 返回 (匹配到的完整 task_id, (main_thread, trace_id, obs, q, desc))
@@ -1328,7 +1328,7 @@ def _extract_windows(messages, final_sql: str) -> dict | None:
         blob = " ".join(str(x) for x in seq)
         return _windows_from_dates(_ISO_DATE_RE.findall(blob))
     except Exception as e:  # noqa: BLE001  指纹是旁路，异常只意味着这一格留空
-        _logger.debug("[check_progress] 抽两期区间失败: %s", e)
+        _logger.debug("[check_progress] 抽两期区间失败: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1348,7 +1348,7 @@ def _build_answer_fingerprint(result: dict, messages, thread_id: str) -> dict:
         try:
             origin = judge_sql_origin(messages, producing_sql=final_sql).get("origin")
         except Exception as e:  # noqa: BLE001  fail-open：来源不明就留空
-            _logger.debug("[check_progress] 指纹判 SQL 来源失败: %s", e)
+            _logger.debug("[check_progress] 指纹判 SQL 来源失败: %s", f"{type(e).__name__}: {e}")
             origin = None
     cube_spec: dict = {}
     # 与 manifest 同条件（`build_process_manifest` 只在「无 SQL」或「混合路径」下取 cube
@@ -1359,7 +1359,7 @@ def _build_answer_fingerprint(result: dict, messages, thread_id: str) -> dict:
 
             cube_spec = (cube_snapshot(messages) or {}).get("spec") or {}
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[check_progress] 指纹取 cube 快照失败: %s", e)
+            _logger.debug("[check_progress] 指纹取 cube 快照失败: %s", f"{type(e).__name__}: {e}")
     qid, uq = _question_identity(thread_id)
     return {
         "db_name": _current_db_name(),
@@ -1382,7 +1382,7 @@ def _attach_answer_fingerprint(result: dict, messages, thread_id: str) -> None:
     try:
         result[_FP_KEY] = _build_answer_fingerprint(result, messages, thread_id)
     except Exception as e:  # noqa: BLE001  指纹是旁路，异常只意味着这轮没有指纹
-        _logger.debug("[check_progress] 组装答案指纹失败: %s", e)
+        _logger.debug("[check_progress] 组装答案指纹失败: %s", f"{type(e).__name__}: {e}")
 
 
 def _collect_dry_run_sqls(messages) -> set:
@@ -1436,7 +1436,13 @@ def _backfill_process_data_sql(messages, producing_sql: str) -> int:
     try:
         from agent.middlewares.langfuse_span import _active_workspace_path
         root = _active_workspace_path()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # 取不到工作区 = **回填整个没做**，但返回值是 0，与「没有需要回填的文件」不可区分
+        # （上面那几处 return 0 才是真「无事可做」）。这里必须吵：静默 0 会被当成成功，
+        # process_data 里的 SQL 就停留在 dry_run 的探值 SQL 上 —— 与 cube 通道那条
+        # 「探值劫持报告 SQL 节」同一类失效。低频（每个子任务收尾一次）。
+        _logger.warning("[check_progress] 回填 process_data 取工作区失败，本次回填跳过: %s",
+                        f"{type(e).__name__}: {e}")
         return 0
     if not root:
         return 0
@@ -1584,7 +1590,7 @@ def apply_patch():
                 result["sql_origin"] = _origin.get("origin")
                 result["sql_origin_evidence"] = _origin.get("evidence") or {}
             except Exception as e:  # noqa: BLE001
-                _logger.debug("[check_progress] SQL 来源判定失败: %s", e)
+                _logger.debug("[check_progress] SQL 来源判定失败: %s", f"{type(e).__name__}: {e}")
             if sql:
                 result["sql"] = sql
                 # 真正下发目标库的物理 SQL：进程内复算后附指针 + 小字段。
@@ -1684,7 +1690,7 @@ def apply_patch():
                     # 小指针（~100 字节），让主 agent/事后审计知道审计件在哪
                     result["process_manifest"] = _ptrs["manifest"]
             except Exception as e:  # noqa: BLE001
-                _logger.debug("[check_progress] 写中间产物审计失败: %s", e)
+                _logger.debug("[check_progress] 写中间产物审计失败: %s", f"{type(e).__name__}: {e}")
             # S8 答案指纹：随本次 check 结果一起写回主 agent state（图内 Command），
             # 供追问归因读取。**与 manifest 各自 fail-open**，互不拖累。
             _attach_answer_fingerprint(result, messages, thread_id)
@@ -1718,7 +1724,7 @@ def apply_patch():
                 if _ptrs.get("manifest"):
                     result["process_manifest"] = _ptrs["manifest"]
             except Exception as e:  # noqa: BLE001
-                _logger.debug("[check_progress] 写失败审计件失败: %s", e)
+                _logger.debug("[check_progress] 写失败审计件失败: %s", f"{type(e).__name__}: {e}")
             # 失败路径镜像一份（与成功路径同源同形状）：`final_sql` 空、`sql_origin`
             # 多半 `unknown`，但 `db_name` / 问题身份 / `windows` 一样有效 —— 追问归因
             # 时这几格照样要用（方案 §4.9「失败分支镜像一份」）。
@@ -1860,7 +1866,7 @@ def apply_patch():
                     len(thread_values.get("messages") or []),
                 )
             except Exception as e:
-                _logger.warning("[check_progress] get_state failed: %s", e)
+                _logger.warning("[check_progress] get_state failed: %s", f"{type(e).__name__}: {e}")
                 try:
                     thread = await client.threads.get(
                         thread_id=task["thread_id"]
@@ -1990,7 +1996,7 @@ def apply_patch():
             )
         except Exception as e:  # noqa: BLE001
             # watcher 拉起失败绝不能让工具调用失败
-            _logger.warning("[check_progress] 重建 sync watcher 失败: %s", e)
+            _logger.warning("[check_progress] 重建 sync watcher 失败: %s", f"{type(e).__name__}: {e}")
 
     _orig_update = getattr(_mod, "_build_update_tool", None)
     _orig_list = getattr(_mod, "_build_list_tasks_tool", None)
@@ -2180,7 +2186,7 @@ def _extract_progress(result: dict, messages: list, thread_values: dict | None =
             if started_at:
                 result["elapsed"] = _format_duration(now - started_at)
     except Exception as e:
-        _logger.debug("[check_progress] read_progress failed: %s", e)
+        _logger.debug("[check_progress] read_progress failed: %s", f"{type(e).__name__}: {e}")
 
     # ── 方案 A fallback: message metadata 时间戳 ──
     if not step_durations:

@@ -176,9 +176,9 @@ def _run_sync_loop(
             )
         )
     except (httpx.HTTPError, httpx.TimeoutException) as e:
-        _logger.warning("[sync] API 调用异常（将重试）: %s", e)
+        _logger.warning("[sync] API 调用异常（将重试）: %s", f"{type(e).__name__}: {e}")
     except (ConnectionError, OSError) as e:
-        _logger.warning("[sync] 网络异常（将重试）: %s", e)
+        _logger.warning("[sync] 网络异常（将重试）: %s", f"{type(e).__name__}: {e}")
     except Exception as e:  # noqa: BLE001
         _logger.exception("[sync] 同步循环未预期异常")  # exception() 含 traceback
     finally:
@@ -280,7 +280,7 @@ async def _async_sync_loop(
             data={"description": task.get("description", "") if task else ""},
         )
     except Exception as e:
-        _logger.debug("[sync] EventStore init failed: %s", e)
+        _logger.debug("[sync] EventStore init failed: %s", f"{type(e).__name__}: {e}")
 
     last_sub_todos: Optional[list] = None  # 上一次同步的子智能体 todos
     query_title: Optional[str] = None       # 本任务标题（首次提取）
@@ -496,7 +496,7 @@ async def _async_sync_loop(
                                     run_id=latest["run_id"],
                                 )
                         except Exception as e:  # noqa: BLE001
-                            _logger.warning("[sync] 取消待审批 run 失败: %s", e)
+                            _logger.warning("[sync] 取消待审批 run 失败: %s", f"{type(e).__name__}: {e}")
                         approval_pending = False
                         run_status = "timeout"
                     else:
@@ -561,7 +561,7 @@ async def _async_sync_loop(
                                     "[sync] 已取消卡死 interrupted 子 run: %s", sub_thread_id[:8]
                                 )
                         except Exception as e:  # noqa: BLE001
-                            _logger.warning("[sync] 取消卡死 interrupted 子 run 失败: %s", e)
+                            _logger.warning("[sync] 取消卡死 interrupted 子 run 失败: %s", f"{type(e).__name__}: {e}")
                 else:
                     interrupted_since = None
 
@@ -596,7 +596,7 @@ async def _async_sync_loop(
                                 "[sync] 已取消超时子 run: %s", sub_thread_id[:8]
                             )
                     except Exception as e:  # noqa: BLE001
-                        _logger.warning("[sync] 取消超时子 run 失败: %s", e)
+                        _logger.warning("[sync] 取消超时子 run 失败: %s", f"{type(e).__name__}: {e}")
                 # ── 终态改判（2026-09-28 生产事故）──
                 # SDK 说 success 不代表子任务真答完了：中间件把超时/额度耗尽/未配模型
                 # 吞成一条友好 AIMessage 后，图照常 END ⇒ run 报 success，而用户看到的是
@@ -781,7 +781,7 @@ async def _async_sync_loop(
                                 data={"completed": completed, "total": total, "step": steps[-1]["content"] if steps else ""},
                             )
                         except Exception as _e:
-                            _logger.debug("[sync] trace progress failed: %s", _e)
+                            _logger.debug("[sync] trace progress failed: %s", f"{type(_e).__name__}: {_e}")
 
             # ── 4. 子智能体完成后：写最终步骤 + async_tasks + active_queries=false ──
             # 注意：主线程在 in-flight run（前一个任务的自动续跑/用户消息处理）期间，
@@ -904,7 +904,7 @@ async def _async_sync_loop(
                                     data={"status": run_status},
                                 )
                             except Exception as _e:
-                                _logger.debug("[sync] trace complete failed: %s", _e)
+                                _logger.debug("[sync] trace complete failed: %s", f"{type(_e).__name__}: {_e}")
                     except Exception as e:
                         completion_write_retries += 1
                         # 限频告警：首次与每第 10 次失败记 WARNING，避免主线程长时间
@@ -1038,7 +1038,7 @@ async def _async_sync_loop(
                                     pin_run_id=True,
                                 )
                             except Exception as _e:  # noqa: BLE001
-                                _logger.warning("[sync] 交接重派发 watcher 失败: %s", _e)
+                                _logger.warning("[sync] 交接重派发 watcher 失败: %s", f"{type(_e).__name__}: {_e}")
                             break
                     # 回退守护上限：重写次数 / 守护时长任一超限即放弃（防僵尸线程）
                     if regression_since is not None and (
@@ -1087,7 +1087,7 @@ async def _async_sync_loop(
                     break
 
         except Exception as e:
-            _logger.warning("[sync] 同步失败: %s", e)
+            _logger.warning("[sync] 同步失败: %s", f"{type(e).__name__}: {e}")
 
     _logger.info("[sync] 退出: %s", sub_thread_id[:8])
 
@@ -1117,7 +1117,7 @@ async def _get_run_status(
             return None
         return runs[0].get("status", "unknown")
     except Exception as e:
-        _logger.warning("[sync] get_run_status failed: %s", e)
+        _logger.warning("[sync] get_run_status failed: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1129,7 +1129,7 @@ async def _get_latest_run(client, thread_id: str) -> Optional[dict]:
             return None
         return runs[0]
     except Exception as e:
-        _logger.warning("[sync] get_latest_run failed: %s", e)
+        _logger.warning("[sync] get_latest_run failed: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1144,7 +1144,7 @@ async def _last_failed_mark_of(client, thread_id: str) -> Optional[dict]:
         messages = ((state or {}).get("values") or {}).get("messages") or []
         return last_failed_mark(messages)
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[sync] 读失败戳失败（按成功处理）: %s", e)
+        _logger.debug("[sync] 读失败戳失败（按成功处理）: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1215,7 +1215,7 @@ async def _extract_approval_payload(client, sub_thread_id: str) -> Optional[dict
                     }
         return None
     except Exception as e:
-        _logger.warning("[sync] extract_approval_payload failed: %s", e)
+        _logger.warning("[sync] extract_approval_payload failed: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1234,7 +1234,7 @@ async def _read_task_status(
             return entry.get("status")
         return None
     except Exception as e:
-        _logger.warning("[sync] read_task_status failed: %s", e)
+        _logger.warning("[sync] read_task_status failed: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1254,7 +1254,7 @@ async def _read_steps_snapshot(
         )
         return steps if isinstance(steps, list) else []
     except Exception as e:
-        _logger.warning("[sync] read_steps_snapshot failed: %s", e)
+        _logger.warning("[sync] read_steps_snapshot failed: %s", f"{type(e).__name__}: {e}")
         return []
 
 
@@ -1282,7 +1282,7 @@ async def _read_sync_fields(
             "steps": steps if isinstance(steps, list) else [],
         }
     except Exception as e:
-        _logger.warning("[sync] read_sync_fields failed: %s", e)
+        _logger.warning("[sync] read_sync_fields failed: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1523,7 +1523,7 @@ async def _extract_task_title(
                         return desc_str
         return None
     except Exception as e:
-        _logger.warning("[sync] extract_task_title failed: %s", e)
+        _logger.warning("[sync] extract_task_title failed: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1562,7 +1562,7 @@ async def _extract_user_query(client, main_thread_id: str) -> Optional[str]:
             return text
         return None
     except Exception as e:
-        _logger.warning("[sync] extract_user_query failed: %s", e)
+        _logger.warning("[sync] extract_user_query failed: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1584,7 +1584,7 @@ async def _read_current_main_todos(client, main_thread_id: str) -> list:
             and str(t.get("id", "")) != "__query_header__"
         ]
     except Exception as e:
-        _logger.warning("[sync] read_current_main_todos failed: %s", e)
+        _logger.warning("[sync] read_current_main_todos failed: %s", f"{type(e).__name__}: {e}")
         return []
 
 
@@ -1594,7 +1594,7 @@ async def _get_raw_todos(client, main_thread_id: str) -> list:
         state = await client.threads.get_state(thread_id=main_thread_id)
         return (state.get("values") or {}).get("todos") or []
     except Exception as e:
-        _logger.warning("[sync] get_raw_todos failed: %s", e)
+        _logger.warning("[sync] get_raw_todos failed: %s", f"{type(e).__name__}: {e}")
         return []
 
 
@@ -1665,7 +1665,7 @@ def _compute_step_durations(
                     durations[step] = _fmt(max(secs, 0), "...")
         return durations
     except Exception as e:
-        _logger.debug("[sync] compute_step_durations failed: %s", e)
+        _logger.debug("[sync] compute_step_durations failed: %s", f"{type(e).__name__}: {e}")
         return {}
 
 
@@ -1774,7 +1774,7 @@ async def _extract_subagent_todos(client, sub_thread_id: str) -> list:
                         ]
         return []
     except Exception as e:
-        _logger.warning("[sync] extract_subagent_todos failed: %s", e)
+        _logger.warning("[sync] extract_subagent_todos failed: %s", f"{type(e).__name__}: {e}")
         return []
 
 

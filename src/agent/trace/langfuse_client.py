@@ -108,7 +108,7 @@ def _patch_langfuse_ensure_ascii() -> None:
         EventSerializer.__init__ = _patched_init
         _logger.info("[langfuse] EventSerializer 强制 ensure_ascii=False（中文落库修复）")
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[langfuse] patch EventSerializer 失败: %s", e)
+        _logger.warning("[langfuse] patch EventSerializer 失败: %s", f"{type(e).__name__}: {e}")
 
 
 _patch_langfuse_ensure_ascii()
@@ -382,7 +382,7 @@ def _apply_release(client) -> None:
         client._release = rel
         _logger.info("[langfuse] release=%s（LANGFUSE_RELEASE）", rel)
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[langfuse] 设 release 失败: %s", e)
+        _logger.debug("[langfuse] 设 release 失败: %s", f"{type(e).__name__}: {e}")
 
 
 # ── M5 灰度：A/B 分流（进程级）────────────────────────────
@@ -477,7 +477,7 @@ def get_langfuse_handler():
                 "[langfuse] CancelledError 归入控制流异常（run 取消不再标 ERROR）"
             )
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse] 注册 CancelledError 控制流异常失败: %s", e)
+            _logger.debug("[langfuse] 注册 CancelledError 控制流异常失败: %s", f"{type(e).__name__}: {e}")
     return _handler
 
 
@@ -513,7 +513,7 @@ def get_thread_trace_context(thread_id: str) -> tuple[str, str]:
                 )
                 return _rec
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse_m3d] 持久层 thread 读取失败: %s", e)
+            _logger.debug("[langfuse_m3d] 持久层 thread 读取失败: %s", f"{type(e).__name__}: {e}")
     return ("", "")
 
 
@@ -558,7 +558,7 @@ def register_task_trace_context(
             root_obs_id=root_obs_id, question=question, description=description,
         )
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[langfuse_m5] 落盘 task 绑定失败: %s", e)
+        _logger.debug("[langfuse_m5] 落盘 task 绑定失败: %s", f"{type(e).__name__}: {e}")
     _logger.info(
         "[langfuse_m5] task=%s registered → trace=%s obs=%s thread=%s q=%s desc=%s",
         task_id[:12], trace_id[:16], (root_obs_id or "∅")[:16],
@@ -597,7 +597,7 @@ def get_task_trace_context(task_id: str) -> tuple[str, str, str, str, str]:
             )
             return _value5
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[langfuse_m5] 持久层 task 读取失败: %s", e)
+        _logger.debug("[langfuse_m5] 持久层 task 读取失败: %s", f"{type(e).__name__}: {e}")
     return ("", "", "", "", "")
 
 
@@ -857,7 +857,7 @@ def _patch_handler_for_trace_nesting(handler) -> None:
                     parent_oid[:16] if parent_oid else "(none→span_id=1)",
                 )
             except Exception as e:
-                _logger.debug("[langfuse_m3] 注入父 trace context 失败: %s", e)
+                _logger.debug("[langfuse_m3] 注入父 trace context 失败: %s", f"{type(e).__name__}: {e}")
                 token = None
 
         # trace input 瘦身：仅对 root run 生效。续跑/线程回放的 chat_agent root
@@ -877,7 +877,7 @@ def _patch_handler_for_trace_nesting(handler) -> None:
                     )
                     record_inputs = trimmed
             except Exception as e:  # noqa: BLE001
-                _logger.debug("[langfuse_trim] 瘦身失败，保留原 input: %s", e)
+                _logger.debug("[langfuse_trim] 瘦身失败，保留原 input: %s", f"{type(e).__name__}: {e}")
         try:
             result = original_on_chain_start(
                 serialized, record_inputs, run_id=run_id,
@@ -942,7 +942,7 @@ def _patch_handler_for_trace_nesting(handler) -> None:
                         run_id, list(handler._runs.keys())[-5:],
                     )
             except Exception as e:
-                _logger.warning("[langfuse_m3b] 记录 root obs 失败: %s", e)
+                _logger.warning("[langfuse_m3b] 记录 root obs 失败: %s", f"{type(e).__name__}: {e}")
 
         return result
 
@@ -1045,7 +1045,7 @@ def auth_check() -> bool:
     try:
         return bool(get_client().auth_check())
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[langfuse] auth_check 失败: %s", e)
+        _logger.warning("[langfuse] auth_check 失败: %s", f"{type(e).__name__}: {e}")
         return False
 
 
@@ -1087,7 +1087,7 @@ def create_score(
         get_client().create_score(**kwargs)
         return True
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[langfuse] create_score(%s) 失败: %s", name, e)
+        _logger.debug("[langfuse] create_score(%s) 失败: %s", name, f"{type(e).__name__}: {e}")
         return False
 
 
@@ -1108,7 +1108,7 @@ def flush_langfuse() -> None:
         _flush_sdk_clients()
         _logger.info("[langfuse] SDK 队列已显式 flush")
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[langfuse] flush 失败: %s", e)
+        _logger.warning("[langfuse] flush 失败: %s", f"{type(e).__name__}: {e}")
 
 
 def _flush_sdk_clients() -> None:
@@ -1252,7 +1252,11 @@ def get_prompt_text(
             from langfuse.api import NotFoundError
 
             is_404 = isinstance(e, NotFoundError)
-        except Exception:  # noqa: BLE001
+        except Exception as _ie:  # noqa: BLE001
+            # 判 404 失败 ⇒ 下面会把「prompt 不存在」当成普通错误，日志级别与后续动作都会错。
+            # 低频（仅在 prompt 拉取失败时），debug 留痕即可。
+            _logger.debug("[langfuse] 判定 NotFoundError 失败（将按普通错误处理）: %s",
+                          f"{type(_ie).__name__}: {_ie}")
             is_404 = False
         if is_404:
             _logger.error(
@@ -1260,7 +1264,7 @@ def get_prompt_text(
                 "请检查 Prompt 配置，当前回退本地: %s", name, label, e,
             )
             return _local("404 不存在")
-        _logger.warning("[langfuse] prompt %s(label=%s) 拉取失败，回退本地: %s", name, label, e)
+        _logger.warning("[langfuse] prompt %s(label=%s) 拉取失败，回退本地: %s", name, label, f"{type(e).__name__}: {e}")
         return _local("拉取失败")
 
 
@@ -1318,7 +1322,7 @@ def create_prompt(
         get_client().create_prompt(**kwargs)
         return True
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[langfuse] create_prompt(%s) 失败: %s", name, e)
+        _logger.warning("[langfuse] create_prompt(%s) 失败: %s", name, f"{type(e).__name__}: {e}")
         return False
 
 
@@ -1335,5 +1339,5 @@ def update_prompt_labels(name: str, version: int, new_labels: list[str]) -> bool
         get_client().update_prompt(name=name, version=version, new_labels=new_labels)
         return True
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[langfuse] update_prompt_labels(%s v%s) 失败: %s", name, version, e)
+        _logger.warning("[langfuse] update_prompt_labels(%s v%s) 失败: %s", name, version, f"{type(e).__name__}: {e}")
         return False

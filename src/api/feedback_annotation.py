@@ -66,7 +66,7 @@ def _ensure_dataset(client, name: str, description: str = "") -> None:
     try:
         client.create_dataset(name=name, description=description)
     except Exception as e:  # noqa: BLE001
-        _logger.debug("create_dataset(%s) 已存在或失败（忽略）: %s", name, e)
+        _logger.debug("create_dataset(%s) 已存在或失败（忽略）: %s", name, f"{type(e).__name__}: {e}")
 
 
 # ── Dataset 条目字段契约（完整表见 docs/langfuse平台/Dataset字段契约.md）──────
@@ -109,7 +109,7 @@ def _cube_dataset_fields(spec: dict) -> dict:
             "cube_spec_readable": spec_readable_text(spec),
         }
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] Cube 定义序列化失败（跳过该字段）: %s", e)
+        _logger.warning("[annotation] Cube 定义序列化失败（跳过该字段）: %s", f"{type(e).__name__}: {e}")
         return {}
 
 
@@ -129,7 +129,7 @@ def _model_sql(ann) -> str:
         if rec is not None and (rec.sql or "").strip():
             return rec.sql
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[annotation] 读反馈原始 SQL 失败，退回 bad_sql: %s", e)
+        _logger.debug("[annotation] 读反馈原始 SQL 失败，退回 bad_sql: %s", f"{type(e).__name__}: {e}")
     return ann.bad_sql or ""
 
 
@@ -166,7 +166,7 @@ def _model_cube(ann) -> dict:
         if rec is not None and rec.cube_spec:
             return rec.cube_spec
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[annotation] 读反馈原始 Cube 定义失败: %s", e)
+        _logger.debug("[annotation] 读反馈原始 Cube 定义失败: %s", f"{type(e).__name__}: {e}")
     return {}
 
 
@@ -292,7 +292,7 @@ def _fill_annotation_from_snapshot(ann) -> "AnnotationRecord":
     try:
         rec = store.get(ann.thread_id, ann.message_id)
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[annotation] 读反馈快照失败 %s: %s", ann.thread_id[:12], e)
+        _logger.debug("[annotation] 读反馈快照失败 %s: %s", ann.thread_id[:12], f"{type(e).__name__}: {e}")
         return ann
     if rec is None or (not rec.question and not rec.sql):
         return ann
@@ -309,7 +309,7 @@ def _fill_annotation_from_snapshot(ann) -> "AnnotationRecord":
         updated = store.update_annotation(ann.thread_id, ann.message_id, **fields)
         return updated or ann
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[annotation] 列表补齐标注失败 %s: %s", ann.thread_id[:12], e)
+        _logger.debug("[annotation] 列表补齐标注失败 %s: %s", ann.thread_id[:12], f"{type(e).__name__}: {e}")
         return ann
 
 
@@ -351,7 +351,7 @@ async def _backfill_annotation(thread_id: str, message_id: str) -> dict | None:
                 ann.cube_spec = spec
                 dirty = True
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[annotation] 线程 state 惰性补齐失败: %s", e)
+            _logger.debug("[annotation] 线程 state 惰性补齐失败: %s", f"{type(e).__name__}: {e}")
     if dirty:
         ann = await offload(
             store.update_annotation, thread_id, message_id,
@@ -495,7 +495,7 @@ async def execute_annotation(request: Request):
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 执行失败 thread=%s: %s", thread_id[:12], e)
+        _logger.warning("[annotation] 执行失败 thread=%s: %s", thread_id[:12], f"{type(e).__name__}: {e}")
         await offload(
             store.update_annotation, thread_id, message_id, exec_error=str(e)[:2000]
         )
@@ -625,7 +625,7 @@ async def preview_cube_annotation(request: Request):
     except CubePlanError as e:
         return json_response({"error": f"口径编译失败：{e}"}, status=400)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 口径试算编译异常 thread=%s: %s", thread_id[:12], e)
+        _logger.warning("[annotation] 口径试算编译异常 thread=%s: %s", thread_id[:12], f"{type(e).__name__}: {e}")
         return json_response({"error": f"口径编译失败: {e}"}, status=400)
 
     physical_sql = str(plan.get("dialect_sql") or "")
@@ -638,7 +638,7 @@ async def preview_cube_annotation(request: Request):
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 口径试算执行失败 thread=%s: %s", thread_id[:12], e)
+        _logger.warning("[annotation] 口径试算执行失败 thread=%s: %s", thread_id[:12], f"{type(e).__name__}: {e}")
         return json_response({"error": f"口径试算执行失败: {e}"}, status=400)
 
     try:
@@ -651,7 +651,7 @@ async def preview_cube_annotation(request: Request):
             db_name=db_name[:128] if db_name else ann.db_name,
         )
     except Exception as e:  # noqa: BLE001
-        _logger.debug("[annotation] 试算口径落库失败（不影响本次试算）: %s", e)
+        _logger.debug("[annotation] 试算口径落库失败（不影响本次试算）: %s", f"{type(e).__name__}: {e}")
 
     return json_response({
         "ok": True,
@@ -713,7 +713,7 @@ async def confirm_annotation(request: Request):
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 金标 SQL 执行失败 thread=%s: %s", thread_id[:12], e)
+        _logger.warning("[annotation] 金标 SQL 执行失败 thread=%s: %s", thread_id[:12], f"{type(e).__name__}: {e}")
         return json_response({"error": f"金标 SQL 执行失败（请先修正）: {e}"}, status=400)
 
     from api.message_feedback import _find_trace_with_retry
@@ -767,7 +767,7 @@ async def confirm_annotation(request: Request):
         _logger.info("[annotation] BadCase 已写入 Dataset:badcase trace=%s type=%s",
                      trace_id[:12] if trace_id else "?", bad_type)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] Dataset:badcase 写入失败（跳过，不影响本地）: %s", e)
+        _logger.warning("[annotation] Dataset:badcase 写入失败（跳过，不影响本地）: %s", f"{type(e).__name__}: {e}")
 
     # ② badcase_status.json（reviewed + bad_type + gold_sql，进回归集）
     def _mark_badcase_status() -> None:
@@ -780,7 +780,7 @@ async def confirm_annotation(request: Request):
         # P1-14：写盘（+ 可能的数据集同步），进线程
         await offload(_mark_badcase_status)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] badcase_status 标记失败: %s", e)
+        _logger.warning("[annotation] badcase_status 标记失败: %s", f"{type(e).__name__}: {e}")
 
     # ③ 本地标注 → badcase（终态）
     updated = await offload(
@@ -882,7 +882,7 @@ async def _confirm_good_commit(
             _logger.info("[annotation] Good 样本已写入 Dataset:goodcase trace=%s",
                          trace_id[:12] if trace_id else "?")
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] Dataset:goodcase 写入失败（跳过，不影响本地）: %s", e)
+        _logger.warning("[annotation] Dataset:goodcase 写入失败（跳过，不影响本地）: %s", f"{type(e).__name__}: {e}")
 
     now = _now_iso()
     # P1-14：终态写入（同步 sqlite commit）→ 线程
@@ -932,7 +932,7 @@ def maybe_auto_good(ann, sql: str, db_name: str = "") -> bool:
         if not langfuse_enabled():
             return False
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 自动入集判 langfuse 开关失败（跳过）: %s", e)
+        _logger.warning("[annotation] 自动入集判 langfuse 开关失败（跳过）: %s", f"{type(e).__name__}: {e}")
         return False
 
     from api.message_feedback import _find_trace_with_retry
@@ -943,7 +943,7 @@ def maybe_auto_good(ann, sql: str, db_name: str = "") -> bool:
             _goodcase_item_kwargs(ann, sql, db_name or ann.db_name, trace_id, "auto-good")
         )
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 自动入集写 Dataset:goodcase 失败（留在队列）: %s", e)
+        _logger.warning("[annotation] 自动入集写 Dataset:goodcase 失败（留在队列）: %s", f"{type(e).__name__}: {e}")
         return False
 
     now = _now_iso()
@@ -964,7 +964,7 @@ def maybe_auto_good(ann, sql: str, db_name: str = "") -> bool:
             n = _delete_goodcase_items(ann, trace_id, source="auto-good")
             _logger.info("[annotation] 自动入集回滚数据集条目 count=%d", n)
         except Exception as e:  # noqa: BLE001
-            _logger.warning("[annotation] 自动入集回滚数据集条目失败（需人工处理）: %s", e)
+            _logger.warning("[annotation] 自动入集回滚数据集条目失败（需人工处理）: %s", f"{type(e).__name__}: {e}")
         return False
     _logger.info("[annotation] 点赞自动入集 trace=%s sql_len=%d",
                  trace_id[:12] if trace_id else "?", len(sql))
@@ -1115,7 +1115,7 @@ def withdraw_auto_good(thread_id: str, message_id: str) -> int:
         if langfuse_enabled():
             _delete_goodcase_items(ann, trace_id)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 撤销点赞收回自动入集失败（保留本地 good）: %s", e)
+        _logger.warning("[annotation] 撤销点赞收回自动入集失败（保留本地 good）: %s", f"{type(e).__name__}: {e}")
         return 0
     if store.reopen_annotation(thread_id, message_id) is None:
         return 0
@@ -1167,7 +1167,7 @@ async def revoke_good_annotation(request: Request):
             status=409,
         )
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 撤回时删除数据集条目失败: %s", e)
+        _logger.warning("[annotation] 撤回时删除数据集条目失败: %s", f"{type(e).__name__}: {e}")
         return json_response(
             {"error": f"删除数据集条目失败（{e}）；本地未回退，可重试或去 Langfuse UI 手动删",
              "reason": "delete_failed"},
@@ -1237,7 +1237,7 @@ async def remove_badcase_annotation(request: Request):
             status=409,
         )
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 移出 BadCase 时删除数据集条目失败: %s", e)
+        _logger.warning("[annotation] 移出 BadCase 时删除数据集条目失败: %s", f"{type(e).__name__}: {e}")
         return json_response(
             {"error": f"删除数据集条目失败（{e}）；本地未回退，可重试或去 Langfuse UI 手动删",
              "reason": "delete_failed"},
@@ -1258,7 +1258,7 @@ async def remove_badcase_annotation(request: Request):
             if not status_closed:
                 warns.append("badcase_status 未关闭（trace_id 前缀歧义？），请手动 mark invalid")
         except Exception as e:  # noqa: BLE001
-            _logger.warning("[annotation] 移出 BadCase 时关闭状态标记失败: %s", e)
+            _logger.warning("[annotation] 移出 BadCase 时关闭状态标记失败: %s", f"{type(e).__name__}: {e}")
             warns.append("badcase_status 未关闭，请手动 mark invalid")
     else:
         warns.append(f"该 trace 下还有 {remaining} 条 BadCase，状态未关闭")
@@ -1416,7 +1416,7 @@ async def clear_annotations(request: Request):
                 purge_feedback, ann.thread_id, ann.message_id, revoke=False
             )
         except Exception as e:  # noqa: BLE001
-            _logger.warning("[annotation] 批量清空：删反馈失败 %s: %s", ann.thread_id[:12], e)
+            _logger.warning("[annotation] 批量清空：删反馈失败 %s: %s", ann.thread_id[:12], f"{type(e).__name__}: {e}")
             result = {"feedback": False}
         if result["feedback"]:
             feedback_deleted += 1
@@ -1428,7 +1428,7 @@ async def clear_annotations(request: Request):
                 store.delete_annotation, ann.thread_id, ann.message_id, status
             )
         except Exception as e:  # noqa: BLE001
-            _logger.warning("[annotation] 批量清空：删条目失败 %s: %s", ann.thread_id[:12], e)
+            _logger.warning("[annotation] 批量清空：删条目失败 %s: %s", ann.thread_id[:12], f"{type(e).__name__}: {e}")
             continue
         if ok:
             deleted += 1
@@ -1475,7 +1475,11 @@ def _as_dict_field(v):
         try:
             d = json.loads(v)
             return d if isinstance(d, dict) else {}
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            # 解析不了就当空 dict。注解元数据里一个字段悄悄变空，正是
+            # manifest-empty-identity-fields 那类「空值传染」的入口 —— 留痕。
+            _logger.debug("[annotation] 元数据字段 JSON 解析失败，按空 dict 处理: %s",
+                          f"{type(e).__name__}: {e}")
             return {}
     return {}
 
@@ -1507,7 +1511,10 @@ def _dataset_item_to_row(it) -> dict:
     if isinstance(cube, dict):
         try:
             cube = json.dumps(cube, ensure_ascii=False)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # 序列化不了就置空 —— 前端注解页对这个 cube 会**静默不渲染**，看不出是数据坏了。
+            _logger.debug("[annotation] cube_spec 序列化失败，置空: %s",
+                          f"{type(e).__name__}: {e}")
             cube = ""
     return {
         "item_id": _as_field(getattr(it, "id", "")),
@@ -1570,7 +1577,7 @@ async def list_dataset_items(request: Request):
         items = await offload_long(_fetch)
         return json_response({"dataset": name, "count": len(items), "items": items})
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 读 Langfuse Dataset:%s 失败: %s", name, e)
+        _logger.warning("[annotation] 读 Langfuse Dataset:%s 失败: %s", name, f"{type(e).__name__}: {e}")
         return json_response({"dataset": name, "count": 0, "items": [], "error": str(e)})
 
 
@@ -1666,7 +1673,7 @@ async def dataset_stats(request: Request):
         payload.update(await asyncio.to_thread(_dataset_stats_cached))
         return json_response(payload)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 读数据集统计失败: %s", e)
+        _logger.warning("[annotation] 读数据集统计失败: %s", f"{type(e).__name__}: {e}")
         payload.update({
             "badcase": _summarize_dataset([]),
             "goodcase": _summarize_dataset([]),

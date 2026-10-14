@@ -541,7 +541,11 @@ def _output_marker(result: Any) -> dict:
     """
     try:
         payload = _result_payload(result)
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        # 取不到 payload = 这一段 output 在 UI 上没有标记信息（不是错误，是缺展示）。
+        # debug 级即可：每个工具结果都会走这里，warning 会刷屏。
+        _logger.debug("[langfuse_span] output marker 取 payload 失败: %s",
+                      f"{type(e).__name__}: {e}")
         payload = None
     if isinstance(payload, dict):
         rows = payload.get("rows")
@@ -719,7 +723,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                         schedule_judge("report", trace_id, exec_thread,
                                        report=report_text)
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse_span] 评分写入失败: %s", e)
+            _logger.debug("[langfuse_span] 评分写入失败: %s", f"{type(e).__name__}: {e}")
 
     # ── P1 评估单元：工具边界证据 sidecar + 主 agent run 收尾组装 ──
     # （docs/langfuse平台/NL2SQL-评估精准化设计方案.md §4，P1 片1。旁路容错：
@@ -766,20 +770,20 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                     if rep:
                         eval_subject.append_evidence(root, thread_id, subject_id, report=rep)
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse_span] 评估单元证据捕获失败: %s", e)
+            _logger.debug("[langfuse_span] 评估单元证据捕获失败: %s", f"{type(e).__name__}: {e}")
 
     def after_agent(self, state: Any, runtime: Any) -> dict | None:
         try:
             self._assemble_subject(state, runtime)
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse_span] 评估单元组装失败: %s", e)
+            _logger.debug("[langfuse_span] 评估单元组装失败: %s", f"{type(e).__name__}: {e}")
         return None  # 恒不改 agent state（本中间件不做状态更新）
 
     async def aafter_agent(self, state: Any, runtime: Any) -> dict | None:
         try:
             self._assemble_subject(state, runtime)
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse_span] 评估单元组装失败: %s", e)
+            _logger.debug("[langfuse_span] 评估单元组装失败: %s", f"{type(e).__name__}: {e}")
         return None
 
     def _assemble_subject(self, state: Any, runtime: Any) -> None:
@@ -844,7 +848,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                     (subject.get("final_sql") or "")[:60].replace("\n", " "),
                 )
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse_span] 评估单元组装失败: %s", e)
+            _logger.debug("[langfuse_span] 评估单元组装失败: %s", f"{type(e).__name__}: {e}")
 
     @staticmethod
     def _assemble_config(runtime: Any) -> tuple[dict, dict]:
@@ -1013,7 +1017,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                     if _tn:
                         span._otel_span.set_attribute("langfuse.trace.name", _tn)
                 except Exception as e:  # noqa: BLE001
-                    _logger.debug("[langfuse_span] set trace_name attr failed: %s", e)
+                    _logger.debug("[langfuse_span] set trace_name attr failed: %s", f"{type(e).__name__}: {e}")
             # session 分组：span 若落在 agent run 的 OTel 上下文内会自动继承其 session；
             # 若上下文丢失（deepagents 异步工作线程的孤儿场景，实测 get_current_trace_id
             # 为空），span 会成为新 root trace——给根 span 的 otel 属性设 session.id，
@@ -1024,10 +1028,10 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                     span._otel_span.set_attribute("session.id", thread_id)
                     span._otel_span.set_attribute("langfuse.trace.tags", ["nl2sql"])
                 except Exception as e:  # noqa: BLE001
-                    _logger.debug("[langfuse_span] set session attr failed: %s", e)
+                    _logger.debug("[langfuse_span] set session attr failed: %s", f"{type(e).__name__}: {e}")
             return span
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse_span] start failed: %s", e)
+            _logger.debug("[langfuse_span] start failed: %s", f"{type(e).__name__}: {e}")
             return None
 
     def _finish_span(self, span, result: Any, tool_name: str, tool_call_id: str = "") -> None:
@@ -1056,7 +1060,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
                 )
             span.end()
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse_span] finish failed: %s", e)
+            _logger.debug("[langfuse_span] finish failed: %s", f"{type(e).__name__}: {e}")
 
     def _end_span(self, span, level: str = "DEFAULT", status_message: str = "") -> None:
         if span is None:
@@ -1097,7 +1101,13 @@ class LangfuseSpanMiddleware(AgentMiddleware):
             seq = 1
             try:
                 seq = len([f for f in skill_dir.iterdir() if f.suffix == ".json"]) + 1
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                # 数不出来就退回 1。**这不是无害降级**：序列号会与盘上实际文件数脱节，
+                # 后续按 seq 命名的产物可能与已有文件撞名。必须留痕（低频：每次技能落盘一次）。
+                _logger.warning(
+                    "[langfuse_span] 统计 %s 下已有 json 数失败，序列号退回 1: %s",
+                    skill_dir, f"{type(e).__name__}: {e}",
+                )
                 seq = 1
             # 问题维度：同会话多问题 → 用主 run trace id（每问题=一条 chat-turn trace）
             # + 问题文本区分归属，文件名加问题短 id 前缀（同一问题的产物排在一起）
@@ -1123,7 +1133,7 @@ class LangfuseSpanMiddleware(AgentMiddleware):
             fname = f"{qprefix}_{tool_name}-{seq}.json" if qprefix else f"{tool_name}-{seq}.json"
             (skill_dir / fname).write_text(blob, encoding="utf-8")
         except Exception as e:  # noqa: BLE001
-            _logger.debug("[langfuse_span] process_data dump 失败: %s", e)
+            _logger.debug("[langfuse_span] process_data dump 失败: %s", f"{type(e).__name__}: {e}")
 
 
 def _compact(data: Any, limit: int) -> Any:
