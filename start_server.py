@@ -396,6 +396,24 @@ def main():
     # Setup environment
     setup_environment()
 
+    # 功能开关集中校验（Phase 2-5）：非法值**终止启动**，绝不静默回落默认值。
+    # 排在这里是因为 ① `.env` 已在 setup_environment() 里进 os.environ；
+    # ② 早于 core / 预检 / 图加载 —— 配置错了就没必要再做后面那些事，
+    # 而且此刻失败只有一行清清爽爽的报错，不会混在 core 日志里。
+    # 必须在 patch 之前：patch 会 import 一批模块，其中的模块级 `os.getenv` 已按
+    # **未校验**的值算过默认（校验只负责「吵」，不保证读取点用的是校验后的值）。
+    try:
+        from agent.settings.feature_flags import get_flags
+
+        print(f"⚙️  功能开关: {get_flags().as_dict()}", flush=True)
+    except ValueError as e:
+        print(f"\n🚫 功能开关配置非法: {e}", flush=True)
+        print("   请修正 .env / docker-compose 环境变量后重启。", flush=True)
+        sys.exit(1)
+    except Exception as e:  # noqa: BLE001  校验模块本身出问题也不该静默放过
+        print(f"\n🚫 功能开关校验失败: {e}", flush=True)
+        sys.exit(1)
+
     # 运行时猴子补丁（Phase 2-3）：集中应用 4 个补丁（check_progress / sync_launcher /
     # deepagents_async_config_patch / filesystem_backend_patch）。必须在预检
     # （preflight_check 会 import mcp_tool）与图加载之前 —— 补丁要早于 deepagents 的
