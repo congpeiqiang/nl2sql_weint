@@ -118,6 +118,13 @@ async def _lifespan(app: "Starlette"):
     trace_events/eval_queue/工作区中间产物 + 量各区域占用给 `/metrics`），停机时停它。
     同样是**后台线程 + 同步工作**：文件遍历与 DELETE 绝不能落在事件循环上（P1-14）。
 
+    2026-10-13 再插一件（排在维护线程之后）：**嵌入通道保活线程**（`agent.retrieval.embedder`，
+    每 5 分钟打一次真实嵌入请求、单次超时 120s）。理由见 `embedder.py` 末尾「后台预热」节：
+    查询期的 4s×2 ≈ 8.25s 跑不完一次 13~17s 的 GPU 冷加载，而且**客户端掐断时 Ollama 会把
+    这次加载一并放弃** ⇒ 没有这条路径，`.13` 那边重建 `bgem3` 容器之后问数就**永久**降级
+    纯 FTS（2026-10-11 发生过、10-13 才被发现）。`NL2SQL_RETRIEVAL!=hybrid` 或
+    `NL2SQL_EMBED_WARMUP_INTERVAL<=0` 时不启动。
+
     2026-09-25 再插一件（**最靠前**）：运行时库归位 —— `eval_queue` / `trace_bind` /
     `pending_terminal` 三件套从数据根目录搬进各自的同名子目录（`agent/utils/sqlite_paths.py`）。
     必须在 `start_reaper` / `start_maintenance` **之前**：它俩会建连，而搬运的前提是
@@ -144,6 +151,16 @@ async def _lifespan(app: "Starlette"):
         start_maintenance()
     except Exception as e:  # noqa: BLE001
         _logger.warning("[custom_app] 启动保留策略维护失败: %s", e)
+    # 2026-10-13：嵌入通道**保活线程**。冷加载 13~17s 跑不完查询期的 4s×2 预算，且客户端
+    # 掐断会让 Ollama 连加载一起放弃（自锁）⇒ 必须有一条允许跑完的后台路径，否则一旦
+    # `.13` 重建 `bgem3` 容器，问数就永久降级纯 FTS（10-11 发生过，10-13 才被发现）。
+    # 与上面三件同款：yield 前起、停机停；起不来只 warning，绝不拦启动。
+    try:
+        from agent.retrieval.embedder import start_warmer
+
+        start_warmer()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[custom_app] 启动嵌入预热失败: %s", e)
     yield
     try:
         import api.drain  # 惰性 import：与 langgraph 的 import 顺序解耦
@@ -173,6 +190,13 @@ async def _lifespan(app: "Starlette"):
         stop_maintenance()
     except Exception as e:  # noqa: BLE001
         _logger.warning("[custom_app] 停保留策略维护失败: %s", e)
+    # 嵌入保活线程：daemon，无落盘状态，join 等不到在飞的那一轮（最长 120s）是正常的
+    try:
+        from agent.retrieval.embedder import stop_warmer
+
+        stop_warmer()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[custom_app] 停嵌入预热失败: %s", e)
     await _metrics.stop()
 
 

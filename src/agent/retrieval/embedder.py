@@ -7,10 +7,16 @@
   它挂了绝不许变成「问数挂了」。
 - **硬超时**：**查询期 4s**（`NL2SQL_EMBED_QUERY_TIMEOUT`）／**索引期单批 2.5s**
   （`NL2SQL_EMBED_TIMEOUT`）。一次问数里嵌入只值几毫秒，宁可降级也不许把时间预算花在
-  等嵌入上 —— 工具超时 300s 不是给嵌入用的。`.13` 上 bge-m3 冷启实测 16.8s（容器重启后
-  首调），必然超时降级，这是**设计内行为**。
+  等嵌入上 —— 工具超时 300s 不是给嵌入用的。
   4s 这个数是**量出来的**（2026-09-29 从生产容器打 230 次）：顺序 p99 115ms、4 并发 p99
   234ms、32 条批 486ms ⇒ 4s 仍是正常尾延迟的 17 倍。
+- ⚠️ **查询期预算跑不完一次冷加载 —— 所以冷加载不在查询期做**。`.13` 上 bge-m3 的
+  GPU 冷加载实测 **13~17s**（新进程首次加载；2026-10-13 生产实测 `:11435` = 13.16s），
+  而 4s×2 + 0.25s ≈ **8.25s 必然两次都掐断**。更糟的是：**客户端掐断时 Ollama 会把这次
+  加载一并放弃**（没有别的等待者）⇒ 模型**永远热不起来**，每次检索都降级纯 FTS
+  （2026-10-13 生产复现：`bgem3` 容器 10-11 重建后两天零成功、全是超时）。
+  ⇒ 冷加载由**后台预热** `warm_up` 用长超时（`NL2SQL_EMBED_WARMUP_TIMEOUT`，默认 120s）
+  消化，查询期只服务「已经热了」的通道。**正文见文件末尾「后台预热」节**。
 - **重试 1 次**（`NL2SQL_EMBED_RETRIES`）：2026-09-29 生产实证两次查询期 `timed out`
   ——正常 73ms 的通道**离散停顿 ≥2.5s**（宿主/网络瞬时停顿或本容器 GIL 饥饿，两者事后
   不可区分），这种形状**重试能救**。只重试「可能一次就好」的失败：超时 / 连接类
@@ -38,6 +44,9 @@
 | `查询期熔断开启：接下来 Ns 不再尝试嵌入` | 通道进入冷却，**接下来 60s 的检索全走纯 FTS** |
 | `查询期熔断冷却中（剩 S s）⇒ 本次不试嵌入` | 窗口内的一次检索：零等待、纯 FTS |
 | `[retrieval] 查询嵌入不可用 ⇒ 本次只用 FTS 腿` | 调用方（`lance.py` / `jsonl.py`）确认这一次只剩 FTS 腿 |
+| `预热成功（<原因>）…N ms` | **后台预热线程**打通了一次（≠ 有检索）。`N > 5000` 基本就是刚好消化掉一次冷加载；`N ~ 100` 说明模型本来就热 |
+| `预热失败（<原因>）…` | 连长超时的预热都没通 ⇒ 通道**真**不可用（不是冷加载），问数继续纯 FTS |
+| `嵌入预热线程已启动 / 未启动` | 启动那一瞬的一行，说明预热是否被开关关掉 |
 
 ⚠️ 成功行**只证明形状对**，不证明向量数值有意义（返回 1024 个 `0.0` 也会打「向量可用」）
 —— 见下面「模型名闸的边界」，要抓这个只能上参照向量指纹。
@@ -84,6 +93,8 @@ ENV_TIMEOUT = "NL2SQL_EMBED_TIMEOUT"
 ENV_QUERY_TIMEOUT = "NL2SQL_EMBED_QUERY_TIMEOUT"
 ENV_RETRIES = "NL2SQL_EMBED_RETRIES"
 ENV_COOLDOWN = "NL2SQL_EMBED_COOLDOWN"
+ENV_WARMUP_INTERVAL = "NL2SQL_EMBED_WARMUP_INTERVAL"
+ENV_WARMUP_TIMEOUT = "NL2SQL_EMBED_WARMUP_TIMEOUT"
 
 DEFAULT_BASE_URL = "http://192.168.25.13:11435/v1"
 DEFAULT_MODEL = "bge-m3"
@@ -92,6 +103,8 @@ DEFAULT_TIMEOUT_S = 2.5
 DEFAULT_QUERY_TIMEOUT_S = 4.0
 DEFAULT_RETRIES = 1
 DEFAULT_COOLDOWN_S = 60.0
+DEFAULT_WARMUP_INTERVAL_S = 300.0   # 后台保活间隔（`<=0` ⇒ 不启预热线程）
+DEFAULT_WARMUP_TIMEOUT_S = 120.0    # 必须 >> 冷加载实测 13~17s，且 < `.13` 的 OLLAMA_LOAD_TIMEOUT=5m
 RETRY_BACKOFF_S = 0.25
 
 # 单次请求的最大条数：索引期批量嵌入要限流分批（该机是共享主机，要能容忍对方重启）
@@ -195,6 +208,33 @@ def cooldown_s() -> float:
         return DEFAULT_COOLDOWN_S
 
 
+def warmup_interval_s() -> float:
+    """后台预热间隔秒数（`NL2SQL_EMBED_WARMUP_INTERVAL`，默认 300）。`<=0` ⇒ 不启预热线程。"""
+    raw = os.environ.get(ENV_WARMUP_INTERVAL, "").strip()
+    if not raw:
+        return DEFAULT_WARMUP_INTERVAL_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_WARMUP_INTERVAL_S
+
+
+def warmup_timeout_s() -> float:
+    """后台预热单次超时（`NL2SQL_EMBED_WARMUP_TIMEOUT`，默认 120s）。
+
+    **必须远大于冷加载**（实测 13~17s）——这个数是整个机制的解药，调小回 4s 就等于
+    把查询期那个「永远跑不完、还把加载一起放弃」的自锁原样搬进后台。
+    """
+    raw = os.environ.get(ENV_WARMUP_TIMEOUT, "").strip()
+    if not raw:
+        return DEFAULT_WARMUP_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_WARMUP_TIMEOUT_S
+    return value if value > 0 else DEFAULT_WARMUP_TIMEOUT_S
+
+
 # ── 查询期熔断（只管 `embed_one`；见模块 docstring「查询期熔断冷却」）──────
 _breaker_until = 0.0
 _breaker_lock = threading.Lock()
@@ -220,11 +260,16 @@ def _open_breaker() -> None:
     )
 
 
-def _reset_breaker_for_test() -> None:
-    """测试钩子：关掉冷却窗口、清掉待冷却状态（线上没有调用点）。"""
+def _close_breaker() -> None:
+    """关掉冷却窗口（`warm_up` 成功后调用）。不打日志：调用方会打自己的成功行。"""
     global _breaker_until
     with _breaker_lock:
         _breaker_until = 0.0
+
+
+def _reset_breaker_for_test() -> None:
+    """测试钩子：关掉冷却窗口、清掉待冷却状态（线上没有调用点）。"""
+    _close_breaker()
 
 
 def _open(req: urllib.request.Request, timeout: float):
@@ -276,10 +321,13 @@ def _post(path: str, payload: dict, timeout: float, *, attempts: int | None = No
     return None
 
 
-def embed_texts(texts: list[str], *, timeout: float | None = None) -> list[list[float]] | None:
+def embed_texts(texts: list[str], *, timeout: float | None = None,
+                attempts: int | None = None) -> list[list[float]] | None:
     """批量取向量。**失败返回 None**（调用方降级纯 FTS）。
 
     返回顺序与入参一一对应；维数不符或条数不符同样返回 None。
+    `attempts` 覆盖**总尝试次数**（缺省 `retry_count() + 1`）；只有后台预热用它传 `1`
+    ——那里的解药是长超时，再退避重试只会把最坏耗时翻倍（见 `warm_up`）。
     """
     items = [str(t or "") for t in (texts or [])]
     if not items:
@@ -287,7 +335,7 @@ def embed_texts(texts: list[str], *, timeout: float | None = None) -> list[list[
     if len(items) > MAX_BATCH:
         _log.warning("[embedder] 单批 %d 条超过上限 %d，请调用方分批", len(items), MAX_BATCH)
 
-    total_attempts = retry_count() + 1
+    total_attempts = max(1, attempts) if attempts is not None else retry_count() + 1
     stats: dict = {}
     data = _post(
         "/embeddings",
@@ -381,3 +429,117 @@ def health(timeout: float = 2.0) -> dict:
         "latency_ms": latency,
         "error": "" if ok else "调用失败 / 维数不符 / 模型名不符（三者都可能，详见日志）",
     }
+
+
+# ── 后台预热（2026-10-13）────────────────────────────────────────────────
+#
+# **为什么必须有**：查询期预算 4s×2+0.25s ≈ 8.25s，**跑不完**一次 GPU 冷加载（实测 13.16s）；
+# 而客户端在 4s 处掐断时 **Ollama 会把这次加载一并放弃**（没有别的等待者）⇒ 模型**永远热
+# 不起来**，每次检索都是纯 FTS —— 这是个自锁：重试越多，越确定它热不了。
+#
+# 所以必须存在一条「**允许跑完**」的加载路径，且它不能占查询期预算。就是这里：
+# 后台线程每 `NL2SQL_EMBED_WARMUP_INTERVAL`（默认 300s）打一次**真实**嵌入请求，超时
+# `NL2SQL_EMBED_WARMUP_TIMEOUT`（默认 120s）。首轮在进程起来后 `WARMUP_FIRST_DELAY_S`
+# 秒就跑（= 启动预热），之后按间隔保活 —— **保活才是重点**：触发源是 `.13` 那边重建
+# `bgem3` 容器（2026-10-11 就发生过一次），我们的进程重启救不了它。
+#
+# 三个必守的边界：
+#   ① **只在 `vector_enabled()` 时跑**（`NL2SQL_RETRIEVAL=hybrid`）。`off`/`fts` 模式下
+#      嵌入压根不会被调用，预热纯属白烧请求。
+#   ② **只试 1 次**（`attempts=1`）。长超时本身就是解药；带退避重试只会把最坏耗时翻倍。
+#   ③ **成功顺手关掉查询期熔断**：否则预热好了，那条 60s 冷却还在，白白多降级一分钟。
+# 失败**不抛、不拦启动**（与 L1 契约一致：嵌入挂了绝不许变成「服务挂了」）。
+WARMUP_TEXT = "预热探针"
+WARMUP_FIRST_DELAY_S = 8.0   # 首轮等启动稳定（别跟 uvicorn / 10 个 background worker 抢前几秒）
+
+_WARMER_THREAD: threading.Thread | None = None
+_WARMER_THREAD_LOCK = threading.Lock()
+_WARMER_STOP = threading.Event()
+
+
+def _warmup_enabled() -> bool:
+    """预热是否该跑（= 检索模式会用向量腿）。惰性 import，避免模块级循环依赖。"""
+    try:
+        from agent.retrieval.schema import vector_enabled
+
+        return vector_enabled()
+    except Exception:  # noqa: BLE001  判不出就不跑，绝不因此拦启动
+        return False
+
+
+def warm_up(reason: str = "定时") -> bool:
+    """打一次**允许跑完**的嵌入，把冷加载在后台消化掉。成功 True。
+
+    用 `embed_texts`（**不走 `embed_one`**）：① 绕过熔断窗口，预热不该被自己开的窗口挡住；
+    ② 成功会打标准的「向量可用」行，冷加载的 13s 在日志里看得见。
+    """
+    if not _warmup_enabled():
+        return False
+    t0 = time.monotonic()
+    vecs = embed_texts([WARMUP_TEXT], timeout=warmup_timeout_s(), attempts=1)
+    ms = int((time.monotonic() - t0) * 1000)
+    if vecs:
+        _close_breaker()
+        _log.info(
+            "[embedder] 预热成功（%s）：模型已就绪，%dms"
+            "（>5000ms 基本就是刚好消化了一次冷加载）",
+            reason, ms,
+        )
+        return True
+    _log.warning(
+        "[embedder] 预热失败（%s，%dms）：连长超时的预热都没通 ⇒ 通道真不可用"
+        "（不是冷加载），问数继续降级纯 FTS",
+        reason, ms,
+    )
+    return False
+
+
+def _warmer_loop() -> None:
+    interval = warmup_interval_s()
+    if _WARMER_STOP.wait(WARMUP_FIRST_DELAY_S):
+        return
+    while not _WARMER_STOP.is_set():
+        try:
+            warm_up(reason="定时")
+        except Exception as e:  # noqa: BLE001  一轮失败绝不许打死线程
+            _log.warning("[embedder] 预热线程异常（继续下一轮）: %s", e)
+        if _WARMER_STOP.wait(interval):
+            return
+
+
+def start_warmer() -> bool:
+    """启动后台预热线程（幂等：已在跑返回 False）。进程 lifespan 里调用。
+
+    `NL2SQL_EMBED_WARMUP_INTERVAL<=0` ⇒ 不启动（关掉这个机制时**不打印误导性的启动行**）。
+    """
+    global _WARMER_THREAD
+    interval = warmup_interval_s()
+    if interval <= 0:
+        _log.info("[embedder] 嵌入预热线程未启动（NL2SQL_EMBED_WARMUP_INTERVAL<=0）")
+        return False
+    with _WARMER_THREAD_LOCK:
+        if _WARMER_THREAD is not None and _WARMER_THREAD.is_alive():
+            return False
+        _WARMER_STOP.clear()
+        _WARMER_THREAD = threading.Thread(
+            target=_warmer_loop, daemon=True, name="embed-warmer"
+        )
+        _WARMER_THREAD.start()
+    _log.info(
+        "[embedder] 嵌入预热线程已启动（首轮 %.0fs 后，间隔 %.0fs，单次超时 %.0fs）",
+        WARMUP_FIRST_DELAY_S, interval, warmup_timeout_s(),
+    )
+    return True
+
+
+def stop_warmer(timeout: float = 3.0) -> None:
+    """停预热线程（不抛异常、不阻断停机）。
+
+    `join(timeout)` 等不到在飞的那一轮是**正常的**（长超时可达 120s）——线程是 daemon，
+    进程退出时随之消失；预热没有任何需要收尾的落盘状态。
+    """
+    _WARMER_STOP.set()
+    with _WARMER_THREAD_LOCK:
+        t = _WARMER_THREAD
+    if t is not None and t.is_alive():
+        t.join(timeout=timeout)
