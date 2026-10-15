@@ -210,6 +210,12 @@ def verify_producers() -> None:
         check("No generations found in stream" in detail_of(mark_e),
               "**修复方向 2**：detail 带真实异常文本（last_error 回落到 detail_of(mark)，"
               "纯模板文案运维定位不到哪条网关坏）", detail_of(mark_e)[:110])
+        check("/v1" in detail_of(mark_e),
+              "detail 带「Base URL 缺 /v1」提示（10-15 真根因；探活自动补 /v1 的"
+              "假阴性会把用户引向「网关坏了」的错误结论）")
+        check(len(detail_of(mark_e)) <= 500,
+              "加了提示后 detail 仍在 500 截断内（进 checkpoint/前端轮询的界不能破）",
+              str(len(detail_of(mark_e))))
         check(run_status_for(KIND_EMPTY_RESPONSE) == "error",
               "空流的下游终态串 = error（对端不是慢，是什么都没给）")
     finally:

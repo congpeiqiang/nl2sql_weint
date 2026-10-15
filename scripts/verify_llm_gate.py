@@ -573,6 +573,9 @@ def verify_middleware() -> None:
           "**修复方向 2 的核心**：戳的 detail 带真实异常文本（run-status 的 last_error"
           " 回落到 detail_of(mark)，纯模板文案运维定位不到哪条网关坏）",
           detail_of(mark6)[:110])
+    check("/v1" in detail_of(mark6),
+          "detail 带「Base URL 缺 /v1」提示（10-15 事故真根因：探活自动补 /v1 ⇒"
+          " 拉列表成功≠Base URL 对，用户会被假阴性误导）")
     check(sample_value("nl2sql_llm_retries_total", {"outcome": "exhausted"}) == exh_before2 + 1,
           "空流用尽也记 exhausted（与连接类共用重试账本）")
 

@@ -159,6 +159,12 @@ def _friendly_response(
             f"{MODEL_EMPTY_RESPONSE_MESSAGE}"
             f"｜{type(exc).__name__}: {str(exc).strip()[:160]}"
             f"{_endpoint_hint(request)}"
+            # 2026-10-15 事故的真根因：Base URL 缺 /v1 时 oneapi 式网关走 SPA
+            # 回退（200+HTML）⇒ 零 chunk。而「获取模型列表」探活会自动补 /v1
+            # （api/model_config._probe_models）⇒ 探活成功 ≠ Base URL 对，用户
+            # 极易被误导，把提示直接写进 last_error。正文不动（用户契约）。
+            "｜提示：若为 OpenAI 兼容网关，请检查 Base URL 是否缺 /v1 路径后缀"
+            "（真实调用不会自动补；模型列表探活会补，故拉列表成功不代表配置正确）"
         )
         msg = mark_failed(
             AIMessage(content=MODEL_EMPTY_RESPONSE_MESSAGE),
