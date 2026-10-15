@@ -15,9 +15,26 @@
 戳是附加信息，**文案一字符不改**。
 
 边界：
-- 只翻译「模型调用超时」，其他错误原样上抛（保持原有失败语义）。
+- 翻译两类错误为友好文案：「模型调用超时」（**不重试**，直接翻译）与「供应商
+  空流」（2026-10-15 加：先按连接类同款退避重试，用尽仍空才翻译，见下）；
+  其他错误原样上抛（保持原有失败语义）。
 - 本中间件包在模型调用边界（wrap_model_call），业务 SQL 报错不会以异常形式
   出现在这里，不会误伤。
+
+## 空流（2026-10-15，坏网关事故）
+
+生产 thread 01a13d2e：用户停止查询后，watcher 的失败汇报续跑（`sync_subagent_todos.
+_report_subagent_failure`）在 model 节点连炸——网关 `http://192.168.19.9:3000` 返回
+HTTP 200 + 零 SSE chunk ⇒ langchain `generate_from_stream` 抛
+`ValueError("No generations found in stream.")`。该异常既非超时也非连接类，本
+中间件原样上抛 ⇒ run=error；而**流级异常不落 checkpoint 的 tasks[].error** ⇒
+run-status 的 `last_error` 为空 ⇒ 前端只能显示「上一轮执行失败 + 后端未留下
+失败原因」。同日 9 个 error run 全走这条端点，另外两条端点（DeepSeek 官方、
+25.13:8100）同期都成功 ⇒ 端点级故障、且空流恰恰是网关抖动最常见的表现，
+**最该重试**。现在：空流按连接类同款退避重试；用尽仍空 → 转友好文案
+（`MODEL_EMPTY_RESPONSE_MESSAGE`）+ `KIND_EMPTY_RESPONSE` 戳，**detail 带真实
+异常文本与模型端点**——run 能正常收尾（success），run-status 走 mark 路径把
+detail 给到前端横幅，用户与运维都能看到「哪条端点在返回空」。
 
 P2-3：这里同时是**模型调用的唯一收口点**（主 agent 与子 agent 的图都注册了它），
 所以顺手把「结果三态 + 耗时」记进 prometheus（`nl2sql_llm_calls_total` /
@@ -54,11 +71,16 @@ from typing import Any, Callable, TypeVar
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage
 
-from agent.utils.failure_signal import KIND_MODEL_TIMEOUT, mark_failed
+from agent.utils.failure_signal import (
+    KIND_EMPTY_RESPONSE,
+    KIND_MODEL_TIMEOUT,
+    mark_failed,
+)
 from agent.utils.llm_gate import (
     backoff_seconds,
     describe_exception_chain,
     is_connection_error,
+    is_empty_stream_error,
     is_timeout_error,  # noqa: F401  再导出（对外仍从本模块可用）
     model_call_slot,
     model_call_slot_sync,
@@ -78,8 +100,37 @@ MODEL_TIMEOUT_MESSAGE = (
     "若反复超时，可在「模型配置」换一个模型。"
 )
 
+# ── 空流友好提示（2026-10-15 加；正文只放用户能行动的话，诊断细节进戳的 detail）──
+MODEL_EMPTY_RESPONSE_MESSAGE = (
+    "模型服务返回了空响应：接入点没有产出任何内容（常见于网关渠道异常、额度耗尽，"
+    "或网关把上游错误吞成了空回复）。本轮未能生成回答，请稍后重试；"
+    "若反复出现，请在「模型配置」换一个模型或接入点。"
+)
 
-def _friendly_response(request: ModelRequest[ContextT]) -> ModelResponse:
+
+def _endpoint_hint(request: Any) -> str:
+    """从 ModelRequest 尽力取「模型 @ base_url」（进戳的 detail；取不到返回空串）。
+
+    生产上 `request.model` 是 BaseChatOpenAI 子类（ChatDeepSeek/ChatQwen/ChatGLM/
+    ChatKimi/ChatOpenAI），字段为 `model_name`（alias `model`）与 `openai_api_base`
+    （alias `base_url`）。验证脚本会传 `ModelRequest(model=None)` 甚至 `None` ⇒
+    全程 getattr 兜底，**绝不抛异常**（诊断信息不能反过来弄挂失败收口）。
+    """
+    m = getattr(request, "model", None)
+    if m is None:
+        return ""
+    name = str(getattr(m, "model_name", None) or getattr(m, "model", None) or "")
+    base = str(getattr(m, "openai_api_base", None) or getattr(m, "base_url", None) or "")
+    if name and base:
+        return f"｜端点 {name} @ {base}"
+    if name or base:
+        return f"｜端点 {name or base}"
+    return ""
+
+
+def _friendly_response(
+    request: ModelRequest[ContextT], exc: BaseException | None = None,
+) -> ModelResponse:
     """构造一条带友好文案的 AIMessage 作为模型响应（agent 正常结束，前端渲染这张卡片）。
 
     注意：AIMessage 不带 tool_calls → 模型节点后直接走 END，不会触发工具节点，
@@ -92,10 +143,29 @@ def _friendly_response(request: ModelRequest[ContextT]) -> ModelResponse:
     `check_async_task` 把它当 `status: "success"` 报给主 agent、watcher 与 run 各记一套
     终态。**文案本身一个字符都不改**（既有断言按内容比较，文案是用户可见契约）。
 
+    两类友好文案（按 `exc` 分流，2026-10-15 加空流分支）：
+    - 空流（`is_empty_stream_error`）→ `MODEL_EMPTY_RESPONSE_MESSAGE` +
+      `KIND_EMPTY_RESPONSE` 戳，**detail = 文案 + 真实异常文本 + 模型端点**——
+      run-status 的 `last_error` 回落到 `detail_of(mark)`，detail 若只有模板文案，
+      用户看到的仍是「不知道为什么失败」、运维定位不到是哪条网关坏（修复方向 2）。
+    - 其余（超时）→ 原文案原戳，**逐字不变**（P2-3 契约，verify 套件按内容比较）。
+
     消费入口（语义一致、入口不同）：子图由 watcher + `check_async_task` 读戳
     （`async_tasks.status` 落失败态、走失败汇报）；主图由 `/api/threads/{tid}/run-status`
     读戳（`turn_failed` ⇒ 前端「上一轮执行失败」横幅 + 重试按钮）。
     """
+    if exc is not None and is_empty_stream_error(exc):
+        detail = (
+            f"{MODEL_EMPTY_RESPONSE_MESSAGE}"
+            f"｜{type(exc).__name__}: {str(exc).strip()[:160]}"
+            f"{_endpoint_hint(request)}"
+        )
+        msg = mark_failed(
+            AIMessage(content=MODEL_EMPTY_RESPONSE_MESSAGE),
+            KIND_EMPTY_RESPONSE,
+            detail,
+        )
+        return ModelResponse(result=[msg], structured_response=None)
     msg = mark_failed(
         AIMessage(content=MODEL_TIMEOUT_MESSAGE),
         KIND_MODEL_TIMEOUT,
@@ -111,6 +181,8 @@ def _classify_failure(
 
     判定顺序**必须是超时优先**：`openai.APITimeoutError` 是 `APIConnectionError` 的
     子类，反过来判会把「对端慢」当「连接断」去重试，用户白等几个 60s。
+    空流排在连接类之前：三类互斥（空流是 HTTP 200 后的 ValueError），但「先特判
+    再泛判」让日志语义稳定（2026-10-15 加，见模块 docstring 的空流一节）。
     """
     elapsed = time.perf_counter() - started
     if is_timeout_error(exc):
@@ -122,6 +194,25 @@ def _classify_failure(
         return "friendly", 0.0
 
     note_llm_call("error", elapsed)
+
+    # 空流：与连接类同款退避重试（网关抖动最常见的表现，最该重试）；**用尽后
+    # 不 raise，转友好文案** —— raise 出去 run=error，且流级异常不落 checkpoint
+    # 的 tasks[].error ⇒ 前端「执行失败 + 后端未留下失败原因」。
+    if is_empty_stream_error(exc):
+        if attempt < attempts:
+            delay = backoff_seconds(attempt)
+            _logger.warning(
+                "[ModelRetry] 供应商返回空流（第 %d/%d 次尝试，%.1fs），%.2fs 后重试 | %s",
+                attempt + 1, attempts + 1, elapsed, delay, describe_exception_chain(exc),
+            )
+            return "retry", delay
+        note_llm_retry("exhausted")
+        _logger.error(
+            "[ModelCall] 供应商空流、重试 %d 次仍空 → 转友好文案（异常与端点进失败戳）: %s",
+            attempts, describe_exception_chain(exc),
+        )
+        return "friendly", 0.0
+
     retryable = is_connection_error(exc)
     if retryable and attempt < attempts:
         delay = backoff_seconds(attempt)
@@ -170,7 +261,7 @@ class ModelTimeoutMiddleware(AgentMiddleware[ContextT, ResponseT]):
                         e, attempt=attempt, attempts=attempts, started=started,
                     )
                     if action == "friendly":
-                        return _friendly_response(request)
+                        return _friendly_response(request, e)
                     if action == "retry":
                         backoff = delay
                     else:
@@ -204,7 +295,7 @@ class ModelTimeoutMiddleware(AgentMiddleware[ContextT, ResponseT]):
                         e, attempt=attempt, attempts=attempts, started=started,
                     )
                     if action == "friendly":
-                        return _friendly_response(request)
+                        return _friendly_response(request, e)
                     if action == "retry":
                         backoff = delay
                     else:

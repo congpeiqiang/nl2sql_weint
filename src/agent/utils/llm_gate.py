@@ -177,6 +177,34 @@ def is_connection_error(exc: BaseException) -> bool:
     return False
 
 
+# langchain_core 消费「空流」的固定文案（language_models/chat_models.py 的
+# generate_from_stream：流里 0 个 chunk 就抛它）。2026-10-15 生产事故：网关
+# http://192.168.19.9:3000（渠道 linshi/weint）对 qwen3.8-max / deepseek-v4.1-flash
+# 等返回 HTTP 200 + 零 SSE chunk，一天 9 个 error run 全走这条端点、全是这个错，
+# 而同期另外两条端点（DeepSeek 官方、25.13:8100）都成功 ⇒ **端点级故障**。
+# 它既非超时也非连接类（HTTP 层是 200），原来被中间件直接上抛 ⇒ run=error，
+# 且流级异常不落 checkpoint 的 tasks[].error ⇒ 前端「执行失败 + 后端未留下
+# 失败原因」。有了本分类，ModelTimeoutMiddleware 才能对它「退避重试 + 用尽转
+# 友好文案（戳里带真实异常与端点）」。
+_EMPTY_STREAM_RE = re.compile(
+    r"no\s+generations?\s+found\s+in\s+stream", re.IGNORECASE,
+)
+
+
+def is_empty_stream_error(exc: BaseException) -> bool:
+    """判断异常是否为「供应商返回空流」（HTTP 200 但响应流里零 chunk）。
+
+    只认 `ValueError` + langchain 的固定文案，**故意不收宽到任意 ValueError**：
+    普通 ValueError（如「模型返回了坏 JSON」）是确定性错误，重试只会放大，且
+    必须原样上抛（verify_llm_gate 的负对照锁住这两条）。异常链任一环命中即算
+    （与 is_connection_error 同口径）。
+    """
+    for e in _chain(exc):
+        if isinstance(e, ValueError) and _EMPTY_STREAM_RE.search(str(e)):
+            return True
+    return False
+
+
 # ── ② 配置（一律运行期读 env）────────────────────────────────────
 
 

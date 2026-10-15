@@ -17,8 +17,9 @@
 本脚本验七段（每段都带**负对照**——"无标记＝今天的行为逐字不变"是本次的核心不变量）：
   ① **标记工具**：不改正文/返回同一对象/dict 与对象两条读路径/只看末条 AI/值域只许
      `error|timeout`/可 JSON 序列化（进 checkpoint 的前提）。
-  ② **三个生产点**：真跑中间件（超时 / 额度耗尽 / 未配模型）→ **文案一字符未改**
-     且 kind 正确；超时**仍不重试**（P3-4 策略没被这次改造动过）。
+  ② **四个生产点**：真跑中间件（超时 / 空流 / 额度耗尽 / 未配模型）→ **文案一字符未改**
+     且 kind 正确；超时**仍不重试**（P3-4 策略没被这次改造动过）；空流的 detail
+     **必须带真实异常文本**（修复方向 2：last_error 回落到 detail_of(mark)）。
   ③ **CaliberGate 放行**（事故回归闸）：取过知识料 + 末条带戳 → 必须**不打回**；
      **负对照**＝同样的消息去掉戳 → 必须打回（证明断言不是因为函数恒返回 None）。
   ④ **终态降级**：`run=success` + 末条带戳 → `status` 改判 + `error_kind` + 无 `result`；
@@ -83,6 +84,7 @@ def verify_signal_tools() -> None:
     from agent.subagents.sync_subagent_todos import _RUN_DONE_STATUSES
     from agent.utils.failure_signal import (
         FAILURE_KEY,
+        KIND_EMPTY_RESPONSE,
         KIND_MODEL_REQUIRED,
         KIND_MODEL_TIMEOUT,
         KIND_QUOTA_EXHAUSTED,
@@ -132,7 +134,8 @@ def verify_signal_tools() -> None:
 
     # 值域：新终态串必须落进 watcher/卡片的既有状态集，否则卡片永远停在「执行中」
     statuses = {run_status_for(k) for k in
-                (KIND_MODEL_TIMEOUT, KIND_QUOTA_EXHAUSTED, KIND_MODEL_REQUIRED)}
+                (KIND_MODEL_TIMEOUT, KIND_QUOTA_EXHAUSTED, KIND_MODEL_REQUIRED,
+                 KIND_EMPTY_RESPONSE)}
     check(statuses <= {"error", "timeout"},
           "run_status_for 只产出 error/timeout（写错新状态串会让卡片永不结束）", str(statuses))
     check(statuses <= set(_RUN_DONE_STATUSES),
@@ -147,15 +150,22 @@ def verify_signal_tools() -> None:
 
 # ── ② 三个生产点 ───────────────────────────────────────────────────
 def verify_producers() -> None:
-    section("② 三个生产点：超时 / 额度耗尽 / 未配模型（文案都不许改）")
+    section("② 四个生产点：超时 / 空流 / 额度耗尽 / 未配模型（文案都不许改）")
     from agent.middlewares.model_required import NO_MODEL_MESSAGE, ModelRequiredMiddleware
-    from agent.middlewares.model_timeout import MODEL_TIMEOUT_MESSAGE, ModelTimeoutMiddleware
+    from agent.middlewares.model_timeout import (
+        MODEL_EMPTY_RESPONSE_MESSAGE,
+        MODEL_TIMEOUT_MESSAGE,
+        ModelTimeoutMiddleware,
+    )
     from agent.middlewares.quota_error import QUOTA_EXHAUSTED_MESSAGE, QuotaErrorMiddleware
     from agent.utils.failure_signal import (
+        KIND_EMPTY_RESPONSE,
         KIND_MODEL_REQUIRED,
         KIND_MODEL_TIMEOUT,
         KIND_QUOTA_EXHAUSTED,
+        detail_of,
         failed_mark,
+        run_status_for,
     )
 
     req = _model_request()
@@ -182,6 +192,31 @@ def verify_producers() -> None:
     check(r_sync.result[0].content == MODEL_TIMEOUT_MESSAGE
           and (failed_mark(r_sync.result[0]) or {}).get("kind") == KIND_MODEL_TIMEOUT,
           "同步路径同样：文案不变 + 带戳")
+
+    # ── 空流（2026-10-15 加）：attempts=0 直接走「用尽转友好文案」分支 ──
+    # req.model=None ⇒ 同时锁住 `_endpoint_hint` 对 None 的安全（绝不许抛）。
+    _attempts_env = os.environ.get("NL2SQL_LLM_RETRY_ATTEMPTS")
+    os.environ["NL2SQL_LLM_RETRY_ATTEMPTS"] = "0"
+    try:
+        async def empty_handler(_req):
+            raise ValueError("No generations found in stream.")
+
+        r_empty = asyncio.run(ModelTimeoutMiddleware().awrap_model_call(req, empty_handler))
+        msg_e = r_empty.result[0]
+        check(msg_e.content == MODEL_EMPTY_RESPONSE_MESSAGE,
+              "空流 → 专用友好文案（用户看到「模型服务返回了空响应」而不是无原因失败）")
+        mark_e = failed_mark(msg_e) or {}
+        check(mark_e.get("kind") == KIND_EMPTY_RESPONSE, "空流消息带 empty_response 戳")
+        check("No generations found in stream" in detail_of(mark_e),
+              "**修复方向 2**：detail 带真实异常文本（last_error 回落到 detail_of(mark)，"
+              "纯模板文案运维定位不到哪条网关坏）", detail_of(mark_e)[:110])
+        check(run_status_for(KIND_EMPTY_RESPONSE) == "error",
+              "空流的下游终态串 = error（对端不是慢，是什么都没给）")
+    finally:
+        if _attempts_env is None:
+            os.environ.pop("NL2SQL_LLM_RETRY_ATTEMPTS", None)
+        else:
+            os.environ["NL2SQL_LLM_RETRY_ATTEMPTS"] = _attempts_env
 
     # ── 额度耗尽 ──
     def quota_handler(_req):

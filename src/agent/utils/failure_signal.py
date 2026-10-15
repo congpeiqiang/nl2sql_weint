@@ -47,6 +47,13 @@ FAILURE_KEY = "nl2sql_failure"
 KIND_MODEL_TIMEOUT = "model_timeout"
 KIND_QUOTA_EXHAUSTED = "quota_exhausted"
 KIND_MODEL_REQUIRED = "model_required"
+# 供应商/网关返回空流（HTTP 200、零 chunk），退避重试用尽仍空 → 由
+# ModelTimeoutMiddleware 转友好文案（2026-10-15 坏网关 19.9:3000 事故后加）。
+# run_status_for 走默认 "error"：对端不是「慢」（timeout）而是「什么都没给」，
+# 卡片文案落「执行失败」。detail **必须**带真实异常文本与端点（修复方向 2）——
+# run-status 的 last_error 回落到 detail_of(mark)，纯模板文案会让运维定位不到
+# 是哪条网关坏了。
+KIND_EMPTY_RESPONSE = "empty_response"
 
 # kind → 下游终态串。**只许产出这两个值**：它们必须落在
 # `sync_subagent_todos._RUN_DONE_STATUSES` 与前端卡片「已结束」状态集合里，

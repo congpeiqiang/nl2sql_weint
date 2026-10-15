@@ -143,8 +143,12 @@ def verify_exception_chain() -> None:
 
 # ── ② 异常归类 ───────────────────────────────────────────────────
 def verify_classification() -> None:
-    section("② 异常归类：连接类 ≠ 超时 ≠ 其他（判反了会白等）")
-    from agent.utils.llm_gate import is_connection_error, is_timeout_error
+    section("② 异常归类：连接类 ≠ 超时 ≠ 空流 ≠ 其他（判反了会白等）")
+    from agent.utils.llm_gate import (
+        is_connection_error,
+        is_empty_stream_error,
+        is_timeout_error,
+    )
 
     import httpx
     import openai
@@ -176,6 +180,23 @@ def verify_classification() -> None:
     nested = openai.APIConnectionError(request=httpx.Request("POST", "http://m/"))
     check(is_connection_error(nested) and not is_timeout_error(nested),
           "裸 APIConnectionError（无 cause）靠类名命中 → 连接类，且不误判成超时")
+
+    # ── 空流（2026-10-15 坏网关 19.9:3000 事故后加）──
+    empty = ValueError("No generations found in stream.")
+    check(is_empty_stream_error(empty),
+          "langchain 空流 ValueError → 空流类（中间件才会退避重试+用尽转友好文案）")
+    check(not is_connection_error(empty) and not is_timeout_error(empty),
+          "空流既不是连接类也不是超时（HTTP 层是 200）——三类互斥，各走各的处置")
+    wrapped = RuntimeError("model call failed")
+    wrapped.__cause__ = empty
+    check(is_empty_stream_error(wrapped), "异常链里出现空流也算（与 is_connection_error 同口径）")
+    check(not is_empty_stream_error(ValueError("模型返回了坏 JSON")),
+          "**负对照**：普通 ValueError 不算空流（确定性错误，重试只会放大）")
+    check(not is_empty_stream_error(RuntimeError("No generations found in stream.")),
+          "**负对照**：文案对但类型不是 ValueError → 不认（只认 langchain 的固定抛法）")
+    check(not is_empty_stream_error(empty_stream_lookalike := ValueError("no generations found")),
+          "**负对照**：缺 'in stream' 的相似文案不认（宁窄勿宽，宽了会误吞业务错误）",
+          repr(empty_stream_lookalike))
 
 
 # ── ③ 配置与退避 ─────────────────────────────────────────────────
@@ -524,6 +545,66 @@ def verify_middleware() -> None:
         pass
     check(calls5["n"] == 1, "attempts=0 ⇒ 连接类也只调一次（运维能一键关掉重试）",
           f"calls={calls5['n']}")
+
+    # ── 空流（2026-10-15 加）：重试 → 用尽转友好文案（戳带真实异常） ──
+    from agent.middlewares.model_timeout import MODEL_EMPTY_RESPONSE_MESSAGE
+    from agent.utils.failure_signal import KIND_EMPTY_RESPONSE, detail_of
+
+    use(NL2SQL_LLM_MAX_CONCURRENCY="4", NL2SQL_LLM_RETRY_ATTEMPTS="1",
+        NL2SQL_LLM_RETRY_BASE_SECS="0.01")
+    calls6 = {"n": 0}
+    exh_before2 = sample_value("nl2sql_llm_retries_total", {"outcome": "exhausted"})
+
+    async def empty_handler(_req):
+        calls6["n"] += 1
+        raise ValueError("No generations found in stream.")
+
+    r = asyncio.run(mw.awrap_model_call(None, empty_handler))
+    check(calls6["n"] == 2,
+          "空流 → 与连接类同款退避重试一次（网关抖动最常见的表现，最该重试）",
+          f"calls={calls6['n']}")
+    check(getattr(r, "result", None) and r.result[0].content == MODEL_EMPTY_RESPONSE_MESSAGE,
+          "用尽仍空 → **转友好文案不上抛**（raise 出去 run=error 且流级异常不落"
+          " tasks[].error ⇒ 前端『执行失败 + 后端未留下失败原因』）")
+    mark6 = failed_mark(r.result[0]) or {}
+    check(mark6.get("kind") == KIND_EMPTY_RESPONSE,
+          "同一条消息带 KIND_EMPTY_RESPONSE 失败戳（终局失败必须机器可读）")
+    check("No generations found in stream" in detail_of(mark6),
+          "**修复方向 2 的核心**：戳的 detail 带真实异常文本（run-status 的 last_error"
+          " 回落到 detail_of(mark)，纯模板文案运维定位不到哪条网关坏）",
+          detail_of(mark6)[:110])
+    check(sample_value("nl2sql_llm_retries_total", {"outcome": "exhausted"}) == exh_before2 + 1,
+          "空流用尽也记 exhausted（与连接类共用重试账本）")
+
+    # 空流抖一下就好：重试救回来
+    use(NL2SQL_LLM_MAX_CONCURRENCY="4", NL2SQL_LLM_RETRY_ATTEMPTS="2",
+        NL2SQL_LLM_RETRY_BASE_SECS="0.01")
+    calls7 = {"n": 0}
+
+    async def flaky_empty_handler(_req):
+        calls7["n"] += 1
+        if calls7["n"] == 1:
+            raise ValueError("No generations found in stream.")
+        return "second-time-ok"
+
+    r = asyncio.run(mw.awrap_model_call(None, flaky_empty_handler))
+    check(r == "second-time-ok" and calls7["n"] == 2,
+          "空一次再好的场景：重试救回来、返回值原样透出（用户无感知）",
+          f"calls={calls7['n']} r={r}")
+
+    # attempts=0 ⇒ 空流不重试，直接友好文案
+    use(NL2SQL_LLM_MAX_CONCURRENCY="4", NL2SQL_LLM_RETRY_ATTEMPTS="0")
+    calls8 = {"n": 0}
+
+    async def empty_handler0(_req):
+        calls8["n"] += 1
+        raise ValueError("No generations found in stream.")
+
+    r = asyncio.run(mw.awrap_model_call(None, empty_handler0))
+    check(calls8["n"] == 1 and getattr(r, "result", None)
+          and r.result[0].content == MODEL_EMPTY_RESPONSE_MESSAGE,
+          "attempts=0 ⇒ 空流只调一次、仍转友好文案（不重试≠上抛）",
+          f"calls={calls8['n']}")
 
     # 闸在中间件里真生效：限 1，两个并发模型调用峰值必须为 1
     use(NL2SQL_LLM_MAX_CONCURRENCY="1", NL2SQL_LLM_MAX_CONCURRENCY_PER_USER="0",
