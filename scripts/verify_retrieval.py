@@ -403,6 +403,14 @@ def run_shared(backend_name: str, ws: pathlib.Path, proj: pathlib.Path,
             all(h["legs"] == ["fts"] for h in search.search(idx_dir, "工时")),
             "查询期也只用了 FTS 腿（不花嵌入超时：查询期 4s / 索引期 2.5s）",
         )
+        st_dead: dict = {}
+        search.search(idx_dir, "工时", stats_out=st_dead)
+        check(
+            st_dead.get("legs") == ["fts"] and st_dead.get("attempted") == ["fts", "vector"]
+            and st_dead.get("fused") is False,
+            "★ stats：零向量索引 ⇒ attempted 含 vector（后端短路也算进过腿）、命中只有 fts",
+            str(st_dead),
+        )
 
         # ── ⑥-b 嵌入响应校验：模型名闸（同维数换模型是静默错乱）────
         section(f"⑥-b 嵌入响应校验：模型名 / 维数 / 条数 [{backend_name}]")
@@ -775,12 +783,26 @@ def run_shared(backend_name: str, ws: pathlib.Path, proj: pathlib.Path,
         with mock.patch.object(
             embedder, "embed_texts", lambda texts, **kw: [_bag_of_chars(t) for t in texts]
         ), mock.patch.object(embedder, "embed_one", lambda text, **kw: _bag_of_chars(text)):
-            fused = search.search(idx_dir, "工时表")
+            st_fused: dict = {}
+            fused = search.search(idx_dir, "工时表", stats_out=st_fused)
             set_mode("fts")
-            fts_only = search.search(idx_dir, "工时表")
+            st_fts: dict = {}
+            fts_only = search.search(idx_dir, "工时表", stats_out=st_fts)
             set_mode("hybrid")
         check(bool(fused) and any(len(h["legs"]) > 1 for h in fused), "有结果同时被两腿命中", str([h["legs"] for h in fused[:3]]))
         check(all(h["legs"] == ["fts"] for h in fts_only), "负对照：只开 FTS 腿时 legs 全是 fts")
+        check(
+            st_fused.get("legs") == ["fts", "vector"] and st_fused.get("fused") is True
+            and st_fused.get("attempted") == ["fts", "vector"],
+            "★ stats：hybrid 双腿命中 ⇒ legs=fts+vector / fused=True（FAST-PATH 一行日志定案的判据）",
+            str(st_fused),
+        )
+        check(
+            st_fts.get("legs") == ["fts"] and st_fts.get("fused") is False
+            and st_fts.get("attempted") == ["fts"],
+            "★ stats 负对照：fts 模式 ⇒ vector 连 attempted 都不进（开关判在进腿之前）",
+            str(st_fts),
+        )
         check(len(fused) <= 8 and len(fts_only) <= 8, "默认 limit=8")
         check(
             bool(set(h["id"] for h in fused) & set(h["id"] for h in fts_only)),

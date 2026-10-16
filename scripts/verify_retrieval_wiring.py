@@ -448,6 +448,14 @@ def run_fts_schema(ws: pathlib.Path, proj: pathlib.Path) -> None:
     # 负对照：生僻问题 ⇒ None ⇒ 走 full
     check(adapters.context_artifact(proj, "qzxwvjk") is None,
           "★ 负对照：零命中 ⇒ None（宁多给不可空给）")
+    # stats_out 带外通道：零命中也要能区分「腿没试」与「试了没中」（2026-10-16
+    # bird_minidev matches=0 排查暴露的观测缺口 —— 一行日志直接定案）
+    st_zero: dict = {}
+    check(adapters.context_artifact(proj, "qzxwvjk", stats_out=st_zero) is None
+          and st_zero.get("legs") == [] and st_zero.get("attempted") == ["fts"]
+          and st_zero.get("hits") == 0 and st_zero.get("fused") is False,
+          "★ stats：零命中 ⇒ legs=[] 但 attempted=[fts]（画像照填，产物仍 None）",
+          str(st_zero))
     fb = artifact_of(fast(tool("get_context", proj), {"question": "qzxwvjk"}))
     check(fb["strategy"] == "full", "★ 零命中时 fast-path 仍回落 full schema")
 
@@ -478,6 +486,41 @@ def run_matches_shape(ws: pathlib.Path, proj: pathlib.Path) -> None:
           "每条键集恰为 {nl_query,sql_query,datasource,tags,path,score}", str(keys))
     check(all(isinstance(m["tags"], str) for m in matches), "tags 是 str（不是 list）")
     check(all(isinstance(m["score"], (int, float)) for m in matches), "score 是数值")
+
+    # stats_out 透传 + FAST-PATH 日志行（legs=/fused= 一行定案腿数；matches 形状一个键不加）
+    st_m: dict = {}
+    check(adapters.matches_artifact(proj, q, stats_out=st_m) is not None
+          and st_m.get("legs") == ["fts"] and st_m.get("attempted") == ["fts"]
+          and st_m.get("fused") is False and st_m.get("hits", 0) >= 1,
+          "★ stats 透传：纯 FTS 索引 ⇒ legs=[fts]/attempted=[fts]/fused=False", str(st_m))
+    art_st = adapters.matches_artifact(proj, q, stats_out={})
+    check(art_st is not None and all(
+              set(m) == {"nl_query", "sql_query", "datasource", "tags", "path", "score"}
+              for m in art_st["matches"]),
+          "负对照：stats 走带外通道，matches 键集不因它漂移")
+
+    import logging as _logging
+
+    records: list[str] = []
+
+    class _Cap(_logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    _lg = _logging.getLogger("agent.utils.path_resolver")
+    _old_level = _lg.level
+    _cap = _Cap()
+    _lg.setLevel(_logging.INFO)
+    _lg.addHandler(_cap)
+    try:
+        fast(tool("recall_queries", proj), {"question": q})
+    finally:
+        _lg.removeHandler(_cap)
+        _lg.setLevel(_old_level)
+    check(any("retrieval matches=" in r and "legs=fts" in r and "fused=single" in r
+              for r in records),
+          "★ FAST-PATH 日志行带 legs=/fused=（生产判腿数只看这一行）",
+          str(records[-1:])[:220])
 
     disk_b = proj / "knowledge" / "sql" / "加班示例.md"
     from wren.memory.markdown import parse_query_markdown

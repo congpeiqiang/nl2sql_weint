@@ -33,6 +33,12 @@ search()  ← RRF 融合 + 结果形状 + 文本截断（本文件）
   `embedder` 侧的响应模型名闸抓不到，因为服务端报告的正是新名字）。
 - 返回条目 `text` **截断**（默认 600 字符）：调用方要拼进 prompt，不能让一条巨型知识
   文档把预算吃光。
+- 可选 `stats_out`（调用方传 dict）回填**本次运行画像**：`legs`（有命中的腿）/
+  `attempted`（尝试过的腿）/ `fused`（是否走 RRF）/ `hits`（返回条数）。这是腿数的
+  **唯一聚合观测点**：每条命中的 `legs` 字段只说「这条被哪些腿召回」，top-k 截断后
+  可能整条腿都不在结果里；matches=0 时 trace 里连 score 都没有 —— 2026-10-16
+  bird_minidev 排查要靠日志时间戳+索引 meta+代码逻辑三处拼证才能定腿数，现在
+  FAST-PATH 一行日志直接定案（`path_resolver._fmt_legs`）。
 """
 from __future__ import annotations
 
@@ -122,6 +128,28 @@ def _embed_cfg_matches(index_dir: Path) -> bool:
     return True
 
 
+def _fill_stats(
+    stats_out: dict | None, *, legs: list[str], attempted: list[str], hits: int,
+) -> None:
+    """把本次检索的运行画像回填进调用方给的 dict（`None` 时什么都不做，永不抛）。
+
+    键契约（消费方是 `path_resolver` 的 FAST-PATH 日志行与 verify 套件）：
+    - `legs`：**有命中**的腿（决定融合形态；`fused` 与 `search()` 的 RRF 分支同判据）；
+    - `attempted`：**尝试过**的腿。fts 恒尝试；vector=开关 hybrid 且嵌入配置与索引
+      一致才进腿。⚠️ 零向量索引在 `backend.vector` 内部短路（连嵌入都不调）也算
+      「尝试过」——本层只知道进了那条腿，短路原因看 embedder/retrieval 日志行；
+    - `fused`：是否真走了 RRF（= `len(legs) > 1`，与融合分支同一判据）；
+    - `hits`：最终返回条数（limit 截断后；adapter 层再过滤会小于它）。
+    """
+    if stats_out is not None:
+        stats_out.update({
+            "legs": list(legs),
+            "attempted": list(attempted),
+            "fused": len(legs) > 1,
+            "hits": hits,
+        })
+
+
 def search(
     index_dir: Path,
     query: str,
@@ -130,38 +158,47 @@ def search(
     kinds: set[str] | None = None,
     db_name: str | None = None,
     text_cap: int = TEXT_CAP,
+    stats_out: dict | None = None,
 ) -> list[dict]:
     """检索。返回 `[{id, kind, title, text, db_name, src_path, score, meta, legs}]`。
 
     索引不存在 / 不可读 ⇒ `[]`（调用方回落全量注入）。**永不抛**。
+    `stats_out`（可选 dict）回填运行画像，见 `_fill_stats` —— **每个 return 点都回填**，
+    调用方拿到的一定是完整键集（零命中/索引缺失也要能区分「腿没试」与「试了没中」）。
     """
     if not S.is_enabled() or not (query or "").strip():
+        _fill_stats(stats_out, legs=[], attempted=[], hits=0)
         return []
 
     index_dir = Path(index_dir)
     try:
         backend = backends.open_backend(index_dir)
         if not backend.ready():
+            _fill_stats(stats_out, legs=[], attempted=[], hits=0)
             return []
     except Exception as e:  # noqa: BLE001 —— 后端构造失败也算「没有索引」
         _log.warning("[retrieval] 后端不可用 %s: %s", index_dir, e)
+        _fill_stats(stats_out, legs=[], attempted=[], hits=0)
         return []
 
     fetch = max(limit * 3, 20)
     legs: list[list[dict]] = []
     names: list[str] = []
+    attempted: list[str] = ["fts"]
 
     fts_hits = backend.fts(query, limit=fetch, kinds=kinds, db_name=db_name)
     if fts_hits:
         legs.append(fts_hits)
         names.append("fts")
     if S.vector_enabled() and _embed_cfg_matches(index_dir):
+        attempted.append("vector")
         vec_hits = backend.vector(query, limit=fetch, kinds=kinds, db_name=db_name)
         if vec_hits:
             legs.append(vec_hits)
             names.append("vector")
 
     if not legs:
+        _fill_stats(stats_out, legs=[], attempted=attempted, hits=0)
         return []
 
     fused = _rrf(legs) if len(legs) > 1 else [
@@ -186,6 +223,7 @@ def search(
             legs=[name for name, ids in membership.items() if key in ids],
             text_cap=text_cap,
         ))
+    _fill_stats(stats_out, legs=names, attempted=attempted, hits=len(out))
     return out
 
 

@@ -10,7 +10,8 @@
 2. **有返回值 = 检索跑过了**，调用方必须直接返回它，**哪怕它是空集**：
    `matches_artifact` 零命中返回 `{"matches": []}`。若这时再回落 MCP，就是白花 120s
    （MCP 侧 `get_context` 会构造 `MemoryStore`、空表探针）。
-   （`context_artifact` 是例外：零命中返回 `None` ⇒ 回落完整 schema —— 宁多给不可空给。）
+   （`context_artifact` 是例外：**结构类**零命中返回 `None` ⇒ 回落完整 schema ——
+   宁多给不可空给；**知识类** item_type 零命中返回说明性产物，不回落，见其 docstring。）
 3. **本模块永不抛**：每个函数自己 try/except + log。调用方**仍要再包一层** —— 现有四处
    最外层 `except: return None` 的语义是「回落 MCP 子进程」，那正是本层要绕开的 120s。
 
@@ -43,7 +44,7 @@ _log = logging.getLogger(__name__)
 FRESH_TTL = 30.0
 _fresh_cache: dict[str, tuple[float, bool]] = {}   # 按 index_dir 分桶（项目数很少）
 
-#：`item_type` 缺省时搜哪些 kind —— 只要「结构」那几类（知识料/范例对另有工具）。
+#：`item_type` 缺省时搜哪些 kind —— 只要「结构」那几类（知识料另有知识分支，见下）。
 _SCHEMA_KINDS = frozenset({
     S.KIND_SCHEMA_TABLE,
     S.KIND_SCHEMA_COLUMN,
@@ -54,10 +55,48 @@ _SCHEMA_KINDS = frozenset({
     S.KIND_DIMENSION,
 })
 
+# ── 知识出口（get_context 的第三条通道）──────────────────────────────
+#：知识类 kind 全集。**判「这是知识请求」的唯一判据 = 解析出的 kinds ⊆ 本集合**。
+_KNOWLEDGE_KINDS_ALL = frozenset({
+    S.KIND_KNOWLEDGE_RULE,
+    S.KIND_KNOWLEDGE_GLOSSARY,
+    S.KIND_KNOWLEDGE_METRIC,
+    S.KIND_KNOWLEDGE_CAVEAT,
+})
+
+#：知识类 item_type → kind。**刻意不复用 indexer._ITEM_TYPE_TO_KIND**：那份是 str→str
+# 一对一（结构类），而知识请求要能表达「四者并集」（item_type="knowledge"）。
+_ITEM_TYPE_TO_KNOWLEDGE_KINDS = {
+    "knowledge": _KNOWLEDGE_KINDS_ALL,
+    "rules": frozenset({S.KIND_KNOWLEDGE_RULE}),
+    "rule": frozenset({S.KIND_KNOWLEDGE_RULE}),
+    "glossary": frozenset({S.KIND_KNOWLEDGE_GLOSSARY}),
+    "metrics": frozenset({S.KIND_KNOWLEDGE_METRIC}),
+    "metric": frozenset({S.KIND_KNOWLEDGE_METRIC}),
+    "caveats": frozenset({S.KIND_KNOWLEDGE_CAVEAT}),
+    "caveat": frozenset({S.KIND_KNOWLEDGE_CAVEAT}),
+}
+
+#：知识片段的 text 上限。索引按 `## ` 切块、单块 ≤ CHUNK_CHARS(1200)＋重叠余量，
+# 默认 TEXT_CAP=600 会把块腰斩（`_hydrate` 截断）⇒ 知识分支必须显式放大。
+KNOWLEDGE_TEXT_CAP = 4000
+
 _CONTEXT_NOTE = (
     "策略 retrieval：只返回与问题最相关的 top-k 片段（不是完整 schema），"
     "末尾附全部表名清单。需要某张表的完整定义/全部列请调 describe_model(name)，"
     "需要全量 schema 请调 describe_schema() 或 get_mdl()。"
+)
+
+_KNOWLEDGE_NOTE = (
+    "策略 retrieval（知识）：返回与问题最相关的业务口径片段。item_type 取值："
+    "glossary=术语/枚举、metrics=计算口径、caveats=数据陷阱、rules=规则速查、"
+    "knowledge=四者并集。片段是 top-k 节选，需要某领域完整口径请调 get_instructions()。"
+)
+
+_KNOWLEDGE_NOTE_EMPTY = (
+    "知识检索零命中：没有与该问题相关的业务口径条目（这不是失败，是检索跑过了没找到）。"
+    "可换 item_type（glossary/metrics/caveats/rules/knowledge）或换问题关键词重试；"
+    "需要全文口径请调 get_instructions()。"
 )
 
 
@@ -127,8 +166,14 @@ def db_name_for(tool: object, project: Path) -> str:
 
 
 def _kinds_for_item_type(item_type: str | None) -> set[str]:
-    """wren 的 `item_type` 入参 → 本层 kind。认不出按「结构类全搜」（不窄化）。"""
+    """wren 的 `item_type` 入参 → 本层 kind。认不出按「结构类全搜」（不窄化）。
+
+    先查知识映射（glossary/metrics/caveats/rules/knowledge），再落回结构类映射 ——
+    未知 item_type 的行为与改动前**逐字一致**（返回 `_SCHEMA_KINDS`）。
+    """
     it = str(item_type or "").strip().lower()
+    if it in _ITEM_TYPE_TO_KNOWLEDGE_KINDS:
+        return set(_ITEM_TYPE_TO_KNOWLEDGE_KINDS[it])
     if it:
         try:
             from agent.retrieval.indexer import _ITEM_TYPE_TO_KIND   # 同一份映射，不抄第二份
@@ -139,6 +184,11 @@ def _kinds_for_item_type(item_type: str | None) -> set[str]:
         except Exception as e:  # noqa: BLE001
             _log.debug("[retrieval] item_type 映射不可用: %s", e)
     return set(_SCHEMA_KINDS)
+
+
+def _is_knowledge_request(kinds: set[str]) -> bool:
+    """解析出的 kinds 全是知识类 ⇒ 走知识分支（大 text_cap、零命中不回落 schema）。"""
+    return bool(kinds) and kinds <= set(_KNOWLEDGE_KINDS_ALL)
 
 
 def _render_fragments(hits: list[dict]) -> str:
@@ -193,28 +243,63 @@ def context_artifact(
     item_type: str | None = None,
     model_name: str | None = None,
     db_name: str | None = None,
+    stats_out: dict | None = None,
 ) -> dict | None:
     """`get_context` 的检索版产物；`None` ⇒ 调用方回落完整 schema（逐字一致）。
 
     键集与今天的 `full` 产物**完全相同**（`strategy` / `schema` / `note`），下游只读
     `schema`，所以换值不换键。
+
+    `stats_out`（可选 dict）透传给 `search.search`，回填本次检索的运行画像
+    （legs/attempted/fused/hits，见 `search._fill_stats`）——**产物本身不加字段**
+    （形状是模型消费契约），画像走这条带外通道给 FAST-PATH 日志用。
+
+    **知识分支**（item_type ∈ glossary/metrics/caveats/rules/knowledge）与结构分支的差异：
+      - `text_cap` 放大到 `KNOWLEDGE_TEXT_CAP`（默认 600 会把按 `##` 切的知识块腰斩）；
+      - **不按 `model_name` 过滤**：知识条目 meta 只有 `{"file","chunk"}`，没有 `model`
+        字段，沿用结构类的过滤会把知识命中全灭；
+      - **零命中不返回 `None`**：返回说明性产物。「宁多给不可空给」是 *schema* 的约定，
+        对知识检索，回落整份 schema 是错误答案（问口径给表结构）；
+      - 不追加 `_schema_skeleton`（表名清单对口径问答是纯噪声）。
     """
     query = str(question or "").strip()
     if not query or not _index_fresh(project):
         return None
+    if not S.is_enabled():
+        # off 模式：search() 会因 is_enabled()=False 返回 []，若不在此拦下，知识分支
+        # 会把「开关关了」误判成「跑过零命中」而返回说明性产物 —— 破坏契约 #1
+        # （off ⇒ None ⇒ 调用方走今天那条分支，逐字一致）。
+        return None
 
+    kinds = _kinds_for_item_type(item_type)
+    knowledge = _is_knowledge_request(kinds)
     want = str(model_name or "").strip()
     try:
         hits = search.search_project(
             Path(project),
             query,
             limit=max(1, int(limit or 5)),
-            kinds=_kinds_for_item_type(item_type),
+            kinds=kinds,
             db_name=(db_name or None),
+            stats_out=stats_out,
+            **({"text_cap": KNOWLEDGE_TEXT_CAP} if knowledge else {}),
         )
     except Exception as e:  # noqa: BLE001
         _log.warning("[retrieval] get_context 检索失败，回落 full: %s", e)
         return None
+
+    if knowledge:
+        if not hits:
+            return {
+                "strategy": "retrieval",
+                "schema": "未检索到与该问题相关的业务口径条目。",
+                "note": _KNOWLEDGE_NOTE_EMPTY,
+            }
+        return {
+            "strategy": "retrieval",
+            "schema": _render_fragments(hits),
+            "note": _KNOWLEDGE_NOTE,
+        }
 
     if want:
         hits = [h for h in hits if str((h.get("meta") or {}).get("model") or "") == want]
@@ -234,6 +319,7 @@ def matches_artifact(
     *,
     limit: int = 3,
     db_name: str | None = None,
+    stats_out: dict | None = None,
 ) -> dict | None:
     """`recall_queries` 的检索版产物（`{"matches": [...]}`）；`None` ⇒ 回落 MCP。
 
@@ -241,6 +327,8 @@ def matches_artifact(
     / `datasource` / `tags` / `path` / `score`）：消费方是模型，形状漂移会静默改变行为。
     `nl`/`sql` 一律取自 `meta`（原文，不经 `text` 的 600 字截断）。
     零命中返回 `{"matches": []}`（= 检索跑过了），**不是** `None`。
+    `stats_out`：同 `context_artifact` —— 运行画像走带外通道，matches 形状一个键不加
+    （腿数判据本来只有 score 量纲一条，零命中时连它都没有，画像是唯一观测点）。
     """
     query = str(question or "").strip()
     if not query or not _index_fresh(project):
@@ -254,6 +342,7 @@ def matches_artifact(
             limit=max(cap * 3, cap),                       # 多取几条，去重后再截
             kinds={S.KIND_EXAMPLE_SQL},
             db_name=(db_name or None),
+            stats_out=stats_out,
         )
     except Exception as e:  # noqa: BLE001
         _log.warning("[retrieval] recall_queries 检索失败，回落 MCP: %s", e)

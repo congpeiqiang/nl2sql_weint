@@ -906,6 +906,28 @@ def _retrieval_adapters() -> Any | None:
     return adapters
 
 
+def _fmt_legs(stats: dict) -> str:
+    """检索 stats 的腿聚合渲染进日志（目标：**一行定案腿数**，见 `search._fill_stats`）。
+
+    `legs=fts+vector` ⇒ 双腿命中、必走 RRF；`legs=fts` ⇒ 结果只由 FTS 腿贡献；
+    零命中时带出 `attempted` —— 区分「向量腿压根没试（off/嵌入配置不匹配）」与
+    「试了但该 kind 零命中」（2026-10-16 bird_minidev `matches=0` 排查的教训：
+    当时 score 量纲判据因零命中失效，只能靠嵌入日志时间戳+索引 meta+代码逻辑三处拼证）。
+    """
+    legs = [str(x) for x in (stats.get("legs") or [])]
+    if legs:
+        return "+".join(legs)
+    attempted = [str(x) for x in (stats.get("attempted") or [])]
+    return f"none(attempted {'+'.join(attempted)})" if attempted else "none"
+
+
+def _fmt_fused(stats: dict) -> str:
+    """融合形态：`rrf`=双腿 RRF / `single`=单腿保留原始分 / `-`=零命中无从融合。"""
+    if not (stats.get("legs") or []):
+        return "-"
+    return "rrf" if stats.get("fused") else "single"
+
+
 def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
     """Wren memory 工具快速路径——绕过 MCP 子进程和 MemoryStore。
 
@@ -940,6 +962,7 @@ def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
         # 今天的 full 分支（绝不 return None —— 见函数 docstring 的 120s 说明）。
         try:
             if (adt := _retrieval_adapters()) is not None:
+                stats: dict = {}
                 artifact = adt.context_artifact(
                     Path(project_path),
                     kwargs.get("question", ""),
@@ -947,11 +970,13 @@ def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
                     item_type=kwargs.get("item_type"),
                     model_name=kwargs.get("model_name"),
                     db_name=adt.db_name_for(tool, Path(project_path)),
+                    stats_out=stats,
                 )
                 if artifact is not None:
                     _log.info(
-                        "[WREN FAST-PATH] %s → retrieval schema (%d chars)",
+                        "[WREN FAST-PATH] %s → retrieval schema (%d chars, legs=%s, fused=%s)",
                         tool.name, len(str(artifact.get("schema") or "")),
+                        _fmt_legs(stats), _fmt_fused(stats),
                     )
                     return (json.dumps(artifact, ensure_ascii=False), artifact)
         except Exception as e:  # noqa: BLE001
@@ -983,16 +1008,19 @@ def _wren_fast_path(tool: Any, kwargs: dict) -> Any | None:
         # —— 那时回落 MCP 就是白花 120s。只有「检索不可用」才继续往下走。
         try:
             if (adt := _retrieval_adapters()) is not None:
+                stats: dict = {}
                 artifact = adt.matches_artifact(
                     Path(project_path),
                     kwargs.get("question", ""),
                     limit=int(kwargs.get("limit") or 3),
                     db_name=adt.db_name_for(tool, Path(project_path)),
+                    stats_out=stats,
                 )
                 if artifact is not None:
                     _log.info(
-                        "[WREN FAST-PATH] %s → retrieval matches=%d",
+                        "[WREN FAST-PATH] %s → retrieval matches=%d (legs=%s, fused=%s)",
                         tool.name, len(artifact.get("matches") or []),
+                        _fmt_legs(stats), _fmt_fused(stats),
                     )
                     return (json.dumps(artifact, ensure_ascii=False), artifact)
         except Exception as e:  # noqa: BLE001
