@@ -191,7 +191,7 @@ def _set_active_skill(thread_id: str, skill: str) -> None:
 #   nl2sql-performance-optimization）在盘上已无对应目录。
 _TOOL_OWNER_SKILLS: dict[str, tuple[str, ...]] = {
     # ── 唯一归属（覆盖过期活动 skill）──
-    # 步骤(1) 取料轴 + 语义库探查族：这些都只在四路取料/理解阶段被正向调用，
+    # 步骤(1) 取料轴 + 语义库探查族：这些都只在五路取料/理解阶段被正向调用，
     # 唯一归属可覆盖「活动 skill 过期/未设」的 stale 状态，杜绝 heuristic 名
     # （knowledge-retrieval / schema-linking 等）泄漏到展示。
     "get_context": ("wren-retrieve",),

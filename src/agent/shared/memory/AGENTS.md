@@ -18,7 +18,7 @@
 | 技能 | 步骤 | 职责 |
 | ---- | ---- | ---- |
 | `wren-orchestrator` | 总控 | 六步主循环 + 具名指标三条件路由决策 |
-| `wren-retrieve` | (1) | 四路并行取料：`get_context` / `recall_queries` / `get_instructions` / `list_knowledge`，全程各至多一次 |
+| `wren-retrieve` | (1) | 五路并行取料：`get_context`（结构轴/口径轴两种入参）/ `recall_queries` / `get_instructions` / `list_knowledge`，全程各至多一次 |
 | `wren-clarify` | (2) | 基于取料包做清晰度裁决；不清晰输出 `[需要澄清]` 并停止本轮 |
 | `wren-metric-query` | (3) | 具名指标 → `query_cube`（先 `sql_only=True` 预览编译 SQL） |
 | `wren-sql-author` | (3)(4) | 非指标/混合路径手写 SQL + dry_run 失败即改（≤3 次） |
@@ -60,9 +60,10 @@
 | 组 | 工具 | 用途 | 编排入口 |
 | ---- | ---- | ---- | ---- |
 | 取料·结构轴 | `get_context(question, limit)` | 语义检索 MDL 相关 model/column/cube 片段（Cube 段已含 measures/dimensions/time_dimensions） | wren-retrieve |
+| 取料·口径轴 | `get_context(question, item_type="knowledge", limit)` | 检索 `knowledge/{rules,glossary,metrics,caveats}/*.md` 四类**正文** top-k（每条带来源路径）；知识正文的主通道 | wren-retrieve |
 | 取料·范例轴 | `recall_queries(question, limit)` | `knowledge/sql/*.md` 历史 NL→SQL 范例 | wren-retrieve |
-| 取料·规则轴 | `get_instructions` | 仅 `knowledge/rules/*.md` 业务规则 | wren-retrieve |
-| 取料·知识轴 | `list_knowledge` | 列出知识**文件清单**（不含正文，不按路径去读）；知识正文只有 `get_instructions`（rules）与 `recall_queries`（sql）。上游 wren 从无 `get_all_knowledge`，本部署也没有，别调 | wren-retrieve |
+| 取料·规则兜底 | `get_instructions` | 仅 `knowledge/rules/*.md` **全文**（全局约束兜底/逐字核对，不替代口径轴 top-k） | wren-retrieve |
+| 取料·知识面 | `list_knowledge` | 列出知识**文件清单**（只给名字，不含正文，不按路径去读）；知识正文有三条通道：口径轴（四类 top-k）、`get_instructions`（rules 全文）、`recall_queries`（sql 范例）。上游 wren 从无 `get_all_knowledge`，本部署也没有，别调 | wren-retrieve |
 | 结构核对 | `describe_schema` / `get_mdl` / `list_models` / `describe_model` | 全量 MDL Schema 文本/JSON 视图（取料片段不够细节时才用，不重复检索） | 按需 |
 | Cube 核对 | `list_cubes` / `describe_cube` | Cube 清单与完整定义（具名指标路由判据核对） | 按需 |
 | 方言/函数 | `get_data_source` / `list_functions` | 当前数据源 SQL 方言与可用函数 | wren-sql-author 首查 |
@@ -75,7 +76,7 @@
 
 ### 3.2 使用要点（关键）
 
-- **检索唯一性**：四轴工具全程各至多一次，下游只读取料包；禁止串行试探、禁止重复检索。
+- **检索唯一性**：五路取料全程各至多一次（`get_context` 结构轴/口径轴两种入参形态各至多一次），下游只读取料包；禁止串行试探、禁止重复检索。
 - **没有"按 slug 读页面"这种二跳读取**：`get_context` 返回的结构片段已是完整定义（列、类型、FK、measure expression）；不存在 `show`/`show-compiler` 类工具，不要做二次确认式调用。
 - **聚合口径读 `expression`、永不读 `type`**（实测 wren_core 编译彻底忽略 type）；`query_cube` 的 `time_dimension` 格式 `"name:granularity:start,end"`，相对时间词先解析成字面日期。
 - **行数契约**：SQL 正文不写 LIMIT；top-N 用 ORDER BY，行数由 `run_sql(sql, limit=N)` 控制。

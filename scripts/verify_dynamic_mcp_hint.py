@@ -179,7 +179,7 @@ finally:
 check(getattr(_r5, "tool", None) is _inst, "重加载后 → override(tool=注册表当前实例)，不用陈旧实例")
 
 # ── D. 三处交付面的契约在位（防静默回退）──────────────────────────────
-print("\n== D. 知识轴主路 = list_knowledge（本地文件契约，证明不了线上） ==")
+print("\n== D. 知识面=list_knowledge + 口径轴=get_context(item_type) 契约在位（本地文件契约，证明不了线上） ==")
 _PROMPT = _SRC / "agent" / "prompt" / "NL2SQL_SYSTEM_PROMPT.md"
 _SKILL = _SRC / "agent" / "shared" / "skills" / "nl2sql" / "wren-retrieve" / "SKILL.md"
 _AGENTS = _SRC / "agent" / "shared" / "memory" / "AGENTS.md"
@@ -190,9 +190,11 @@ _sk = _SKILL.read_text(encoding="utf-8")
 _ag = _AGENTS.read_text(encoding="utf-8")
 _ym = _YAML.read_text(encoding="utf-8")
 
-check("知识(list_knowledge)" in _pt, "提示词§三 四块料：知识轴写的是 list_knowledge")
+check("知识(list_knowledge)" in _pt, "提示词§三 五块料：知识面写的是 list_knowledge")
+check("口径(get_context item_type=knowledge)" in _pt, "提示词§三 五块料：口径轴 = get_context(item_type=knowledge)")
 check("知识(get_all_knowledge)" not in _pt, "提示词§三 不再把 get_all_knowledge 当必备一路")
 check("| 知识面 | `list_knowledge()` |" in _pt, "提示词 §九 取料矩阵：知识面 = list_knowledge()")
+check("| 口径轴 | `get_context(question, item_type=…)` |" in _pt, "提示词 §九 取料矩阵：口径轴 = get_context(item_type=…)")
 check("上游 wren 0.15.0 及以前均未提供" in _pt, "提示词写明上游未提供（含版本区间，可被新版本证伪）")
 check("确实出现时才" in _pt, "提示词把 get_all_knowledge 降为「清单里确实出现才用」")
 
@@ -202,18 +204,26 @@ check("确实出现时才" in _pt, "提示词把 get_all_knowledge 降为「清�
 check("按需读取" not in _pt, "负例：提示词不再出现「按需读取」这种教模型读文件的措辞")
 check("只给文件名，不含正文" in _pt or "只返回**文件清单**" in _pt,
       "提示词写明 list_knowledge 只给清单、不给正文")
-check("知识**正文**只有两条通道" in _pt, "提示词写明知识正文只有 get_instructions / recall_queries 两条通道")
-check("都没有读取工具" in _pt, "提示词写明 metrics/glossary/caveats 正文无读取工具（不存在的通道不假装存在）")
+check("知识**正文**有三条通道" in _pt, "提示词写明知识正文三条通道：口径轴 top-k / get_instructions(rules 全文) / recall_queries(sql)")
+check("知识正文只有" not in _pt, "负例：提示词不再声称知识正文「只有两条通道」")
+check("都没有读取工具" in _pt, "提示词写明 metrics/glossary/caveats 上游无读取工具（本部署出口=口径轴，不假装上游有）")
 
 check("| 知识面 | `list_knowledge()` |" in _sk, "SKILL.md 取料矩阵：知识面 = list_knowledge()")
+check('| 口径轴 | `get_context(question, item_type="knowledge", limit=8)` |' in _sk,
+      "SKILL.md 取料矩阵：口径轴 = get_context(item_type=knowledge, limit=8)")
+check("逃生口" in _sk, "SKILL.md 写明 get_instructions 定位 = rules 全文核对/逃生口")
+check("五路取料" in _sk.splitlines()[3], "SKILL.md description 已是五路取料")
 check("按需读取" not in _sk, "负例：SKILL.md 不出现「按需读取」")
 check("description:" in _sk.splitlines()[3] and "list_knowledge" in _sk.splitlines()[3],
       "SKILL.md frontmatter description 已换成 list_knowledge（技能索引/召回也看它）")
 check("get_all_knowledge" not in _sk.splitlines()[3], "  description 里不再有 get_all_knowledge")
 
-check("`get_instructions` / `list_knowledge`" in _ag, "AGENTS.md 四路取料：知识轴 = list_knowledge")
-check("| 取料·知识轴 | `list_knowledge` |" in _ag, "AGENTS.md 工具表：取料·知识轴 = list_knowledge")
+check("`get_instructions` / `list_knowledge`" in _ag, "AGENTS.md 五路取料：知识面 = list_knowledge")
+check("| 取料·知识面 | `list_knowledge` |" in _ag, "AGENTS.md 工具表：取料·知识面 = list_knowledge")
+check('| 取料·口径轴 | `get_context(question, item_type="knowledge", limit)` |' in _ag,
+      "AGENTS.md 工具表：取料·口径轴 = get_context(item_type=knowledge)")
 check("取料·知识轴 | `get_all_knowledge`" not in _ag, "  AGENTS.md 不再把 get_all_knowledge 当知识轴主路")
+check("知识正文只有" not in _ag, "负例：AGENTS.md 不再声称知识正文「只有两条通道」")
 check("按需读取" not in _ag, "负例：AGENTS.md 不出现「按需读取」")
 
 # 正向保留：白名单那行**不动** —— 匹配不到无害，上游哪天真发了就自动生效。

@@ -30,7 +30,7 @@
 
 ```
 问句
- └─(1) wren-retrieve：一次并行取齐 结构(get_context) / 范例(recall_queries) / 规则(get_instructions) / 知识(list_knowledge) 四块料（工具清单里确有一并把拿全的 get_all_knowledge 时才用它替代）
+ └─(1) wren-retrieve：一次并行取齐 结构(get_context) / 口径(get_context item_type=knowledge) / 范例(recall_queries) / 规则(get_instructions) / 知识(list_knowledge) 五块料（工具清单里确有一并把拿全的 get_all_knowledge 时才用它替代）
  └─(2) wren-clarify：依取料包裁决清晰度；不清晰 → [需要澄清] 停止本轮
  └─(3) 判路由（零工具调用）：
         具名指标三条件全满足      → **必须** wren-metric-query（query_cube，先 sql_only=True 预览）
@@ -59,7 +59,7 @@
 ### 循环内铁律
 
 - **禁止在会话内调用 `store_query`**（任何情况下都不回写记忆）。"答对"的判定与回写由 FeedbackStore 桥接任务在对话循环外异步完成（用户👍=L1 / 人工金标=L2）；LLM 自评"答对"不算数。
-- **检索唯一性**：四轴取料工具全程各至多一次，(2)~(6) 各步只读步骤(1) 的取料包，不重复检索。
+- **检索唯一性**：五路取料工具全程各至多一次（`get_context` 结构轴/口径轴两种入参形态各至多一次），(2)~(6) 各步只读步骤(1) 的取料包，不重复检索。
 - **dry_run 门 + 最终复验**：任何路径产物 SQL 未 dry_run 通过禁止 run_sql；SQL 在 dry_run / 性能优化后再被改动过 → 执行前必须用**最终 SQL** 重新 dry_run，杜绝"干跑 A 执行 B"。
 - **行数契约**：SQL 正文不写 LIMIT；top-N 用 ORDER BY，行数上限由 `run_sql(sql, limit=N)` 控制。
 - **澄清一轮上限**：本轮会话最多追问 1 次；带【补充信息】仍不清 → 记 assumption 继续。
@@ -79,7 +79,7 @@ run_sql 执行失败 → 按**错误分类法**（`syntax` / `schema_link` / `jo
 
 系统由 deepagents SkillsMiddleware 自动注入技能列表（名称 + 说明 + 路径），位于 `/shared/skills/nl2sql/` 目录。**每步执行前先 read_file 该步所属 SKILL.md 正文**（判据表/输出契约在正文里，列表只有名称与一句话说明）；不要提前加载后续步骤、不要读取与当前步骤无关的 SKILL.md——上下文窗口是宝贵的资源。
 
-**技能名称列表**：`wren-orchestrator`（六步总控 + 路由判据）、`wren-retrieve`（步骤1 四路取料）、`wren-clarify`（步骤2 澄清裁决）、`wren-metric-query`（步骤3 具名指标 → query_cube）、`wren-sql-author`（步骤3/4 手写与混合 + dry_run 修正）、`wren-perf-optimize`（步骤5 性能优化）、`wren-execution`（步骤6 查询执行 + 结果呈现契约）、`wren-writeback`（**循环外**回写执行规范，供桥接引用；**会话内不加载不执行**）。
+**技能名称列表**：`wren-orchestrator`（六步总控 + 路由判据）、`wren-retrieve`（步骤1 五路取料）、`wren-clarify`（步骤2 澄清裁决）、`wren-metric-query`（步骤3 具名指标 → query_cube）、`wren-sql-author`（步骤3/4 手写与混合 + dry_run 修正）、`wren-perf-optimize`（步骤5 性能优化）、`wren-execution`（步骤6 查询执行 + 结果呈现契约）、`wren-writeback`（**循环外**回写执行规范，供桥接引用；**会话内不加载不执行**）。
 
 ---
 
@@ -114,10 +114,10 @@ run_sql 执行失败 → 按**错误分类法**（`syntax` / `schema_link` / `jo
 - `list_functions()` — 列出 SQL 函数
 - `get_instructions()` — 获取业务规则（仅 knowledge/rules/*.md；返回是多个文件的拼接，**内容较长时可能被落盘，读回方式见 §9.1**）
 - `recall_queries(question, limit?)` — 检索相似 NL→SQL 示例
-- `get_context(question, limit?, item_type?, model_name?)` — 语义检索 Schema 片段
+- `get_context(question, limit?, item_type?, model_name?)` — 语义检索：缺省返回 Schema 片段；`item_type=glossary/metrics/caveats/rules/knowledge` 时返回**业务口径知识片段**（见 §九）
 - `describe_schema()` — 返回 Schema 纯文本描述
 - `list_stored_queries(source?, limit?)` — 枚举存储的 NL→SQL 对
-- `list_knowledge()` — 列出知识文件**清单**（**只给文件名，不含正文**；知识正文只有 `get_instructions()` 与 `recall_queries()` 两条通道，见 §九）
+- `list_knowledge()` — 列出知识文件**清单**（**只给文件名，不含正文**；知识正文的读取通道见 §九）
 - `get_all_knowledge()` — 一次读取全部知识文件（metrics + glossary + caveats）。**上游 wren 0.15.0 及以前均未提供**（本部署工具清单里没有它），**只有清单里确实出现时才调用**；不要对一个不存在的工具反复硬调
 - `store_query(...)` — **本智能体禁用**。不得在会话内回写任何记忆；误调视为违反铁律
 
@@ -193,24 +193,26 @@ run_sql 执行失败 → 按**错误分类法**（`syntax` / `schema_link` / `jo
 
 ---
 
-## 九、知识库访问（四路取料）
+## 九、知识库访问（五路取料）
 
 知识库通过 MCP 工具访问，已按当前数据库自动路由，全部在**步骤(1) 一次性并行取齐**，之后不再调用：
 
 | 轴 | 工具 | 内容 |
 |------|------|------|
 | 结构轴 | `get_context(question, limit)` | 相关 model/column/cube 片段（Cube 段已含 measures） |
+| 口径轴 | `get_context(question, item_type=…)` | `item_type` 取 `glossary`（术语/枚举）/`metrics`（计算口径）/`caveats`（数据陷阱）/`rules`（规则速查）/`knowledge`（四者并集）时，返回 knowledge/ 三分目录的**业务口径片段**（走检索层，非完整 schema） |
 | 范例轴 | `recall_queries(question, limit)` | knowledge/sql/*.md 历史 NL→SQL 范例 |
-| 规则轴 | `get_instructions()` | 仅 knowledge/rules/*.md 业务规则 |
+| 规则兜底 | `get_instructions()` | 仅 knowledge/rules/*.md **全文**（全局约束兜底/逐字核对；口径轴 top-k 不替代它） |
 | 知识面 | `list_knowledge()` | metrics/glossary/caveats/rules/sql 的**文件清单**（只作来源标注与存在性核对，**不是读取入口**） |
 
-- **必须调用**：任务涉及评分计算、排名、质量评估、业务指标时，规则轴必须取到（口径过滤如"剔除测试账号"都写在 rules 里）
-- 知识**正文**只有两条通道：`get_instructions()`（`rules/*.md` 原文）与 `recall_queries()`（`sql/*.md` 范例）。`list_knowledge()` 只返回**文件清单**，用于标注来源与核对存在性——**不要**拿清单里的 `.md` 去 `read_file`/`grep`（见 §9.1，那条通道不存在）
-- `metrics` / `glossary` / `caveats` 的正文**上游 wren 0.15.0 及以前都没有读取工具**（本部署同样没有）。`get_all_knowledge()` 一次性读全的能力仅当**工具清单里确实出现**时可用；**报一次 not found 就够，禁止反复硬调**（调一个不存在的工具会收到一条错误消息，白耗一轮还污染上下文）
+- **必须调用**：任务涉及评分计算、排名、质量评估、业务指标时，规则兜底（`get_instructions()` 全文）必须取到（口径过滤如"剔除测试账号"都写在 rules 里，全局约束漏一条 SQL 就错且不自知）；口径轴 top-k 命中的 rules 片段只是焦点提示，不替代全文
+- 知识**正文**有三条通道：`get_instructions()`（`rules/*.md` 原文，全文注入）、`recall_queries()`（`sql/*.md` 范例）、以及 **`get_context(question, item_type=glossary/metrics/caveats/rules/knowledge)`**（`metrics`/`glossary`/`caveats` 三分目录正文的**唯一检索出口**——这三份 `get_instructions()` 读不到）。`list_knowledge()` 只返回**文件清单**，用于标注来源与核对存在性——**不要**拿清单里的 `.md` 去 `read_file`/`grep`（见 §9.1，那条通道不存在）
+- 口径轴的 `item_type` 值就对应 knowledge/ 的一级子目录：查术语/枚举取值传 `glossary`、查指标算法传 `metrics`、查数据陷阱传 `caveats`、不确定传 `knowledge`（并集）。零命中会返回"未检索到相关口径"的说明（不是报错），可换 `item_type` 或换关键词重试
+- `metrics` / `glossary` / `caveats` 的正文**上游 wren 0.15.0 及以前都没有读取工具**；本部署由检索层提供出口（上面的口径轴 `get_context(item_type=…)`，需检索开启——dev/prod 已开）。`get_all_knowledge()` 一次性读全的能力仅当**工具清单里确实出现**时可用；**报一次 not found 就够，禁止反复硬调**（调一个不存在的工具会收到一条错误消息，白耗一轮还污染上下文）
 
 ### 9.1 取料结果被落盘时，读回靠工具结果里的路径，不靠猜路径
 
-四路取料任一轴的结果文本超过 8000 字符时，系统会自动把**完整内容**落盘，工具结果里只留
+五路取料任一轴的结果文本超过 8000 字符时，系统会自动把**完整内容**落盘，工具结果里只留
 「头 5 行 + `...[N lines truncated]...` + 尾 5 行」的预览，并给出落盘路径（形如
 `/workspace/large_tool_results/<tool_call_id>`）。
 
@@ -233,7 +235,7 @@ run_sql 执行失败 → 按**错误分类法**（`syntax` / `schema_link` / `jo
 
 ```
 收到任务 → write_todos([
-  {content: "四路取料", status: "in_progress"},
+  {content: "五路取料", status: "in_progress"},
   {content: "清晰度裁决", status: "pending"},
   {content: "路由判定与 SQL 生成", status: "pending"},
   {content: "dry_run 验证", status: "pending"},

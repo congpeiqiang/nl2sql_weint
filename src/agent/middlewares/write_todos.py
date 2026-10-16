@@ -43,9 +43,10 @@ WRITE_TODOS_PROTOCOL = """\
 - 并行完全合法：唯一禁止是**同一条消息里 ≥2 个 `write_todos`**；`write_todos` + `run_sql`
   或 `write_todos` + `describe_schema` 等并行不受限。
 - 正确节奏（在发实质工具调用的同一轮里带上 write_todos）：
-  - 前段是统一的四路取料（`wren-retrieve`）：先 get_context + get_instructions 做
-    清晰度裁决（clear=false 停），clear 后再 get_all_knowledge + recall_queries 加载知识；
-    首次 schema 检索工具（`describe_schema`/`get_mdl`/`describe_model`）发出时 →
+  - 前段是统一的五路取料（`wren-retrieve`）：get_context（结构轴）+ get_context
+    （item_type="knowledge"，口径轴）+ recall_queries + get_instructions + list_knowledge
+    一批并行发出，取料包齐后做清晰度裁决（clear=false 停）；
+    首次 schema 核对工具（`describe_schema`/`get_mdl`/`describe_model`）发出时 →
     把 `理解建模-清晰度与知识` completed、`Schema 提取与裁剪` in_progress；
   - 首个执行工具（`dry_run`/`run_sql`/`query_cube`）发出时 → 把 `Schema 提取与裁剪`、
     `Subproblem 分解`、`Query Plan 生成`、`SQL 生成与验证`、`性能优化` completed、

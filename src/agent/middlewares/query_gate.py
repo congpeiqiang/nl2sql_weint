@@ -75,8 +75,9 @@ _REMINDED_LOCK = threading.Lock()
 _REMINDED_CAP = 4000
 
 _HINT = (
-    "Error: 检测到尚未完成「四路取料」就直接发起 {tool}。请先按 wren-retrieve "
-    "skill 的顺序：先 get_context + get_instructions 做清晰度裁决与知识加载"
+    "Error: 检测到尚未完成「五路取料」就直接发起 {tool}。请先按 wren-retrieve "
+    "skill 的顺序：一批并行发出 get_context（结构轴）+ get_context（item_type=knowledge，"
+    "口径轴）+ recall_queries + get_instructions + list_knowledge，完成取料与清晰度裁决"
     "（问题不清晰时应先以 [需要澄清] 向用户追问，不要继续），确认 clear 后再获取 "
     "Schema（describe_schema / get_mdl / describe_model），最后重新发起 {tool}。"
 )
