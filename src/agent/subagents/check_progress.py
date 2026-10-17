@@ -1698,6 +1698,102 @@ def _add_incremental(result: dict, thread_values: dict, since: Optional[int]) ->
 # `src/test/unit/test_check_progress_patch.py`。
 # ══════════════════════════════════════════════════════════════════════
 
+# ── 终态保护（2026-10-16 生产事故）──────────────────────────────────
+# 事故链：watcher 看门狗判超时 → `runs.cancel(action=interrupt)` → 平台 run 状态
+# 变 `interrupted` → 主 agent 的 `check_async_task` 读到 interrupted，按下面的
+# interrupted 分支归一成 `running` + 「短暂暂停会自动恢复」→
+# `_enhanced_build_check_command` 把 `running` 写回 async_tasks，
+# **把 watcher 刚落好的 `timeout` 终态打回**，卡片复活、用户白等 35 分钟。
+#
+# 这里落两条兜底，各自独立生效：
+#   ① `_reconcile_result_with_task`：结果产出后与 async_tasks 条目对账，
+#      条目已终态 → 结果一律改判为条目终态（工具轮询不得推翻已落终态）。
+#   ② `_enhanced_build_check_command` 里的硬闸：无论谁调用都拒绝「终态 → 中间态」。
+# 重派发不受影响：`update_async_task` 换 run 时**先**把条目写成 `running`
+# （deepagents `async_subagents.py:544`），硬闸因此不成立。
+_TERMINAL_TASK_STATUSES = ("success", "error", "timeout", "cancelled")
+
+# interrupted 停留多久就不再算「瞬时暂停」。deepagents 上下文压缩的暂停是秒级；
+# 超过这个门槛还停在 interrupted，只会是「被 cancel 后永不恢复」。
+_INTERRUPTED_STUCK_GRACE_SECS = 120
+
+
+def _watchdog_kill_reason(run) -> Optional[str]:
+    """该 run 是否被本进程的 watcher 看门狗主动 cancel 过（是 → 原因文案）。
+
+    进程内标记（`sync_subagent_todos.note_watchdog_kill`）是**确定性判据**：
+    被看门狗杀掉的 run 与「上下文压缩的瞬时暂停」在 run 状态上完全同形，
+    只有杀人者自己知道区别。取不到标记时返回 None，由时长熔断接管 —— 两条判据
+    互相独立，重启丢标记也不会退化成「乐观等待」。
+    （延迟导入：`sync_subagent_todos` 在本模块 apply_patch 期已被加载，
+    模块级导入会形成循环。异常一律 fail-open 视作「没有标记」。）
+    """
+    try:
+        run_id = (run or {}).get("run_id") if isinstance(run, dict) else None
+        if not run_id:
+            return None
+        from agent.subagents.sync_subagent_todos import watchdog_kill_reason
+        return watchdog_kill_reason(run_id)
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[check_progress] 读看门狗标记失败: %s", f"{type(e).__name__}: {e}")
+        return None
+
+
+def _interrupted_stuck_seconds(run) -> Optional[float]:
+    """run 停在 interrupted 已有多久（秒）。
+
+    口径用 `updated_at`：run 状态每次变化都会刷新它，`interrupted` 正是最后一次
+    状态变化，故 `now - updated_at` = 已停留在 interrupted 的时长（不能用
+    `created_at`，那是 run 创建时刻，长查询跑到第 10 分钟才被中断会被误判）。
+    读不到/格式异常返回 None（调用方不得据此熔断，避免误杀）。
+    """
+    try:
+        raw = str((run or {}).get("updated_at") or "").strip()
+        if not raw:
+            return None
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return (datetime.now(UTC) - dt).total_seconds()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _reconcile_result_with_task(result: dict, task: dict) -> None:
+    """把 check 结果与 async_tasks 条目对账（就地改 result）。
+
+    唯一规则：**条目已终态时，结果不得是非终态**。因为
+    `_enhanced_build_check_command` 会用 `result["status"]` 重建整条 async_tasks，
+    两者不一致就是「工具轮询把已落终态打回中间态」。
+    改判时保留条目里的 `error`（真实的失败原因），并附 `state_note` 说明这是
+    谁说的，免得模型把「条目终态 + 结果 running」两套账当成需要自己推理的矛盾。
+    """
+    try:
+        task_status = str((task or {}).get("status") or "")
+        result_status = str((result or {}).get("status") or "")
+        if task_status not in _TERMINAL_TASK_STATUSES:
+            return
+        if result_status in _TERMINAL_TASK_STATUSES:
+            return
+        result["status"] = task_status
+        result.pop("note", None)  # 丢弃「会自动恢复」这类乐观说明
+        result["error_kind"] = result.get("error_kind") or task_status
+        if not result.get("error") and task.get("error"):
+            result["error"] = task["error"]
+        result["state_note"] = (
+            f"This task has already reached a terminal state ({task_status}); "
+            f"the live run reported '{result_status}', which a finished task "
+            f"never does (a watcher-cancelled run lingers in 'interrupted'). "
+            f"Treat the task as {task_status} — it will NOT resume."
+        )
+        _logger.warning(
+            "[check_progress] 条已终态 %s 但 run 报 %s → 结果改判 %s（防终态被轮询打回）",
+            task_status, result_status, task_status,
+        )
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[check_progress] 对账失败(不改判): %s", f"{type(e).__name__}: {e}")
+
+
 def _enhanced_build_check_result(run, thread_id, thread_values, full=False):
     result = {"status": run["status"], "thread_id": thread_id}
     messages = (
@@ -1917,15 +2013,43 @@ def _enhanced_build_check_result(run, thread_id, thread_values, full=False):
         _attach_answer_fingerprint(result, messages, thread_id)
     elif run["status"] == "interrupted":
         # 审批闸门已移除（2026-08-28 起 sql_approval 只读硬拦截、不再 raise
-        # interrupt），当前 interrupted 是 deepagents 上下文压缩等「会自恢复的
-        # 瞬时暂停」。归一为 running，让主 agent 继续轮询 check_async_task，
-        # 而非误判「等待 SQL 审批」。
-        result["status"] = "running"
-        result["note"] = (
-            "The subagent is briefly paused (e.g. context summarization) and "
-            "will resume automatically. Do NOT cancel or re-delegate; check "
-            "again later."
+        # interrupt），但 interrupted 现在有**两个同形来源**，必须分开：
+        #   ① deepagents 上下文压缩等瞬时暂停 —— 秒级自恢复；
+        #   ② 看门狗 `runs.cancel(action=interrupt)` —— 永不恢复（2026-10-16 事故：
+        #      这条被当成 ① 归一成 running，把 watcher 刚落好的 timeout 打回，
+        #      还对用户说「会自动恢复」，白等 35 分钟）。
+        # 判据取两条独立证据，命中任一条即如实报为 timeout：
+        #   · 进程内标记：这条 run 就是被我们自己 cancel 的（确定性，无猜测）
+        #   · 时长熔断：run 已停在 interrupted 超过 grace，且从未恢复
+        _kill_reason = _watchdog_kill_reason(run)
+        _stuck_secs = _interrupted_stuck_seconds(run)
+        _stuck_too_long = (
+            _stuck_secs is not None
+            and _stuck_secs > _INTERRUPTED_STUCK_GRACE_SECS
         )
+        if _kill_reason or _stuck_too_long:
+            _why = _kill_reason or f"stuck in 'interrupted' for {int(_stuck_secs)}s"
+            _logger.warning(
+                "[check_progress] 子 run 停在 interrupted 且不会恢复（%s）→ 改判 timeout",
+                _why,
+            )
+            result["status"] = "timeout"
+            result["error_kind"] = "timeout"
+            result["note"] = (
+                f"The subagent was terminated ({_why}) and will NOT resume "
+                f"automatically. Report this as a failure to the user: it needs "
+                f"to be re-dispatched (or the question re-asked) to get a result. "
+                f"Do NOT tell the user it will recover on its own."
+            )
+        else:
+            result["status"] = "running"
+            result["note"] = (
+                "The subagent is briefly paused (e.g. context summarization) and "
+                "will resume automatically. Do NOT cancel or re-delegate; check "
+                "again later. NOTE: if it is still 'interrupted' several minutes "
+                "from now it was terminated by the watchdog, not paused — a later "
+                "check will report it as a failure."
+            )
     # running / 其他中间态：提取进度（thread_values 一并传入 → 权威源 state.todos 优先）
     if messages or (isinstance(thread_values, dict) and thread_values.get("todos")):
         _extract_progress(result, messages, thread_values)
@@ -1936,6 +2060,23 @@ def _enhanced_build_check_command(result, task, tool_call_id):
     from langchain_core.messages import ToolMessage
 
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # ── 终态硬闸（2026-10-16 事故）──
+    # 本函数是 `result["status"]` 写进 async_tasks 的**唯一漏斗**，也是最后一个
+    # 能拦住「终态被轮询打回中间态」的地方。`_reconcile_result_with_task` 已在
+    # 调用点对过账，这里再拦一道：任何调用方（含 scripts/verify_* 直调）都不得
+    # 把已终态的条目写回非终态。重派发不受影响——`update_async_task` 换 run 时
+    # 条目已被写成 running（deepagents `async_subagents.py:544`）。
+    _task_status = str(task.get("status") or "")
+    if (
+        _task_status in _TERMINAL_TASK_STATUSES
+        and str(result.get("status") or "") not in _TERMINAL_TASK_STATUSES
+    ):
+        _logger.warning(
+            "[check_progress] 拒绝把终态 %s 打回 %s（run 侧证据与已落终态矛盾）",
+            _task_status, result.get("status"),
+        )
+    # 判据与文案只有一份：调用点与硬闸共用 _reconcile_result_with_task
+    _reconcile_result_with_task(result, task)
     last_updated_at = (
         now if task["status"] != result["status"] else task["last_updated_at"]
     )
@@ -2102,6 +2243,8 @@ def _make_patched_build_check_tool(mod, orig_build_check_tool):
                 run, task["thread_id"], thread_values, full=bool(full)
             )
             _add_incremental(result, thread_values, since)
+            # 与 async_tasks 条目对账：条目已终态则结果不得说「在跑」
+            _reconcile_result_with_task(result, task)
             return mod._build_check_command(result, task, runtime.tool_call_id)
 
         # ── async ──
@@ -2158,6 +2301,8 @@ def _make_patched_build_check_tool(mod, orig_build_check_tool):
                 full=bool(full),
             )
             _add_incremental(result, thread_values, since)
+            # 同上：与 async_tasks 条目对账（终态保护，2026-10-16 事故）
+            _reconcile_result_with_task(result, task)
             return mod._build_check_command(result, task, runtime.tool_call_id)
 
         tool.func = _check_sync

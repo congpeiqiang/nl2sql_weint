@@ -54,6 +54,50 @@ def is_sync_alive(sub_thread_id: str) -> bool:
     return t is not None and t.is_alive()
 
 
+# ── 看门狗清扫标记（进程内，2026-10-16 事故）────────────────────────
+# 看门狗强制收尾走 `client.runs.cancel(...)` ⇒ 默认 `action=interrupt` ⇒ 平台 run
+# 状态变成 **interrupted**，与「deepagents 上下文压缩的瞬时暂停」在状态上完全同形。
+# check_progress 的 interrupted 分支此前一律当成瞬时暂停（「会自动恢复，别取消」），
+# 于是把 watcher 刚落好的 timeout 打回 running，还让模型对用户说「会自动恢复」——
+# 用户白等 35 分钟。
+# 唯一能区分两者的证据在**杀人者**手里：这条 run 是我们自己 cancel 的。
+# 登记一份进程内标记，`check_progress._watchdog_kill_reason` 读取它。
+# 边界：仅本进程有效（重启即丢）——丢失时 check 侧的时长熔断仍能兜底，
+# 两条判据互相独立，不依赖对方。
+_WATCHDOG_KILLED_RUNS: dict[str, tuple[float, str]] = {}
+_WATCHDOG_KILLED_MAX = 256
+_WATCHDOG_KILLED_LOCK = threading.Lock()
+
+
+def note_watchdog_kill(run_id: Optional[str], reason: str) -> None:
+    """登记「这条 run 被看门狗主动 cancel 了」（run_id → (登记时刻, 原因)）。
+
+    fail-safe：任何异常都不得影响收尾主流程（登记失败只是退化成时长熔断）。
+    """
+    if not run_id:
+        return
+    try:
+        with _WATCHDOG_KILLED_LOCK:
+            _WATCHDOG_KILLED_RUNS[str(run_id)] = (_time_module.monotonic(), str(reason))
+            # FIFO 淘汰：进程长跑时不让这张表无界增长（标记只服务近期轮询）
+            while len(_WATCHDOG_KILLED_RUNS) > _WATCHDOG_KILLED_MAX:
+                _WATCHDOG_KILLED_RUNS.pop(next(iter(_WATCHDOG_KILLED_RUNS)), None)
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[sync] 登记看门狗标记失败: %s", f"{type(e).__name__}: {e}")
+
+
+def watchdog_kill_reason(run_id: Optional[str]) -> Optional[str]:
+    """该 run 是否被看门狗 cancel 过（是 → 原因文案，否 → None）。"""
+    if not run_id:
+        return None
+    try:
+        with _WATCHDOG_KILLED_LOCK:
+            _hit = _WATCHDOG_KILLED_RUNS.get(str(run_id))
+        return _hit[1] if _hit else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _get_workspace_manager():
     """延迟导入 WorkspaceManager（避免模块级循环依赖）。"""
     from agent.workspace_manager import get_workspace_manager
@@ -87,7 +131,16 @@ _AWAIT_APPROVAL_TIMEOUT = 7200  # 等待审批上限 2h（超了按 timeout 强�
 
 # ── 同步循环时限常量（模块级：便于离线测试把这些上限压到毫秒级）──────
 POST_COMPLETE_MAX_CYCLES = 20      # 完成后继续监控 10s (20 × 0.5s) 让耗时稳定
-STALE_RUN_TIMEOUT = 600            # 子 run 运行时长上限 10min（P1-7，对齐 guards timeout-policy）：超过视为卡死，强制结束（兜底）
+# 卡死判据 = **进度停滞**，不是「跑了多久」（2026-10-16 事故重新定义）。
+# 旧口径「run 运行超过 600s 即视为卡死」在**正常工作的长任务**上误杀：
+# 事故里子 agent 一直有进展（todos 7/7、消息游标 44→46 持续推进），
+# 只是 caliber_gate 的核验重写循环（预算 2 次）把它推过了 600s —— 看门狗在第 600.8s
+# 把**第三次、也就是本该通过的那次**重写连人带 run 一起 cancel 了，产出全丢。
+# 新口径：只要子线程连续 STALL 秒没有任何新进展（消息数/游标/todos 签名三者全不变）
+# 才算卡死；有进展就重置计时。绝对上限另设（ABSOLUTE_RUN_TIMEOUT），只兜真·死循环。
+STALE_RUN_TIMEOUT = 600            # **无进展**持续上限 10min：连续这么久没有任何新消息/todo 变化 → 视为卡死
+STALL_PROBE_EVERY_CYCLES = 8       # 每 8 个循环（4s）探一次进展（探一次要一次 get_state，别 0.5s 一次）
+ABSOLUTE_RUN_TIMEOUT = 3600        # 绝对上限 1h：无论有无进展，单条 run 跑满即强制收尾（兜死循环/无限重写）
 INTERRUPTED_STUCK_TIMEOUT = 120    # 子 run 停在 interrupted 的上限 2min（summarization 瞬时暂停远短于此）：超过视为卡死，强制结束
 COMPLETE_WRITE_MAX_SECONDS = 300   # 完成态写入重试上限：主线程持续 in-flight 时放手（防僵尸线程）
 # P2-4：这个上限现在只决定「watcher 什么时候放手」，不再是「什么时候不写了」——
@@ -102,6 +155,10 @@ REGRESSION_GUARD_MAX_SECONDS = 900   # 首次发现回退起，最多再守 15mi
 REGRESSION_GUARD_MAX_REWRITES = 200  # 重写次数上限（防病态刷写；达到即放弃，不僵尸）
 REGRESSION_CHECK_EVERY_CYCLES = 4    # 常规巡检间隔（4 × 0.5s = 2s，与旧行为一致）
 REGRESSION_CHECK_EVERY_CYCLES_HOT = 2  # 已发现回退后的巡检间隔（1s，尽快纠正）
+# 失败汇报去重标记（failure_reported）的写入重试：写入时机恰逢失败汇报续跑 run
+# in-flight，"Thread is busy" 是常态 ⇒ 必须重试（见 _maybe_report_failure 注释）。
+_FAILURE_REPORT_WRITE_RETRIES = 30
+_FAILURE_REPORT_WRITE_BACKOFF_SECS = 2.0
 
 
 # 步骤耗时后缀格式，如 " (3s)"、" (1m30s)"、" (5s...)"
@@ -326,6 +383,11 @@ async def _async_sync_loop(
     # ⚠️ 必须取**当前 run**的 created_at，不能用 `task["created_at"]` ——
     # `update_async_task` 重派发时原样保留它，用 task 字典会让重派发的任务一开局就被误杀。
     stale_base: Optional[float] = None
+    # 进展停滞判定（2026-10-16）：stall_base = 最后一次观测到进展的时刻；
+    # last_progress_key = 上一次的进展指纹（消息数/末条 id/todos 状态序列）。
+    stall_base: Optional[float] = None
+    last_progress_key: Optional[tuple] = None
+    probe_cycles = 0  # 距下次进展探针的周期计数
 
     # ── P2b 单调基线：本任务上一次已渲染过的 steps 快照 ──
     # 子 run 被 update_async_task 重派发（或模型重写 todo）时，子线程 todos 会从
@@ -341,6 +403,30 @@ async def _async_sync_loop(
     # 直接进完成分支清 false 收尾（也顺手幂等重写终态）。
     try:
         _boot_status = await _read_task_status(client, main_thread_id, sub_thread_id)
+        # 2026-10-16 事故补丁：**读不到状态时不许断言「在跑」**。
+        # 重启的 watcher 若把「未知」当成「非终态」，就会走下面的重派发占位分支并写
+        # `active_queries=true` —— 把一张已经结束的卡片复活（事故里点「停止」后
+        # 卡片又转圈 120s 正是这条路径）。启动方给的条目是它**刚写/刚读**的那份，
+        # 信息只会更新，故读不到时以它为真；条目说终态而 state 不是终态（写入被
+        # in-flight 拒绝）时同样以终态为准 —— 收敛到终态是幂等且安全的，
+        # 反向（把终态当在跑）才会留下永久转圈的卡片。
+        _boot_hint = str((task or {}).get("status") or "")
+        if _boot_status is None and _boot_hint:
+            _logger.warning(
+                "[sync] 启动读不到 async_tasks[%s] 状态，退回启动方提供的 %s",
+                sub_thread_id[:8], _boot_hint,
+            )
+            _boot_status = _boot_hint
+        elif (
+            _boot_hint in _RUN_DONE_STATUSES
+            and _boot_status not in _RUN_DONE_STATUSES
+        ):
+            _logger.warning(
+                "[sync] 启动状态矛盾：state=%s 但启动方条目=%s → 以终态为准"
+                "（终态写入多半被 in-flight 拒绝）",
+                _boot_status, _boot_hint,
+            )
+            _boot_status = _boot_hint
         if _boot_status in _RUN_DONE_STATUSES:
             _logger.info(
                 "[sync] 任务 %s 启动即终态 %s，跳过 active_queries=true，直接清收尾",
@@ -556,6 +642,12 @@ async def _async_sync_loop(
                         try:
                             _stale_run_id = (task or {}).get("run_id")
                             if _stale_run_id:
+                                # 登记看门狗标记：check_progress 的 interrupted 分支靠它
+                                # 分辨「被我们杀掉的」与「上下文压缩的瞬时暂停」。
+                                note_watchdog_kill(
+                                    _stale_run_id,
+                                    f"停在 interrupted 超过 {INTERRUPTED_STUCK_TIMEOUT}s 未恢复",
+                                )
                                 await client.runs.cancel(
                                     thread_id=sub_thread_id, run_id=_stale_run_id
                                 )
@@ -566,39 +658,78 @@ async def _async_sync_loop(
                             _logger.warning("[sync] 取消卡死 interrupted 子 run 失败: %s", f"{type(e).__name__}: {e}")
                 else:
                     interrupted_since = None
+                    if run_status != "running":
+                        # 离开 running（含从 interrupted 恢复）→ 停滞账目重算，
+                        # 免得一次卡顿留下的旧计时在恢复后立刻触发误杀。
+                        stall_base = None
+                        last_progress_key = None
 
-                # 运行时长保护：子 run 一直 running 且超过上限，视为卡死，
-                # 强制按 timeout 处理（P1-7 失败分类：不再冒充 error），
-                # 确保 active_queries 最终翻转、前端恢复。
-                # （正常情况下 run_sql 等工具自身有超时，不会走到这一步，这是兜底。）
+                # ── 卡死保护（2026-10-16 重定义：看**停滞**，不看**时长**）──
+                # 旧口径「run 运行超过 600s 即卡死」误杀正常工作着的长任务：事故里
+                # 子 agent 一直在推进（todos 7/7、消息游标 44→46），只是被 caliber_gate
+                # 的核验重写循环（预算 2 次）推过了 600s —— 看门狗在第 600.8s 把**第三次、
+                # 也就是本该通过的那次**重写连人带 run 一起 cancel 了，产出全丢。
+                # 现在只在两种情况下判卡死，都保留原「cancel + 分类 timeout」收尾：
+                #   · 无进展 ≥ STALE_RUN_TIMEOUT（探针连续观测不到任何新消息/新 todo 状态）
+                #   · 单条 run 的总时长 ≥ ABSOLUTE_RUN_TIMEOUT（兜真死循环/无限重写）
                 if run_status == "running":
                     if stale_base is None:
-                        # 预算只按**这条 run 自己的执行时长**算（见 stale_base 注释）
+                        # 总时长只按**这条 run 自己的执行时长**算（见 stale_base 注释）
                         _cur_run = await _get_latest_run(client, sub_thread_id)
                         stale_base = (
                             _monotonic_from_iso(str((_cur_run or {}).get("created_at") or ""))
                             or loop_start
                         )
-                if run_status == "running" and (
-                    time.monotonic() - (stale_base or loop_start)
-                ) > STALE_RUN_TIMEOUT:
-                    _logger.warning(
-                        "[sync] 子 run 运行超过 %ds，视为卡死，强制结束（分类为 timeout）",
-                        STALE_RUN_TIMEOUT,
-                    )
-                    run_status = "timeout"
-                    # 真实 kill：取消卡死的子 run，避免其永远占用服务端资源
-                    try:
-                        _stale_run_id = (task or {}).get("run_id")
-                        if _stale_run_id:
-                            await client.runs.cancel(
-                                thread_id=sub_thread_id, run_id=_stale_run_id
-                            )
-                            _logger.info(
-                                "[sync] 已取消超时子 run: %s", sub_thread_id[:8]
-                            )
-                    except Exception as e:  # noqa: BLE001
-                        _logger.warning("[sync] 取消超时子 run 失败: %s", f"{type(e).__name__}: {e}")
+                    # 进展探针：每 STALL_PROBE_EVERY_CYCLES 轮探一次（写 state 的成本
+                    # 要克制），有变化就把停滞计时清零。
+                    probe_cycles += 1
+                    if probe_cycles % STALL_PROBE_EVERY_CYCLES == 0:
+                        _pkey = await _progress_probe(client, sub_thread_id)
+                        if _pkey is not None and _pkey != last_progress_key:
+                            if last_progress_key is not None:
+                                _logger.info(
+                                    "[sync] 子 run 有进展（msg %s→%s），停滞计时清零: %s",
+                                    last_progress_key[0], _pkey[0], sub_thread_id[:8],
+                                )
+                            last_progress_key = _pkey
+                            stall_base = time.monotonic()
+                    if stall_base is None:
+                        stall_base = time.monotonic()
+                    _stalled_for = time.monotonic() - stall_base
+                    _ran_for = time.monotonic() - (stale_base or loop_start)
+                    _kill_reason = ""
+                    if _stalled_for > STALE_RUN_TIMEOUT:
+                        _kill_reason = (
+                            f"连续 {int(_stalled_for)}s 无任何进展"
+                            f"（阈值 {STALE_RUN_TIMEOUT}s）"
+                        )
+                    elif _ran_for > ABSOLUTE_RUN_TIMEOUT:
+                        _kill_reason = (
+                            f"总时长 {int(_ran_for)}s 达绝对上限"
+                            f"（{ABSOLUTE_RUN_TIMEOUT}s）"
+                        )
+                    if _kill_reason:
+                        _logger.warning(
+                            "[sync] 子 run %s，视为卡死，强制结束（分类为 timeout）",
+                            _kill_reason,
+                        )
+                        run_status = "timeout"
+                        # 真实 kill：取消卡死的子 run，避免其永远占用服务端资源
+                        try:
+                            _stale_run_id = (task or {}).get("run_id")
+                            if _stale_run_id:
+                                # ⚠ 先登记再 cancel：cancel(action=interrupt) 会把 run
+                                # 状态变成 interrupted（与「上下文压缩的瞬时暂停」同形），
+                                # check_progress 只有靠这条标记才能分辨「是被杀掉的」。
+                                note_watchdog_kill(_stale_run_id, _kill_reason)
+                                await client.runs.cancel(
+                                    thread_id=sub_thread_id, run_id=_stale_run_id
+                                )
+                                _logger.info(
+                                    "[sync] 已取消超时子 run: %s", sub_thread_id[:8]
+                                )
+                        except Exception as e:  # noqa: BLE001
+                            _logger.warning("[sync] 取消超时子 run 失败: %s", f"{type(e).__name__}: {e}")
                 # ── 终态改判（2026-09-28 生产事故）──
                 # SDK 说 success 不代表子任务真答完了：中间件把超时/额度耗尽/未配模型
                 # 吞成一条友好 AIMessage 后，图照常 END ⇒ run 报 success，而用户看到的是
@@ -1147,6 +1278,37 @@ async def _last_failed_mark_of(client, thread_id: str) -> Optional[dict]:
         return last_failed_mark(messages)
     except Exception as e:  # noqa: BLE001
         _logger.debug("[sync] 读失败戳失败（按成功处理）: %s", f"{type(e).__name__}: {e}")
+        return None
+
+
+async def _progress_probe(client, sub_thread_id: str) -> Optional[tuple]:
+    """取子线程的「进展指纹」：消息数 + 末条消息 id + todos 状态序列。
+
+    只用于**判断有没有进展**（配合 STALE_RUN_TIMEOUT 的停滞口径），不解析内容：
+      · 消息数 / 末条消息 id 变了 → 子 agent 又产出了东西
+      · todos 状态序列变了 → 又推进了一步（**只取 status**：渲染后的 content 带
+        耗时后缀，会随时间自己变化，拿它当指纹会假进展）
+    读不到（异常 / state 缺失）返回 None —— 调用方**不得**据此重置停滞计时，
+    否则一次读取抖动就能让卡死任务永远不被判超时。
+    """
+    try:
+        state = await client.threads.get_state(thread_id=sub_thread_id)
+        values = (state or {}).get("values") or {}
+        messages = values.get("messages") or []
+        last_id = ""
+        if messages:
+            _last = messages[-1]
+            if isinstance(_last, dict):
+                last_id = str(_last.get("id") or _last.get("tool_call_id") or "")
+        todos = values.get("todos") or []
+        _sig = tuple(
+            str((t or {}).get("status") or "")
+            for t in todos
+            if isinstance(t, dict)
+        ) if isinstance(todos, list) else ()
+        return (len(messages), last_id, _sig)
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[sync] 进展探针失败(不计入停滞判定): %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -2012,27 +2174,42 @@ async def _maybe_report_failure(
         client, main_thread_id, sub_thread_id, agent_name, run_status
     )
 
-    # 3. 成功 → 写 failure_reported 标记（best-effort，读-改-写复用锁）
+    # 3. 成功 → 写 failure_reported 标记（**有界重试**，读-改-写复用锁）
+    # ⚠ 一次性尝试是错的：这个写入发生在失败汇报**续跑 run 正在跑**的时候，
+    # 主线程 in-flight ⇒ `update_state` 被拒（"Thread is busy with a running job."）
+    # 是**常态而非异常**。2026-10-16 事故里正是这一次"best-effort"失败，
+    # 导致去重标记没落库，后续每轮轮询都可能再汇报一次同一失败。
+    # 重试窗口取 60s（30 × 2s）：续跑 run 一轮问答通常远短于此。
     if _ok:
-        try:
-            _entry = await _read_async_task(
-                client, main_thread_id, sub_thread_id
-            )
-            _merged = dict(_entry or {})
-            _merged["task_id"] = sub_thread_id
-            _merged["failure_reported"] = True
-            await asyncio.to_thread(
-                _sync_update_state,
-                main_thread_id,
-                {"async_tasks": {sub_thread_id: _merged}},
-            )
-            _logger.info(
-                "[sync] 方案1: %s failure_reported 已标记", sub_thread_id[:8]
-            )
-        except Exception as e:  # noqa: BLE001
-            _logger.warning(
-                "[sync] 方案1: 写 failure_reported 失败: %s", str(e)[:100]
-            )
+        for _attempt in range(_FAILURE_REPORT_WRITE_RETRIES):
+            try:
+                _entry = await _read_async_task(
+                    client, main_thread_id, sub_thread_id
+                )
+                _merged = dict(_entry or {})
+                _merged["task_id"] = sub_thread_id
+                _merged["failure_reported"] = True
+                await asyncio.to_thread(
+                    _sync_update_state,
+                    main_thread_id,
+                    {"async_tasks": {sub_thread_id: _merged}},
+                )
+                _logger.info(
+                    "[sync] 方案1: %s failure_reported 已标记（第%d次尝试）",
+                    sub_thread_id[:8], _attempt + 1,
+                )
+                return
+            except Exception as e:  # noqa: BLE001
+                _logger.warning(
+                    "[sync] 方案1: 写 failure_reported 失败(第%d/%d次): %s",
+                    _attempt + 1, _FAILURE_REPORT_WRITE_RETRIES, str(e)[:100],
+                )
+                await asyncio.sleep(_FAILURE_REPORT_WRITE_BACKOFF_SECS)
+        _logger.error(
+            "[sync] 方案1: %s failure_reported 重试 %d 次仍未写入"
+            "（同一失败可能被重复汇报）",
+            sub_thread_id[:8], _FAILURE_REPORT_WRITE_RETRIES,
+        )
 
 
 def _merge_todos(

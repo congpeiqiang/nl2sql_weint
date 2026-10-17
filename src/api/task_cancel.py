@@ -216,13 +216,23 @@ async def cancel_task(request: Request):
             # ⚠ 若 async_tasks 仍显示 running（重启后 sync watcher 未拉起 /
             # 僵尸 run 恢复），必须回写实际终态，否则前端进度条永久 running、
             # 点停止无效（2026-08-29 会话 01a04b54 实测复现）。
+            #
+            # 2026-10-16 事故补丁：**`interrupted` 不是可回写的终态**。
+            # 用户点「停止」时 run 常停在 `interrupted`（取消的默认动作
+            # `action=interrupt` 就是把它变成这个状态，看门狗强杀同款）。把它原样写进
+            # async_tasks 是自相矛盾的：sync watcher 的 `_RUN_DONE_STATUSES`
+            # **不含 interrupted**，重启的 watcher 因此判它「非终态」→ 写
+            # `active_queries=true` + 重派发占位 → 卡片复活转圈
+            # （事故里 17:04 点停止后卡片又活 120s 就是这条）。
+            # 停止的语义就是取消 ⇒ 落 `cancelled`（用户意图 + 合法的 watcher 终态）。
+            _override = run_status if run_status != "interrupted" else "cancelled"
             if entry.get("status") not in _TERMINAL_STATUSES:
                 await _mark_main_cancelled(
                     base,
                     main_thread_id,
                     task_id,
                     entry,
-                    status_override=run_status or "cancelled",
+                    status_override=_override or "cancelled",
                     auth_headers=auth_headers,
                 )
             return json_response(
@@ -230,8 +240,9 @@ async def cancel_task(request: Request):
                     "ok": True,
                     "task_id": task_id,
                     "main_thread_id": main_thread_id,
-                    # run 已终态时优先返回实际终态（entry 可能还是旧的 running）
-                    "status": run_status or entry.get("status") or "cancelled",
+                    # run 已终态时优先返回实际终态（entry 可能还是旧的 running）；
+                    # 同样把 interrupted 归一到 cancelled（见上）
+                    "status": _override or entry.get("status") or "cancelled",
                 }
             )
 
