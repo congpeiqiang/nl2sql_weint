@@ -117,13 +117,12 @@ def tool_result_error(m) -> bool:
     return False
 
 
-def call_result_message(messages, idx: int, call_id, name: str):
-    """第 ``idx`` 条消息里那次工具调用对应的结果消息；找不到返回 ``None``。
+def _call_result_index(messages, idx: int, call_id, name: str):
+    """第 ``idx`` 条消息之后那次工具调用的结果消息**下标**；找不到返回 ``None``。
 
-    先按 ``tool_call_id`` 精确对齐（同一条 AI 消息里并发多次调用时唯一可靠，
-    如 trace 01a0a850 第 9 步一次发过两个 query_cube），再退回「其后第一条同名
-    工具结果」——历史消息缺 id 时的兜底；此时同名的兄弟调用可能错配，最坏后果
-    只是把失败调用当成成功（不丢数据、不伪造 SQL）。
+    与 `call_result_message` 同一套对齐规则（按 ``tool_call_id`` 精确 + 同名兜底），
+    区别只是返回下标而不返回消息——报告侧要按下标取该次调用的返回行做值匹配
+    （``check_progress._run_sql_row_values`` 收的是消息下标）。
     """
     fallback = None
     for j in range(idx + 1, len(messages)):
@@ -139,10 +138,22 @@ def call_result_message(messages, idx: int, call_id, name: str):
         if role not in ("tool", "tool_result"):
             continue
         if call_id and tcid and str(tcid) == str(call_id):
-            return m
+            return j
         if fallback is None and mname == name:
-            fallback = m
+            fallback = j
     return fallback
+
+
+def call_result_message(messages, idx: int, call_id, name: str):
+    """第 ``idx`` 条消息里那次工具调用对应的结果消息；找不到返回 ``None``。
+
+    先按 ``tool_call_id`` 精确对齐（同一条 AI 消息里并发多次调用时唯一可靠，
+    如 trace 01a0a850 第 9 步一次发过两个 query_cube），再退回「其后第一条同名
+    工具结果」——历史消息缺 id 时的兜底；此时同名的兄弟调用可能错配，最坏后果
+    只是把失败调用当成成功（不丢数据、不伪造 SQL）。
+    """
+    j = _call_result_index(messages, idx, call_id, name)
+    return None if j is None else messages[j]
 
 
 def cube_arg_lines(name: str, args: dict) -> list:
@@ -157,23 +168,23 @@ def cube_arg_lines(name: str, args: dict) -> list:
     return lines
 
 
-def extract_last_cube_call(messages) -> dict:
-    """最后一次**成功**的 Cube 调用 ``{"tool", "args", "lines", "ok", "skipped_failed"}``。
+def extract_cube_calls(messages) -> list:
+    """本批消息里的**全部** Cube 调用（消息序 → 消息内调用序），每项：
 
-    与 ``_cube_arg_lines`` 同一次扫描：报告侧既要展示查询定义文本，也要
-    按 args **复算**物理 SQL（见 agent/utils/wren_plan），所以两者必须来自同一次
-    调用——拆两个扫描循环迟早会漂移。
+    ``{"tool", "args", "lines", "ok", "id", "seq", "result_index"}``
 
-    为什么取「最后一次**成功**」（2026-09-16 修）：子 agent 常在拿到数据后继续试
-    过滤/重算，失败的调用会成为最后一次。报告若锚在它上面，展示的是**没跑出任何
-    数据**的定义，复算也必然同样失败（生产 thread 01a0a850：数据表来自第 12 步
-    成功调用 110 行，第 16 步 `filters=['story_count:gte:20']` 判划失败、
-    `Unknown filter dimension`）。判失败的依据见 ``tool_result_error``。
+    - ``seq`` = ``(消息下标, 消息内第几次调用)``：同一轮并发多次调用时只有它才判得出
+      「其后」（生产实测一条 AI 消息里并发发过 4 次 `query_cube`）；
+    - ``result_index`` = 对应工具结果消息的下标，供调用方**按行取返回值做值匹配**
+      （见 ``agent.subagents.check_progress._pick_cube_call_for_report``）；取不到为
+      ``None``（此时该候选无返回值可匹配，值匹配层自然跳过它）。
 
-    全部调用都失败时**退回最后一次**（保持旧行为，不假装有成功调用），并在
-    ``ok=False`` 里如实标出；``skipped_failed`` 记录被跳过的失败调用数（序在选中
-    调用之后的，序 = 消息下标 + 消息内调用位置，故同一轮并发多次调用也算得清），
-    供注记说明「展示的不是最后一次调用」。
+    为什么要「全部」而不是「最后一次」（2026-10-16，生产 thread `01a14503`）：
+    一次问数常发 **6~8 次** Cube 调用（本例 8 次：6 次取数 + 2 次 `sql_only` 预览），
+    而报告只展示**一次**的定义。取哪一次过去是纯位置判据（最后一次**成功**），
+    于是「定义节指向的调用」与「产出正文表格的调用」可以是两次不同的调用——报告
+    第 2/5 节因此与第 1/6 节对不上，且同题多跑每次展示不同的定义。现在由调用方
+    在全部候选上做值匹配（与 run_sql 通道 tier0/0b 同一套判据）后再选。
     """
     cands = []
     for i, m in enumerate(messages):
@@ -196,16 +207,45 @@ def extract_last_cube_call(messages) -> dict:
             lines = cube_arg_lines(name, args)
             if len(lines) <= 1:
                 continue
-            res = call_result_message(messages, i, call.get("id"), name)
+            ridx = _call_result_index(messages, i, call.get("id"), name)
             cands.append({
                 "tool": name, "args": args, "lines": lines,
                 # 调用 id：调用方要拿结果正文（评测判执行成败）时按它精确对齐；
                 # 只按工具名找会在「成功调用之后还有一次失败调用」时错配。
                 "id": call.get("id"),
                 # 序 = (消息下标, 消息内第几次调用)：同一轮并发多次调用时后者才算「其后」
-                "_seq": (i, pos),
-                "ok": not (res is not None and tool_result_error(res)),
+                "seq": (i, pos),
+                "result_index": ridx,
+                "ok": not (ridx is not None and tool_result_error(messages[ridx])),
             })
+    return cands
+
+
+def extract_last_cube_call(messages) -> dict:
+    """最后一次**成功**的 Cube 调用 ``{"tool", "args", "lines", "ok", "skipped_failed"}``。
+
+    与 ``_cube_arg_lines`` 同一次扫描：报告侧既要展示查询定义文本，也要
+    按 args **复算**物理 SQL（见 agent/utils/wren_plan），所以两者必须来自同一次
+    调用——拆两个扫描循环迟早会漂移。
+
+    为什么取「最后一次**成功**」（2026-09-16 修）：子 agent 常在拿到数据后继续试
+    过滤/重算，失败的调用会成为最后一次。报告若锚在它上面，展示的是**没跑出任何
+    数据**的定义，复算也必然同样失败（生产 thread 01a0a850：数据表来自第 12 步
+    成功调用 110 行，第 16 步 `filters=['story_count:gte:20']` 判划失败、
+    `Unknown filter dimension`）。判失败的依据见 ``tool_result_error``。
+
+    全部调用都失败时**退回最后一次**（保持旧行为，不假装有成功调用），并在
+    ``ok=False`` 里如实标出；``skipped_failed`` 记录被跳过的失败调用数（序在选中
+    调用之后的，序 = 消息下标 + 消息内调用位置，故同一轮并发多次调用也算得清），
+    供注记说明「展示的不是最后一次调用」。
+
+    ⚠️ 本函数现在只是 ``extract_cube_calls`` 上的一层「最后一次成功」选择，**就地
+    保留**给两类调用方：反馈侧 Good Set SQL 快照（``cube_sql_snapshot``）与窗口
+    探测（``check_progress._extract_windows``）——它们要的是「这一轮最后那次口径」。
+    **报告的定义节/物理节不再用它**：那里改为值匹配优先（可能选中更早的一次），
+    见 ``check_progress._pick_cube_call_for_report``。
+    """
+    cands = extract_cube_calls(messages)
     if not cands:
         return {}
 
@@ -213,12 +253,14 @@ def extract_last_cube_call(messages) -> dict:
     if ok_cands:
         pick = ok_cands[-1]
         pick["skipped_failed"] = sum(
-            1 for c in cands if not c["ok"] and c["_seq"] > pick["_seq"]
+            1 for c in cands if not c["ok"] and c["seq"] > pick["seq"]
         )
     else:
         pick = cands[-1]
         pick["skipped_failed"] = 0
-    pick.pop("_seq", None)
+    pick = dict(pick)
+    pick.pop("seq", None)
+    pick.pop("result_index", None)
     return pick
 
 

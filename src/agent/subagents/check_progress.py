@@ -47,6 +47,7 @@ from agent.utils.wren_call_extract import (
     _msg_content_str,
     call_result_message as _call_result_message,
     cube_arg_lines as _cube_arg_lines,
+    extract_cube_calls as _extract_cube_calls,
     extract_last_cube_call as _extract_last_cube_call,
     resolve_wren_ctx as _resolve_wren_ctx,
     tool_result_error as _tool_result_error,
@@ -289,38 +290,49 @@ def _summarize_result(content: str, full: bool = False) -> str:
     return f"{head}\n\n...({len(content)} 字符，中间已省略；要完整原文用 check_async_task(task_id, full=true) 读一次)...\n\n{tail}"
 
 
+def _tool_result_shape(messages, i) -> tuple:
+    """第 i 条工具结果消息 → ``(返回行数, 列名集合)``；非数据载荷 ``(0, [])``。
+
+    run_sql 与 query_cube 的结果体**结构同构**（``{columns, rows, row_count,
+    truncated}``），所以这层解析两边共用：run_sql 走 `_run_sql_meta`，Cube 候选
+    走 `_pick_cube_call_for_report`（值匹配要看返回了多少行）。
+    """
+    try:
+        obj = json.loads(_msg_content_str(messages[i]))
+    except (json.JSONDecodeError, ValueError):
+        return 0, []
+    if not isinstance(obj, dict):
+        return 0, []
+    rows, cols = 0, []
+    rc = obj.get("row_count")
+    try:
+        rc_int = int(rc) if rc is not None else None
+    except (TypeError, ValueError):
+        rc_int = None
+    rr = obj.get("rows")
+    # QueryResultOffload 大结果瘦身后 rows 仅前 N 样例、真行数在 row_count：
+    # 须优先 row_count，否则 _extract_last_sql 的「返回行数最多 = 产出 SQL」
+    # 启发式会把 20 当 431（生产 trace「431 部门人数」228s 静默治本修复）。
+    if obj.get("rows_truncated") and rc_int is not None:
+        rows = rc_int
+    elif isinstance(rr, list):
+        rows = len(rr)
+    elif rc_int is not None:
+        rows = rc_int
+    cc = obj.get("columns")
+    if isinstance(cc, list):
+        cols = [str(x).strip().lower() for x in cc]
+    return rows, cols
+
+
 def _run_sql_meta(messages, i):
     """解析第 i 条 run_sql 工具结果消息：返回 (sql, 返回行数, 列名集合)。
 
     通过 tool_call_id 与之前 AI 消息的 tool_calls[].id 精确对齐，避免同一 AI
-    消息里连续多个 run_sql 时结果错配。
+    消息里连续多个 run_sql 时结果错配。行数/列名见 `_tool_result_shape`。
     """
     m = messages[i]
-    rows, cols = 0, []
-    try:
-        obj = json.loads(_msg_content_str(m))
-    except (json.JSONDecodeError, ValueError):
-        obj = None
-    if isinstance(obj, dict):
-        rc = obj.get("row_count")
-        try:
-            rc_int = int(rc) if rc is not None else None
-        except (TypeError, ValueError):
-            rc_int = None
-        rr = obj.get("rows")
-        # QueryResultOffload 大结果瘦身后 rows 仅前 N 样例、真行数在 row_count：
-        # 须优先 row_count，否则 _extract_last_sql 的「返回行数最多 = 产出 SQL」
-        # 启发式会把 20 当 431（生产 trace「431 部门人数」228s 静默治本修复）。
-        if obj.get("rows_truncated") and rc_int is not None:
-            rows = rc_int
-        elif isinstance(rr, list):
-            rows = len(rr)
-        elif rc_int is not None:
-            rows = rc_int
-        cc = obj.get("columns")
-        if isinstance(cc, list):
-            cols = [str(x).strip().lower() for x in cc]
-
+    rows, cols = _tool_result_shape(messages, i)
     tcid = m.get("tool_call_id") if isinstance(m, dict) else getattr(m, "tool_call_id", None)
     last_sql = ""
     for j in range(i - 1, -1, -1):
@@ -407,10 +419,14 @@ def _final_table_headers(messages) -> set:
 
 
 def _run_sql_cell_values(messages, i) -> set:
-    """解析第 i 条 run_sql 工具结果 JSON 的 rows[] 单元值集合（去空白）。
+    """解析第 i 条**数据工具**结果 JSON 的 rows[] 单元值集合（去空白）。
 
     大结果被 QueryResultOffload 瘦身时 rows 只留前 N 样例，仍用样例做值匹配；
     错误文本（非 JSON）返回空集。
+
+    「数据工具」= run_sql **与** query_cube（两者结果体同构），所以 Cube 通道的
+    值匹配（`_pick_cube_call_for_report`）直接复用本函数，名字里的 run_sql 是
+    历史遗留、不是适用范围。
     """
     m = messages[i]
     try:
@@ -433,7 +449,8 @@ def _run_sql_cell_values(messages, i) -> set:
 
 
 def _run_sql_row_values(messages, i) -> list:
-    """第 i 条 run_sql 结果**按行**的非空单元值集合（tier0 的行内证据）。
+    """第 i 条**数据工具**结果**按行**的非空单元值集合（tier0 的行内证据；run_sql
+    与 query_cube 共用，见 `_run_sql_cell_values` 的同名说明）。
 
     与 `_run_sql_cell_values`（整表拍平成一个集合）的差别是**保留「同属一行」的结构**：
     拍平比对时，数据库某列为 NULL、模型在答案里写了占位文案（trace b816d442 的
@@ -693,6 +710,202 @@ def _cube_produced_data(messages) -> bool:
     return False
 
 
+def _pick_by_value_match(cands, messages) -> tuple:
+    """在候选里选「真的产出了最终答案表」的那一个：``(下标, tier)``，无证据 ``(None, "")``。
+
+    ``cands`` 每项须含 ``values``（整表拍平值集，``_run_sql_cell_values``）、
+    ``row_values``（按行值集，``_run_sql_row_values``）、``rows``（返回行数，
+    ``_tool_result_shape``）。两层与 `_extract_last_sql` 的 tier0 / tier0b
+    **同一套判据**（本仓唯一实现，run_sql 与 Cube 两条通道共用；拆第二份迟早漂移）：
+
+    - ``tier0`` 值匹配：候选返回值能**整行覆盖**最终答案数据表的行数最多者；同命中
+      优先 ``rows == 命中`` 的精确对齐、再优先消息序靠后。天然忽略探值
+      （CURRENT_DATE / 分布 / Top-N 的返回值不进最终表 ⇒ 命中 0）。
+    - ``tier0b`` 标量摘要对齐：tier0 全落空、且最终表恰有一列整列纯数字时，选
+      单元格值集**全覆盖**这些数值的候选（同全覆盖优先行数少——单行标量，再消息序
+      靠后）。tier0 整行匹配要求每格（含中文指标名）都被命中，数据型返回值不含中文
+      指标名 ⇒ 摘要表恒落空，必须靠这层。
+    """
+    final_rows = _final_answer_data_rows(messages)
+    if not final_rows:
+        return None, ""
+    # ── tier 0：值匹配 ───────────────────────────────────────────
+    best_i, best_hit, best_aligned = None, 0, False
+    for i, c in enumerate(cands):  # 消息序正序，同质量时后者优先
+        if not c.get("values"):
+            continue
+        hit = sum(
+            1 for cells in final_rows
+            if _final_row_covered_by(cells, c["values"], c.get("row_values"))
+        )
+        if hit <= 0:
+            continue
+        aligned = c.get("rows", 0) > 0 and c["rows"] == hit
+        if hit > best_hit or (hit == best_hit and aligned >= best_aligned):
+            best_i, best_hit, best_aligned = i, hit, aligned
+    if best_i is not None:
+        return best_i, "tier0"
+    # ── tier 0b：标量摘要对齐 ────────────────────────────────────
+    final_nums = _final_numeric_values(messages)
+    if not final_nums:
+        return None, ""
+    full_cover = []
+    for i, c in enumerate(cands):
+        if not c.get("values") or c.get("rows", 0) <= 0:
+            continue
+        cnums = {
+            float(v.strip().replace(",", "").rstrip("%").strip())
+            for v in c["values"] if _is_plain_number(v)
+        }
+        if final_nums <= cnums:
+            full_cover.append((i, c))
+    if full_cover:
+        # 全覆盖者：行数少（单行标量）优先，其次消息序靠后
+        i, _ = min(full_cover, key=lambda t: (t[1].get("rows", 0), -t[0]))
+        return i, "tier0b"
+    return None, ""
+
+
+# ── Cube 通道的锚点：值匹配优先（2026-10-16）────────────────────────────
+# 生产 thread 01a14503（问「丛培强8-9月工时分析」，报告
+# `丛培强2026年8-9月工时分析_2026-10-16_22-04-13_01a14503.md`）：
+# 子任务发了 **8 次** `query_cube`（6 次取数 + 2 次 `sql_only` 预览），报告第 2/5 节
+# 展示的定义与物理 SQL 是**最后一次成功**那次（`if_leave_form × approve_user_name`，
+# 5 行，其数据在正文里一个字都没出现），而正文的「已审核/未审核 152/16」来自
+# `if_approve` 那次、「报工天数 43」来自 day 粒度那次、「角色/项目」来自另两次。
+# ⇒ 报告第 2/5 节与第 1/6 节结构性错位，且同题多跑每次展示不同定义（10-13 锚在
+# `dept_level1`、10-16 16:26 锚在 `user_name`）。
+# 根因：run_sql 通道有 tier0/0b 值匹配 + 通道闸，Cube 通道**只有位置判据**。
+# 修法：在全部候选上跑同一套值匹配（`_pick_by_value_match`），命中不了就**如实说**
+# 并把本轮其余取数调用列出来——派生表场景（模型把 104+48+16 自己加成 168）任何单次
+# 调用都匹配不上，此时「列清单 + 注记」是唯一诚实的表达。
+_CUBE_MULTI_HEAD = (
+    "注：本轮子任务共发出 {n} 次 Cube **取数**调用{preview}，"
+    "上面的查询定义只是其中一次（{which}）。"
+    "报告正文的数字可能来自其他几次调用，不能只拿本节复现。"
+)
+_CUBE_MULTI_PREVIEW = "（另有 {p} 次 `sql_only` 预览，未取数）"
+_CUBE_WHICH_MATCHED = "值匹配对得上正文表格的那一次"
+_CUBE_WHICH_LAST = (
+    "最后一次成功的那一次——**未能唯一对上正文表格**"
+    "（正文数字多为多次调用汇总或模型二次派生，任何单次调用都复现不了）"
+)
+_CUBE_MULTI_LIST_HEAD = "本轮全部取数调用（按时间序，★=本节）："
+# 「哪一次」的短说法：物理 SQL 节的注记是**单段**文本（同一句里再嵌长解释会变成
+# 嵌套括号），只用长说法的一半
+_CUBE_WHICH_MATCHED_S = "值匹配对得上正文表格的那次"
+_CUBE_WHICH_LAST_S = "最后一次成功的那次（未能唯一对上正文表格）"
+_CUBE_PHYSICAL_MULTI = (
+    "注：本轮共 {n} 次 Cube 取数调用，本条语句只是其中一次（{which}）；"
+    "正文中由其他调用产出的数字不能拿它复现。"
+)
+
+
+def _cube_call_summary_line(call: dict, current: bool) -> str:
+    """一次 Cube 取数调用的单行摘要（cube/维度/度量/筛选/时间）。"""
+    a = call.get("args") or {}
+    parts = ["cube=" + str(a.get("cube") or "?")]
+    for k in ("dimensions", "measures", "filters", "time_dimension"):
+        v = a.get(k)
+        if v:
+            parts.append(k + "=" + (v if isinstance(v, str)
+                                    else json.dumps(v, ensure_ascii=False)))
+    head = a.get("granularity")  # 旧入参形态：粒度在顶层而非 time_dimension 里
+    if head:
+        parts.append("granularity=" + str(head))
+    # 一律用列表项前缀（★ 标出本节那一次）：混用「★」「-」会让 Markdown 把无前缀行
+    # 并进上一条列表项，长定义串成一段读不了
+    return ("- ★ " if current else "- ") + "；".join(parts)
+
+
+def _cube_physical_multi(info: dict) -> str:
+    """多次取数时给**物理 SQL 节**补的一句（单次返回空串 ⇒ 老报告逐字不变）。
+
+    单段文本、无换行：物理节是 `f"> {plan_note}"` 就地拼接，行内换行会被 Markdown
+    折成一个空格，没有块引用逐行问题（`_cube_multi_note` 那边不是因为排版才逐行加
+    `> ` 的，是块引用逐行判定）。
+    """
+    if int((info or {}).get("data_calls") or 0) <= 1:
+        return ""
+    return _CUBE_PHYSICAL_MULTI.format(
+        n=info["data_calls"],
+        which=(_CUBE_WHICH_MATCHED_S if info.get("matched") else _CUBE_WHICH_LAST_S),
+    )
+
+
+def _cube_multi_note(info: dict) -> str:
+    """多次取数时的如实注记；只取过一次数（或没取到数）返回空串——老报告一字不变。
+
+    每行自带 `> ` 前缀：报告侧渲染是 `md_parts += ["", f"> {sql_note}"]`，Markdown
+    块引用**逐行**判定，多行不各自带前缀就会掉出块引用、单换行被折成空格。
+    """
+    n = int(info.get("data_calls") or 0)
+    if n <= 1:
+        return ""
+    which = _CUBE_WHICH_MATCHED if info.get("matched") else _CUBE_WHICH_LAST
+    preview = ""
+    if info.get("preview_calls"):
+        preview = _CUBE_MULTI_PREVIEW.format(p=info["preview_calls"])
+    lines = [
+        _CUBE_MULTI_HEAD.format(n=n, preview=preview, which=which),
+        ">",
+        _CUBE_MULTI_LIST_HEAD,
+    ]
+    cur_seq = (info.get("call") or {}).get("seq")
+    for c in info.get("data_list") or []:
+        lines.append(_cube_call_summary_line(c, c.get("seq") == cur_seq))
+    return "\n> ".join(lines)
+
+
+def _pick_cube_call_for_report(messages) -> dict:
+    """报告侧 Cube 锚点：**值匹配优先**，退回「最后一次成功」。
+
+    返回 ``{}``（本批消息没有 Cube 调用，调用方走老路径）或::
+
+        {"call": <候选 dict>, "matched": bool, "tier": "tier0"/"tier0b"/"",
+         "data_calls": int, "preview_calls": int, "data_list": [候选, …]}
+
+    - **候选池** = 成功且**非** `sql_only` 的调用（`sql_only` 只回编译出的 SQL、不返回
+      数据，无值可匹配，与 `judge_sql_origin` 的 `cube_data_calls` 同口径）；池空时退回
+      「成功的调用」（可能与改动前一样是预览），仍空则退全部——**任何一侧都不丢节**。
+    - `matched=False` 表示值匹配一整层都没命中（本例就是：正文的 168 是模型把
+      104+48+16 自己加出来的），此时 `call` = 池内最后一次成功调用，即改动前行为；
+      调用方据 `matched` 出如实注记（`_cube_multi_note`）。
+    """
+    try:
+        cands = _extract_cube_calls(messages)
+    except Exception as e:  # noqa: BLE001  审计旁路，失败退回老行为
+        _logger.debug("[check_progress] Cube 候选枚举失败: %s", f"{type(e).__name__}: {e}")
+        return {}
+    if not cands:
+        return {}
+    ok_cands = [c for c in cands if c.get("ok")]
+    data = [c for c in ok_cands if not (c.get("args") or {}).get("sql_only")]
+    preview = [c for c in ok_cands if (c.get("args") or {}).get("sql_only")]
+    pool = data or ok_cands or cands
+
+    scored = []
+    for c in pool:
+        ri = c.get("result_index")
+        rows, _cols = _tool_result_shape(messages, ri) if ri is not None else (0, [])
+        scored.append({
+            "call": c,
+            "rows": rows,
+            "values": _run_sql_cell_values(messages, ri) if ri is not None else set(),
+            "row_values": _run_sql_row_values(messages, ri) if ri is not None else [],
+        })
+    vi, tier = _pick_by_value_match(scored, messages)
+    matched = vi is not None
+    pick = dict(scored[vi]["call"] if matched else pool[-1])
+    pick["skipped_failed"] = sum(
+        1 for c in cands if not c.get("ok") and c.get("seq", (0, 0)) > pick.get("seq", (0, 0))
+    )
+    return {
+        "call": pick, "matched": matched, "tier": tier,
+        "data_calls": len(data), "preview_calls": len(preview), "data_list": data,
+    }
+
+
 def _extract_last_sql(messages) -> str:
     """从子线程消息提取真实执行 SQL，供报告装配（build_report）使用。
 
@@ -763,47 +976,10 @@ def _extract_last_sql(messages) -> str:
     # 保持旧行为（此时报告里的 SQL 本就是失败的语句，但至少可查）。
     sqls = [c for c in sqls if c["ok"]] or sqls
 
-    # ── tier 0：值匹配（最高优先）────────────────────────────────
-    final_rows = _final_answer_data_rows(messages)
-    if final_rows:
-        best_sql, best_hit, best_aligned = None, 0, False
-        for c in sqls:  # 消息序正序，同质量时后者优先
-            if not c["values"]:
-                continue
-            hit = sum(
-                1 for cells in final_rows
-                if _final_row_covered_by(cells, c["values"], c.get("row_values"))
-            )
-            if hit <= 0:
-                continue
-            aligned = c["rows"] > 0 and c["rows"] == hit
-            if hit > best_hit or (hit == best_hit and aligned >= best_aligned):
-                best_sql, best_hit, best_aligned = c["sql"], hit, aligned
-        if best_sql:
-            return best_sql
-
-    # ── tier 0b：标量摘要对齐（最终表=指标|数值 摘要表）──────────
-    # tier0 整行匹配要求每格（含中文指标名）都被候选值命中，数据型返回值不含中文
-    # 指标名 → 恒落空；掉到「行数最多」会把更晚的 Top-N 探值（5 行）误选成产出
-    # 单行标量（trace d60b 部门数/人数 431/1736：LIMIT 5 明细被附进报告）。
-    # 标量产出 SQL 返回单元格值集 == 最终全部数值 → 数值全覆盖者即产出者。
-    if final_rows:
-        final_nums = _final_numeric_values(messages)
-        if final_nums:
-            full_cover = []
-            for _idx, c in enumerate(sqls):
-                if not c["values"] or c["rows"] <= 0:
-                    continue
-                cnums = {
-                    float(v.strip().replace(",", "").rstrip("%").strip())
-                    for v in c["values"] if _is_plain_number(v)
-                }
-                if final_nums <= cnums:
-                    full_cover.append((c, _idx))
-            if full_cover:
-                # 全覆盖者：行数少（单行标量）优先，其次消息序靠后
-                c, _ = min(full_cover, key=lambda t: (t[0]["rows"], -t[1]))
-                return c["sql"]
+    # ── tier 0 / 0b：值匹配（最高优先）──────────────────────────
+    _vi, _ = _pick_by_value_match(sqls, messages)
+    if _vi is not None:
+        return sqls[_vi]["sql"]
 
     # ── tier 1：列名 ∩ 表头 ───────────────────────────────────────
     final_headers = _final_table_headers(messages)
@@ -949,8 +1125,8 @@ _CUBE_DEF_NOTE = (
     "直接执行——`v_*` 是 MDL 视图，物理库里不存在）。"
 )
 _CUBE_SKIPPED_NOTE = (
-    "以上取的是**最近一次成功**的 Cube 调用：其后的 {n} 次 Cube 调用未成功"
-    "（引擎没编译出语句、也没产出数据）。"
+    "另：本节所取调用之后还有 {n} 次 Cube 调用未成功（引擎没编译出语句、也没产出数据），"
+    "本节不展示它们。"
 )
 _CUBE_ALL_FAILED_NOTE = (
     "本次所有 Cube 调用都未成功（引擎未编译出语句），没有产出数据。"
@@ -1625,7 +1801,11 @@ def _enhanced_build_check_result(run, thread_id, thread_values, full=False):
         else:
             # 无 run_sql 但走了 Cube 快速通道 → 附「查询定义」（报告里作为
             # 物理 SQL 的语义层来源保留）。run_sql 通道仍以真实 SQL 为准，两者互斥。
-            _cube = _extract_last_cube_call(messages)
+            # 锚点选法（2026-10-16，thread 01a14503）：**值匹配优先**——先找「真的
+            # 产出了最终答案表」的那次调用（复用 run_sql 通道的 tier0/0b），匹配不上
+            # 才退回「最后一次成功」（= 改动前行为），并在多次取数时如实注记。
+            _pick = _pick_cube_call_for_report(messages)
+            _cube = _pick.get("call") or _extract_last_cube_call(messages)
             if _cube:
                 result["cube_query"] = "\n".join(_cube["lines"])
                 # `sql_kind` 是历史字段、全仓**无活读者**（删除只制造兼容风险，
@@ -1654,7 +1834,16 @@ def _enhanced_build_check_result(run, thread_id, thread_values, full=False):
                 elif _cube.get("skipped_failed"):
                     # 锚点跳过失败调用 → 说明展示的不是最后一次，防读者误判
                     _note += _CUBE_SKIPPED_NOTE.format(n=_cube["skipped_failed"])
+                # 本轮取过不止一次数 → 本节只是其中一次，如实说清并列出全部取数
+                # （单次取数时返回空串，报告与改动前逐字节一致）
+                _multi = _cube_multi_note(_pick)
+                if _multi:
+                    _note += _multi
                 result["sql_note"] = _note
+                # 物理 SQL 节同源同问题：正文数字若不是这一条语句产出的，注记先行说明
+                _physical_multi = _cube_physical_multi(_pick)
+                if _has_plan and _physical_multi:
+                    result["physical_sql_note"] += _physical_multi
         # 大结果全量文件指针（QueryResultOffload 落盘）附到 result，
         # build_report 读盘后把完整结果表嵌入报告正文（0 模型开销）
         full_files = _collect_full_result_files(messages)
