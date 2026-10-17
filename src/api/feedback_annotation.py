@@ -21,6 +21,11 @@
 执行复用 dbmcp 四引擎（_RUNNER_REGISTRY / _load_runner_class / _apply_default_limit /
 combine_multi_results），前置 classify_sql 只读硬校验——与运行时同一判据
 （见 agent.middlewares.sql_approval）。
+
+**已建模库的人工 SQL 要先经 Wren 展开**（_to_physical_sql）：语义层 SQL 引用的
+``v_workhour`` 这类对象只存在于 MDL（视图/模型），物理库里没有 ⇒ 直连执行必然
+1146。Cube 通道的「按口径试算」一直是先编译后执行，人工 SQL 这条路原本缺的正是
+同一刀。
 """
 from __future__ import annotations
 
@@ -279,6 +284,74 @@ async def _run_preview(db_name: str, sql: str, limit: int = _PREVIEW_LIMIT) -> d
     return result
 
 
+# 执行失败时的补充说明：只在「已建模库 + 展不开」时出现（见 _to_physical_sql）。
+_SEMANTIC_EXPAND_HINT = (
+    "该库已建模：本条 SQL 引用了语义层对象，平台已尝试用 Wren 展开成物理 SQL 后执行，"
+    "但展开失败"
+)
+
+
+def _to_physical_sql(db_name: str, sql: str) -> tuple[str, dict]:
+    """人工 SQL → 真正能下发的物理 SQL：已建模库经 Wren ``dry_plan`` 展开。
+
+    **为什么必须有这一刀**：走语义层的库里，模型下发的（标注员多半沿用、或照着改的）
+    是**语义层 SQL**——``FROM v_workhour`` 这类对象只在 MDL 里存在（``statement`` 定义的
+    虚拟视图 / 模型），物理库中根本没有 ⇒ 原样丢给 dbmcp 直连引擎必然
+    ``(1146, "Table 'witops.v_workhour' doesn't exist")``。同文件的「按口径试算」一直是
+    先编译后执行（``plan_cube_sql_checked`` → 执行），这里补齐对称的那一半。
+
+    取 ``plan_sql``（``dry_plan`` 裸产物）而**不是** ``dialect_sql``：那条尾部 ``LIMIT``
+    是镜像连接器的（wren 自己执行时追加），搬来做直连会和人工 SQL 自带的 ``LIMIT 7``
+    （→ 双 LIMIT）或 ``OFFSET 3``（→ LIMIT 排在 OFFSET 之后）叠成 MySQL 语法错；
+    预览行数上限由 ``_run_preview`` 的 ``_apply_default_limit`` 照旧兜。
+
+    返回 ``(要执行的 SQL, {"expanded", "expand_error", …})``，三条路除了「执行哪条语句」
+    之外什么都不改：
+      · 未建模库 → 原样返回（直连库没有语义层，展开无从谈起）；
+      · 已建模且展得开 → 物理 SQL（``expanded=True``）；
+      · 已建模但展不开（人工写的就是物理 SQL——``dry_plan`` 要求引用的对象都在 MDL 里；
+        或引擎/项目不可用）→ **原样返回** + 记原因，落到直连通道＝改动前行为。
+    """
+    sql = str(sql or "").strip()
+    plain = {"expanded": False, "expand_error": ""}
+    if not sql:
+        return sql, plain
+    from agent.utils.wren_call_extract import resolve_wren_ctx_by_db
+    from agent.utils.wren_plan import RunSqlPlanError, plan_run_sql_checked
+
+    try:
+        project, conn = resolve_wren_ctx_by_db(db_name)
+        if not project or not conn:
+            return sql, plain
+        # 引擎构建有冷启成本（~0.9s 每进程一次）⇒ 调用方必须放线程里跑。
+        plan = plan_run_sql_checked(project, conn, sql)
+        physical = str(plan.get("plan_sql") or "")
+        if not physical:
+            return sql, {"expanded": False, "expand_error": "引擎没有展开出物理 SQL"}
+        return physical, {
+            "expanded": True,
+            "expand_error": "",
+            "dialect": str(plan.get("dialect") or ""),
+        }
+    except RunSqlPlanError as e:
+        return sql, {"expanded": False, "expand_error": str(e)}
+    except Exception as e:  # noqa: BLE001
+        return sql, {"expanded": False, "expand_error": f"{type(e).__name__}: {e}"}
+
+
+def _exec_error_text(exc: Exception, expand: dict, prefix: str = "执行失败") -> str:
+    """执行失败文案；「已建模但展不开」时把展不开的原因一并交给标注员。
+
+    只有 ``expand_error`` 非空才追加——它精确地表示「该库已建模且这次没展成」。少了
+    这句，标注员看到的是语义层视图报「表不存在」，只会去瞎改一条其实没错的 SQL。
+    """
+    text = f"{prefix}: {exc}"
+    err = str((expand or {}).get("expand_error") or "")
+    if err:
+        text += f"\n{_SEMANTIC_EXPAND_HINT}：{err}。请核对引用的对象名是否在语义库中。"
+    return text
+
+
 def _fill_annotation_from_snapshot(ann) -> "AnnotationRecord":
     """从本地反馈快照补齐标注的 question/bad_sql/cube_spec（SQLite 读，无网络）。
 
@@ -490,16 +563,22 @@ async def execute_annotation(request: Request):
         from agent.auth.grants import can_access_db
         if not can_access_db(user, db_name):
             return json_response({"error": f"无权访问数据库: {db_name}"}, status=403)
+    # 先兜底：展开本身若抛（不该发生，_to_physical_sql 自带 except），except 分支仍读得到
+    expand: dict = {"expanded": False, "expand_error": ""}
     try:
-        result = await _run_preview(db_name, sql)
+        exec_sql, expand = await asyncio.to_thread(_to_physical_sql, db_name, sql)
+        result = await _run_preview(db_name, exec_sql)
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 执行失败 thread=%s: %s", thread_id[:12], f"{type(e).__name__}: {e}")
+        _logger.warning(
+            "[annotation] 执行失败 thread=%s db=%s expanded=%s: %s",
+            thread_id[:12], db_name, bool(expand.get("expanded")), f"{type(e).__name__}: {e}",
+        )
         await offload(
             store.update_annotation, thread_id, message_id, exec_error=str(e)[:2000]
         )
-        return json_response({"error": f"执行失败: {e}"}, status=400)
+        return json_response({"error": _exec_error_text(e, expand)}, status=400)
     await offload(
         store.update_annotation, thread_id, message_id,
         bad_sql=sql[:MAX_SNAPSHOT_SQL],
@@ -511,7 +590,14 @@ async def execute_annotation(request: Request):
         await offload(
             store.update_annotation, thread_id, message_id, status="validated"
         )
-    return json_response({"ok": True, "result": result})
+    # ``bad_sql`` 存的是**标注员写的那条**（语义层 SQL 才是回归要比对的产物），
+    # 展开出的物理语句只在它确实被改写时回传（所见即所跑；未改写就不回空壳）。
+    return json_response({
+        "ok": True,
+        "result": result,
+        "expanded": bool(expand.get("expanded")),
+        "executed_sql": exec_sql if expand.get("expanded") else "",
+    })
 
 
 def _parse_cube_spec(raw) -> dict:
@@ -706,15 +792,25 @@ async def confirm_annotation(request: Request):
     note = str(data.get("note", "") or "") or ann.note or ""
     annotator = str(data.get("annotator", "") or "") or ann.annotator or ""
 
-    # 金标 SQL 必须能跑通（只读校验 + 执行取结果）
+    # 金标 SQL 必须能跑通（只读校验 + 执行取结果）。执行的是**展开后**的物理语句
+    # （已建模库的语义层 SQL，见 _to_physical_sql）；落库的 gold_sql 仍是人工那条
+    # ——回归集要跟模型产出的语义 SQL 逐字比对，换成物理 SQL 就没得比了。
+    expand: dict = {"expanded": False, "expand_error": ""}
     try:
-        gold_result = await _run_preview(db_name, gold_sql)
+        exec_gold, expand = await asyncio.to_thread(_to_physical_sql, db_name, gold_sql)
+        gold_result = await _run_preview(db_name, exec_gold)
         gold_result_json = json.dumps(gold_result, ensure_ascii=False, default=str)[:_GOLD_RESULT_MAX]
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
-        _logger.warning("[annotation] 金标 SQL 执行失败 thread=%s: %s", thread_id[:12], f"{type(e).__name__}: {e}")
-        return json_response({"error": f"金标 SQL 执行失败（请先修正）: {e}"}, status=400)
+        _logger.warning(
+            "[annotation] 金标 SQL 执行失败 thread=%s db=%s expanded=%s: %s",
+            thread_id[:12], db_name, bool(expand.get("expanded")), f"{type(e).__name__}: {e}",
+        )
+        return json_response(
+            {"error": _exec_error_text(e, expand, prefix="金标 SQL 执行失败（请先修正）")},
+            status=400,
+        )
 
     from api.message_feedback import _find_trace_with_retry
 

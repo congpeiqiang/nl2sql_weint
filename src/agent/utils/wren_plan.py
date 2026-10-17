@@ -271,7 +271,17 @@ def _finish(
     cube_sql: str = "",
     limit: Any = None,
 ) -> Dict[str, Any]:
-    """语义层/ cube SQL → 实际下发语句（plan + 连接器 LIMIT）。"""
+    """语义层/ cube SQL → 实际下发语句（plan + 连接器 LIMIT）。
+
+    两个 SQL 键，读者不同：
+      - ``plan_sql``：``dry_plan`` 的**裸产物**（MDL 展开后的 CTE），人工 SQL 的执行
+        校验读它（``api/feedback_annotation._to_physical_sql``）—— 那条语句由平台自己
+        下发，行数上限另有 ``_apply_default_limit`` 兜，镜像连接器 LIMIT 只会与 SQL
+        自带的 ``LIMIT 7``（→ 双 LIMIT）/ ``OFFSET 3``（→ LIMIT 排在 OFFSET 后）
+        叠成 MySQL 语法错；
+      - ``dialect_sql``：再镜像连接器那条 ``LIMIT {n+1}``。报告「执行 SQL（物理）」节
+        与标注页「按口径试算」读它 —— 那两处的立身之本是「行数与线上工具一致」。
+    """
     engine = _engine_for(mdl_path, conn)
     plan_sql = engine.dry_plan(semantic_sql)
     if not isinstance(plan_sql, str) or not plan_sql.strip():
@@ -281,6 +291,7 @@ def _finish(
     dialect = str(getattr(ds, "value", None) or ds or "").strip().lower()
     return {
         "cube_sql": cube_sql or "",
+        "plan_sql": plan_sql,
         "dialect_sql": mirror_connector_limit(plan_sql, n),
         "dialect": dialect,
         "limit_appended": n,
@@ -385,21 +396,58 @@ def plan_cube_sql_checked(project_path: Any, conn: Any, args: Any) -> Dict[str, 
         raise CubePlanError(f"{type(e).__name__}: {e}") from e
 
 
+class RunSqlPlanError(ValueError):
+    """语义层 SQL 展不开成物理 SQL（原因已本地化，可直接展示给操作者）。
+
+    ``plan_run_sql``（报告/复算侧）把它连同一切异常一起吞掉 → ``{}``；交互式场景
+    （标注页「执行并验证 SQL」，见 ``api/feedback_annotation._to_physical_sql``）
+    需要把**为什么**告诉人，走 ``plan_run_sql_checked``。
+    """
+
+
+def _run_sql_plan(project_path: Any, conn: Any, sql: Any, limit: Any = None) -> Dict[str, Any]:
+    """``plan_run_sql`` 的真实实现，失败**抛出**（不吞）。"""
+    if not probe_wren_api():
+        raise RunSqlPlanError("wren 引擎不可用（当前环境未安装/未启用语义层）")
+    sql = str(sql or "").strip()
+    if not sql:
+        raise RunSqlPlanError("SQL 不能为空")
+    if not isinstance(conn, dict) or not conn.get("datasource"):
+        raise RunSqlPlanError("拿不到该库的连接配置（db_config 缺失）")
+    mdl_path = _mdl_path(project_path)
+    if mdl_path is None:
+        raise RunSqlPlanError(f"语义库项目里找不到 mdl.json（project={project_path or '未配置'}）")
+    plan = _finish(mdl_path, conn, sql, limit=limit)
+    if not plan:
+        raise RunSqlPlanError("物理 SQL 生成失败（MDL 与连接不匹配？）")
+    return plan
+
+
 def plan_run_sql(project_path: Any, conn: Any, sql: Any, limit: Any = None) -> Dict[str, Any]:
-    """语义层 SQL（模型写的那条）→ 实际下发语句；失败返回 ``{}``。"""
+    """语义层 SQL（模型写的那条）→ 实际下发语句；失败返回 ``{}``。
+
+    **只对已建模库有意义**：``dry_plan`` 要求 SQL 引用的对象都在 MDL 里（模型/视图），
+    纯物理表名的语句会在这里展不开 —— 那种情况调用方应走直连通道，不是这里报错。
+    """
     try:
-        if not probe_wren_api():
-            return {}
-        sql = str(sql or "").strip()
-        if not sql:
-            return {}
-        mdl_path = _mdl_path(project_path)
-        if mdl_path is None or not isinstance(conn, dict) or not conn.get("datasource"):
-            return {}
-        return _finish(mdl_path, conn, sql, limit=limit)
+        return _run_sql_plan(project_path, conn, sql, limit=limit)
     except Exception as e:  # noqa: BLE001  fail-open
         _logger.debug("[wren_plan] run_sql 物理 SQL 复算失败: %s", e)
         return {}
+
+
+def plan_run_sql_checked(project_path: Any, conn: Any, sql: Any, limit: Any = None) -> Dict[str, Any]:
+    """同 ``plan_run_sql``，但把失败原因**抛成** ``RunSqlPlanError``（供交互式端点回报）。
+
+    引擎/规划器的原话（未知模型、MDL 解析失败…）原样包进异常消息 —— 那正是标注员判断
+    「是 SQL 写错了还是库没建模」的依据，吞掉就只剩一句 1146。
+    """
+    try:
+        return _run_sql_plan(project_path, conn, sql, limit=limit)
+    except RunSqlPlanError:
+        raise
+    except Exception as e:  # noqa: BLE001  引擎异常 → 本地化后抛出
+        raise RunSqlPlanError(f"{type(e).__name__}: {e}") from e
 
 
 # ── 对外：落盘 ────────────────────────────────────────────────────────
