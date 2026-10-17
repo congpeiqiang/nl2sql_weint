@@ -1,67 +1,96 @@
-# model_timeout.py 代码解读
+# model_timeout.py — ModelTimeoutMiddleware 代码解读
 
-> 文件路径：`src/agent/middlewares/model_timeout.py`
-> 解读日期：2026-09-18（2026-09-28 补「失败戳」一节）
+> 源文件：`src/agent/middlewares/model_timeout.py`
+> 类别：**错误翻译**
+> 挂载点：`wrap_model_call` / `awrap_model_call`
 
-## 一句话概括
+## 1. 解决的问题
 
-`ModelTimeoutMiddleware`：把 LLM 调用超时异常翻译为一条带友好中文文案的 AIMessage（**不抛异常**），解决前端「卡住、无提示」问题。与 `quota_error.py` 同构。
+模型 API 超时（httpx `ReadTimeout` / openai `APITimeoutError`）被 LangGraph 序列化进 run stream 的 error 事件，而前端 SDK 不渲染 `stream.error` → 表现为"卡住、无提示"（trace `ef83792` 实证：4×60s 重试后界面空白）。
 
-## 解决的问题
+## 2. 核心机制
 
-模型 API 在限定时间内无响应（httpx ReadTimeout / openai APITimeoutError，消息常为 "Request timed out."）。后端原始异常会被 LangGraph 序列化进 run stream 的 `error` 事件，而**前端 SDK（useStream）不渲染 stream.error** → 表现为「卡住、无提示」（trace ef83792 实证：model 节点 4×60s 重试后超时，界面空白）。
+### 2.1 错误翻译
 
-## 关键机制决策：为什么不抛异常
+**不抛异常**，捕获超时后返回一条带友好中文文案的 AIMessage：
 
-抛异常 → 进 stream.error → 前端不渲染。改为捕获后**返回正常 ModelResponse**：
-- agent 正常结束、消息写入 checkpoint、前端按普通 AI 回复渲染 → 用户直接看到「模型调用超时…」；
-- AIMessage **不带 tool_calls** → 模型节点后直接走 END，不触发工具节点，不会因「缺工具结果」再抛错；
-- 消息经 add_messages reducer 写入 checkpoint → **刷新页面后仍可见**。
+```
+⚠️ 模型响应超时
 
-## 超时识别 `is_timeout_error`（判定链，任一命中即判定）
+当前模型服务响应时间过长，请稍后重试，或尝试切换到其他模型。
 
-1. `httpx.TimeoutException`（ReadTimeout/ConnectTimeout/WriteTimeout/PoolTimeout 等，`__str__` 都是 "Request timed out."）；
-2. 内置 `TimeoutError`（部分 SDK / asyncio.timeout 直接抛）；
-3. 类名含 `Timeout`（openai.APITimeoutError、requests.ConnectTimeout 等）;
-4. 正则 `(request|read|connect|write|pool)?\s*(timed\s?out|time\s*out)` 匹配消息文本；
-5. **递归遍历异常链** `__cause__` / `__context__`（带 `seen` id 集合防循环引用）。
+如果问题持续，请在「设置 → 模型配置」中检查模型服务状态。
+```
 
-## 失败戳：`_friendly_response` 里同一条消息带 `nl2sql_failure`（2026-09-28 新增）
+### 2.2 AIMessage 特性
 
-上面「不抛异常」的方案有个**副作用**：这条友好消息在链路上跟一条真实答复**完全无法区分**。图照常 END ⇒ SDK 报 `success`，于是三个读取方各自猜错（生产 trace `3dcc9a66…` 实证）：
+- 不带 `tool_calls` → 模型节点后直接 END，不触发工具节点
+- 不会因缺工具结果再抛错
+- 消息写入 checkpoint → 刷新页面仍可见
 
-| 读取方 | 没有戳时的错误行为 |
-|---|---|
-| 子图 watcher（`sync_subagent_todos._async_sync_loop`） | `run.status=="success"` ⇒ 发「已完成查询任务」续跑 |
-| `check_async_task`（`_enhanced_build_check_result`） | 同一个判据 ⇒ 主 agent 拿到 `status:"success"` + 超时文案，只能自己推理「marked as success, but the result is actually a timeout error」 |
-| `CaliberGateMiddleware._after` | 把超时文案当「终稿缺 `## 业务口径` 块」⇒ `jump_to="model"` **打回**，再烧一次 240s（820s 事故里的 234s 空窗） |
-| 主图 `/api/threads/{tid}/run-status` | 末条是终稿文本 ⇒ 一律 `turn_incomplete=false`，用户看到一段"正常回答" |
+### 2.3 超时识别
 
-修法：`_friendly_response` 返回前用 `mark_failed(msg, KIND_MODEL_TIMEOUT, MODEL_TIMEOUT_MESSAGE)`（[utils/failure_signal.py](../../../src/agent/utils/failure_signal.py)）在 `additional_kwargs["nl2sql_failure"]` 写 `{"kind","detail","at"}`。**文案一字符未改**，逻辑分支（`_classify_failure` 的 `("friendly", 0.0)`、两个调用点）也一字未动——只是多带一个袋子。
+`is_timeout_error(e)` 四级判定链：
 
-- **为什么不是文本匹配**：文案是可调项；主 agent 向用户解释失败时正文里也会出现「模型调用超时」几个字，会误伤。本仓已有两次「纯 prompt 契约被证伪」的先例（见 `caliber_gate.py` docstring）。
-- **为什么放 `additional_kwargs`**：全链透传、能过 checkpoint 序列化往返、一路到前端；本仓已在当平台语义用（`additional_kwargs.tool_calls`、`lc_source`、`reasoning_content`）。`response_metadata` 是 provider 侧重建的袋子，不能用。
-- **值只许 JSON 原生标量**：`mark_failed` 内部统一 `str()`、detail 截 500 字符——序列化器遇未知类型会抛异常，那比现状更糟。
-- **`kind`→run 状态是单点映射** `run_status_for`：`model_timeout → "timeout"`，其余 → `"error"`。硬约束：只许产出 `error`/`timeout`（都在 `_RUN_DONE_STATUSES` 里），写错的串会让前端卡片永远不结束。
-- **无戳 = 今天的旧行为**，逐字不变；历史 checkpoint 不受影响。负对照在 `scripts/verify_failure_signal.py`（④「无戳 → 仍 success 且带 result」、③「同样文案但无戳 → 仍打回」）。
+```python
+def is_timeout_error(e):
+    # 1. httpx.TimeoutException（最常见）
+    if isinstance(e, httpx.TimeoutException): return True
+    # 2. 内置 TimeoutError
+    if isinstance(e, TimeoutError): return True
+    # 3. 类名含 Timeout
+    if "Timeout" in type(e).__name__: return True
+    # 4. 正则匹配消息文本
+    if re.search(r'(timeout|timed\s*out)', str(e), re.I): return True
+    return False
+```
 
-## 超时为什么不重试（2026-09-28 复核，维持原决定）
+并**递归遍历 `__cause__`/`__context__` 异常链**（带 seen 集合防环）：
 
-SDK 侧已是 `timeout=60, max_retries=3` 的四连击 ≈240s（[model.py:417-418](../../../src/agent/llms/model.py#L417-L418)）；[llm_gate.py:215-218](../../../src/agent/utils/llm_gate.py#L215-L218) 已记着「再加次数会把单次模型调用推向工具超时 300s」。本层再加一轮会直接撞工具超时。超时的正确出路是**快速失败 + 明确失败态 + 用户可见的重试按钮**（前端 `ChatInterface.tsx` 的「上一轮执行失败（未完成）」+ 重试，由 `run-status` 的 `turn_failed` 驱动）。
+```python
+def _check_cause_chain(e, seen=None):
+    seen = seen or set()
+    if id(e) in seen: return False
+    seen.add(id(e))
+    for attr in ("__cause__", "__context__"):
+        cause = getattr(e, attr, None)
+        if cause and is_timeout_error(cause): return True
+        if cause and _check_cause_chain(cause, seen): return True
+    return False
+```
 
-## 边界
+### 2.4 非超时错误
 
-- 只翻译「模型调用超时」，**其他错误原样上抛**（保持原有失败语义）。
-- 包在模型调用边界（`wrap_model_call`）——业务 SQL 报错不会以异常形式出现在这里，不会误伤。
-- httpx import 失败不影响（openai 自带 httpx，且有类名/文本兜底）。
+其他错误原样上抛，保持失败语义——只有超时才翻译为 AIMessage。
 
-## 文案
+## 3. 与 quota_error 的同构关系
 
-`MODEL_TIMEOUT_MESSAGE`：说明常见原因（服务繁忙、网络波动、推理模型大上下文首字延迟高）+ 行动指引（稍后重试；反复超时可在「模型配置」换模型）。
+| 维度 | model_timeout | quota_error |
+|---|---|---|
+| 触发条件 | LLM 超时 | 额度耗尽（402/403） |
+| 返回形式 | AIMessage（中文） | AIMessage（中文） |
+| 不抛异常 | ✅ | ✅ |
+| tool_calls | 无 | 无 |
+| 可重试 | 用户手动重试 | 充值后重试 |
 
-## 关联文件
+两者共用"错误翻译为 AIMessage"的统一模式。
 
-- `quota_error.py` / `model_required.py`：同构的错误翻译中间件（额度耗尽 / 未配模型），**同样打戳**
-- `agent/utils/failure_signal.py`：戳的契约与生产者/消费者清单
-- `scripts/verify_failure_signal.py`：七段验收（每段带负对照）
-- 前端 useStream 集成（SDK 不渲染 stream.error 是本方案动因）
+## 4. 关键设计决策
+
+### 4.1 为什么不抛异常
+
+- LangGraph 把异常序列化进 run stream 的 error 事件
+- 前端 SDK 不渲染 `stream.error` → 用户看到空白
+- AIMessage 是最可靠的"把信息传递给用户"的方式
+
+### 4.2 为什么要遍历异常链
+
+- httpx 超时可能被包装在 `openai.APIConnectionError.__cause__` 中
+- 某些代理层会把超时包装在自定义异常中
+- 只看顶层异常会漏判
+
+### 4.3 为什么用 seen 集合
+
+- 异常链可能成环（A.__cause__ = B, B.__cause__ = A）
+- 无保护会无限递归 → stack overflow
+- seen 集合按 `id(e)` 去重

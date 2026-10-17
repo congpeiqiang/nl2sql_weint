@@ -1,47 +1,103 @@
-# query_gate.py 代码解读
+# query_gate.py — QueryGateMiddleware 代码解读
 
-> 文件路径：`src/agent/middlewares/query_gate.py`（311 行）
-> 解读日期：2026-09-18
+> 源文件：`src/agent/middlewares/query_gate.py`
+> 类别：**执行监督**
+> 挂载点：`wrap_tool_call` / `awrap_tool_call`
 
-## 一句话概括
+## 1. 解决的问题
 
-`QueryGateMiddleware`：nl2sql 子 agent 查询执行前的**双规则确定性闸门**（`wrap_tool_call`）——规则一「通道硬闸」禁止已建模库走 dbmcp 直连，规则二「顺序软提醒」要求先完成理解建模再执行查询。
+nl2sql 子 agent 查询执行前的**双规则确定性闸门**：
 
-## 解决的问题（生产 trace bbb0eda0 实证）
+1. **通道硬闸**：已建模库禁止走 dbmcp 通道（生产 trace 实证：WIT 库上模型直连 `dbmcp_run_sql` ×21 次）
+2. **顺序软提醒**：确保模型先获取语义上下文再执行 SQL
 
-nl2sql 子 agent 有两条查询通道：`wrenai_<库名>_*`（Wren 语义层）与 `dbmcp_*`（db_mcp_server 直连，绕过语义层、丢业务口径）。WIT 这类**已建模**库上模型仍直连 `dbmcp_run_sql` ×21 次——`dynamic_prompt` 的「查询通道路由」只是文本指引，**模型不遵守**；且原「先获取后执行」软闸被 `dbmcp_get_db_info` 满足后即全放行。故升级为**通道 + 顺序**双规则。
+## 2. 规则一：通道硬闸（每次必拦）
 
-## 规则一：通道硬闸（每次必拦，非 once）
+### 2.1 判定逻辑
 
-- 当前查询库**已在 Wren 语义层建模**时，`dbmcp_*`（run_sql 与 get_db_info 都算）**一律不执行**，返回指到 `wrenai_<库>_run_sql` / `{prefix}_get_data_source` 等语义工具的 error 消息（prefix 由 `semantic_db.wrenai_server_name(db)` 推导）。
-- **目标库解析**（`_active_db`，返回 `(db_name, modeled)`）：
-  1. 优先工具参数 `db_name`（dynamic_prompt 要求 dbmcp 直连必须传）→ `detector.is_modeled(dn)`；
-  2. 兜底：正则 `_ACTIVE_DB_RE` 从 state 系统提示中扫「当前数据库: `X` —— 已在/未在 Wren 语义层建模」标记（与 dynamic_prompt 注入同源），取最后一个匹配。
-- 取不到 → `("", False)`，调用方按未建模放行（**勿误伤未建模库的合法直连**——未建模库 dbmcp 是唯一查询通道）。
+当前查询库**已在 Wren 语义层建模**时，`dbmcp_*`（`run_sql` 和 `get_db_info` 都算）一律不执行：
 
-## 规则二：顺序软提醒（每线程至多一次）
+```python
+# 目标库解析优先级
+1. 工具参数 db_name（显式指定）
+2. 从 state 系统提示里读 dynamic_prompt 注入的标记：
+   "当前数据库: `X` —— 已在/未在 Wren 语义层建模"
+```
 
-- 触发：后获取工具（`run_sql`/`*_run_sql`/`dry_run`/`dry_plan`）执行前，`_ever_fetched` 反扫历史**所有** assistant 消息的 tool_calls，从未出现任何获取工具（get_context/get_instructions/recall_queries/describe_schema/get_mdl/get_db_info...）→ 拦下，返回 nl2sql-understand 顺序指导（含"[需要澄清] 先追问"提醒）。
-- **同批并行天然放行**：最后一条 AIMessage 的 tool_calls 里可能既有 get_context 又有 run_sql，`_ever_fetched` 扫 messages 列表时会命中。
-- **每线程至多一次**：`_REMINDED` set（threading.Lock + 4000 上限超限清空）——首次拦下给指导，此后该线程放行；不无限弹回、不 interrupt、不走 permission 卡。
-- describe_model 也算获取证据（它只在 describe_schema/get_context 之后才被允许出现）。
+### 2.2 行为
 
-## 豁免与兜底
+| 条件 | 行为 |
+|---|---|
+| 已建模库 + dbmcp 工具 | 拦截，返回指到 `wrenai_<库>_run_sql` 的 error 消息 |
+| 已建模库 + wrenai 工具 | 放行 |
+| 未建模库 + dbmcp 工具 | 放行（dbmcp 是唯一查询通道） |
+| 未建模库 + wrenai 工具 | 不存在（工具已被 tool_filter 过滤） |
 
-- **Cube 通道完全豁免**（list_cubes/describe_cube/query_cube）：策略 C 无需 A/B 检索。
-- thread_id 取不到 → fail-open 放行（与 fs_thread_guard 一致）。thread_id 优先 `request.runtime.execution_info`（子 agent 自己的线程，跨 run 自动隔离），兜底 configurable.trace_parent_thread_id/thread_id。
-- 用户直接给出精确 SQL 时若被误拦，只浪费一轮（模型读指导后重发即放行），可接受。
+### 2.3 豁免
 
-## 与评分层的配合
+Cube 通道三工具（`query_cube`、`cube_*`）完全豁免——Cube 有独立路由逻辑（`cube_route_gate`）。
 
-`status="error"` + `Error:` 前缀让 `langfuse_span._maybe_score` 把它当 exec 失败（`looks_like_exec_error`），避免被误记成 `sql_exec_success=1`（与 SqlReadOnly._deny 同款约定）。
+## 3. 规则二：顺序软提醒（每线程至多一次）
 
-## 挂载顺序
+### 3.1 触发条件
 
-`nl2sql_agent._middleware`，位于 sql_approval_middleware **之前**（LangfuseSpan 内层、SqlReadOnly 硬闸外层）→ 被拦的 run_sql 仍在 span 里可见，写/DDL 仍由硬闸兜底。与 `tool_filter.py` 构成纵深：tool_filter 让模型"看不见" dbmcp，QueryGate 对存量历史调用/幻觉工具名"拦得住"。
+`run_sql` / `dry_run` / `dry_plan` 执行前，若历史所有 assistant tool_calls 中**从未出现**任何"获取工具"（`_ever_fetched`）：
 
-## 关联文件
+```python
+_FETCH_TOOLS = {
+    "get_context", "get_all_knowledge", "get_instructions",
+    "recall_queries", "describe_schema", "get_mdl",
+    "list_models", "get_db_info",
+}
+```
 
-- `tool_filter.py`：出站 payload 层的第一道（语义层独占）
-- `sql_approval.py`：内层的只读硬闸
-- `langfuse_span.py`：deny 消息评分识别约定
+含同批次并行的 `get_context`——天然放行同批并行调用。
+
+### 3.2 行为
+
+拦下并给出 nl2sql-understand 顺序指导：
+
+```
+建议：在执行 SQL 之前，先调用 get_context 或 get_all_knowledge 获取业务口径，
+再调用 describe_schema 获取表结构信息。这样可以生成更准确的 SQL。
+```
+
+### 3.3 一次性提醒
+
+`_REMINDED` set（带锁 + 4000 上限）记录 thread_id，提醒一次后放行，不无限弹回、不 interrupt。
+
+## 4. 状态管理
+
+| 进程级缓存 | 键 | 值 | 上限 |
+|---|---|---|---|
+| `_REMINDED` | thread_id | True | 4000 条后全清 |
+
+## 5. 关键设计决策
+
+### 5.1 硬闸 vs 软提醒
+
+- **通道硬闸**：每次必拦，确定性规则，模型无法绕过
+- **顺序软提醒**：每线程一次，引导性建议，提醒后放行
+
+设计哲学：安全规则必须硬（不能走错通道），质量规则可以软（模型有时确实不需要获取上下文）。
+
+### 5.2 为什么 db_name 解析有两层
+
+- 工具参数 `db_name` 是显式的、最权威的
+- 系统提示标记是兜底的（工具可能没传 db_name）
+- 两层都取不到 → fail-open 放行
+
+### 5.3 fail-open 的边界
+
+- thread_id 取不到 → 不弹软提醒（不影响硬闸）
+- 库标记取不到 → 放行（不拦截，让 query_result 自然报错）
+- 硬闸的库标记解析失败 → 放行（宁可漏拦也不误拦正确的查询）
+
+## 6. deny 消息设计
+
+```
+Error: 当前数据库 `{db_name}` 已在 Wren 语义层建模，
+请使用 `wrenai_{db_name}_run_sql` 工具执行 SQL，不要使用 dbmcp_run_sql。
+```
+
+消息用中文、指明替代工具名——让模型一次修正到位。`status="error"` + `Error:` 前缀让 `langfuse_span` 把它记为 exec 失败而非成功。

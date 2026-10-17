@@ -1,291 +1,485 @@
 # 03 · Trace 追踪详解
 
-> 深入理解 Langfuse 的 Trace 数据模型与嵌套结构
+> 深入理解 Langfuse 的四层数据模型、Observation 嵌套规则、OTel context 传递  
+> 参考：[Langfuse 官方数据模型文档](https://langfuse.com/docs/observability/data-model)、[Best Practices](https://langfuse.com/docs/observability/best-practices)
 
 ---
 
-## 1. Trace 数据模型
+## 1. 四层数据模型
 
-Langfuse 的追踪基于三层结构：
+Langfuse 的追踪基于四层结构：
 
 ```
-Trace（一次完整的 Agent 任务）
-├── Observation 1（一个步骤：LLM 调用 / 工具调用 / 检索等）
-│   ├── Sub-Observation 1.1
-│   └── Sub-Observation 1.2
-├── Observation 2
-└── Observation 3
+Session（会话）── 1:N ── Trace（一次查询）── 1:N ── Observation（执行步骤，可嵌套成树）
+                                                          └── Score（评分，挂在 trace 或 observation 上）
 ```
 
-### 1.1 Trace（追踪）
+### 1.1 Session（会话）
+
+| 属性 | 说明 |
+|------|------|
+| **定义** | 将多个 trace 分组的标识（典型：聊天线程中的多轮对话） |
+| **对应** | LangGraph 的 `thread_id`、聊天窗口 ID |
+| **作用** | 在 Sessions 页面查看同一会话的所有 trace，分析多轮交互 |
+| **设置** | `session_id` 参数 |
+
+```python
+# 多轮对话自动归组
+session_id = f"thread-{user_id}-{conversation_id}"
+
+with langfuse.start_as_current_observation(
+    name="chat-turn", as_type="agent",
+    session_id=session_id,
+    input="第一个问题",
+):
+    ...
+```
+
+### 1.2 Trace（追踪）
 
 Trace 是最顶层的容器，代表一次完整的 Agent 任务。
 
-| 属性 | 说明 | 示例 |
+| 属性 | 类型 | 说明 |
 |------|------|------|
-| `name` | Trace 名称 | `"nl2sql-agent"` |
-| `input` | 用户输入 | `"统计 artist 表有多少艺术家"` |
-| `output` | 最终输出 | `{"answer": "共 275 位艺术家"}` |
-| `metadata` | 附加信息 | `{"db": "chinook", "user": "alice"}` |
-| `session_id` | 会话标识（多轮分组） | `"session-abc-123"` |
-| `user_id` | 用户标识 | `"user-42"` |
-| `tags` | 标签 | `["production", "v1.2.0"]` |
-| `release` | 发版标记 | `"v1.2.0"` |
-| `scores` | 评估打分 | `[{"name": "correctness", "value": 1.0}]` |
+| `name` | str | Trace 名称（低基数、稳定标识） |
+| `input` | Any | 用户输入 |
+| `output` | Any | 最终输出 |
+| `metadata` | dict | 任意 JSON 可序列化的键值对 |
+| `session_id` | str | 所属会话 |
+| `user_id` | str | 用户标识 |
+| `tags` | list[str] | 标签 |
+| `release` | str | 发版标记 |
+| `scores` | list | 评估打分 |
+| `timestamp` | datetime | 创建时间 |
+| `latency` | float | 总耗时（秒） |
+| `total_cost` | float | LLM 总成本（USD） |
 
-### 1.2 Observation（观察）
+**在 v4 SDK 中，Trace 由最外层 `start_as_current_observation(as_type="agent")` 自动创建。**
 
-Trace 内的每一个步骤都是一个 Observation。通过 `as_type` 区分类型：
+### 1.3 Observation（观察）
 
-| `as_type` | 用途 | 典型场景 |
-|-----------|------|----------|
-| `agent` | Agent 根节点（= Trace） | 最外层包裹 |
-| `generation` | LLM 调用 | GPT/DeepSeek 生成 SQL |
-| `tool` | 工具调用 | 执行 SQL、调用 API |
-| `span` | 通用步骤 | 数据转换、格式处理 |
-| `chain` | 链式调用 | LangChain 的 chain |
-| `retriever` | 检索 | 向量检索、全文检索 |
-| `embedding` | 嵌入计算 | 文本向量化 |
-| `evaluator` | 评估 | LLM-as-Judge 评估 |
-| `guardrail` | 护栏 | 安全检查、过滤 |
+Trace 内的每一个步骤都是一个 Observation，可嵌套成树：
 
-### 1.3 Generation 的特殊属性
+```
+Trace
+└── AGENT: chat_agent (root)
+    ├── GENERATION: llm-call-1（规划）
+    ├── SPAN: skill:schema-linking
+    │   └── GENERATION: llm-call-2（schema 识别）
+    ├── AGENT: nl2sql_agent（子 Agent）
+    │   ├── GENERATION: llm-call-3（SQL 生成）
+    │   └── TOOL: execute-sql（SQL 执行）
+    └── GENERATION: llm-call-4（最终回答）
+```
 
-`as_type="generation"` 的 observation 有额外属性用于成本和 token 计算：
+### 1.4 Score（评分）
+
+Score 挂在 Trace 或 Observation 上，不参与树的嵌套：
+
+```python
+# Trace 级评分
+langfuse.score_current_trace(name="correctness", value=0.9)
+
+# Observation 级评分
+langfuse.score_current_span(name="tool-success", value=1.0)
+```
+
+## 2. Observation 类型详解
+
+### 2.1 类型对照表
+
+| `as_type` | 语义 | 自动记录的特殊属性 | 典型场景 |
+|-----------|------|-------------------|----------|
+| `agent` | Agent 根节点 | 输入输出、完整子树 | 最外层包裹 |
+| `generation` | LLM 调用 | `model`、`model_parameters`、token、cost | GPT/DeepSeek 生成 |
+| `tool` | 工具调用 | 参数、结果、错误 | 执行 SQL、API 调用 |
+| `span` | 通用步骤 | 输入输出 | 数据转换、格式处理 |
+| `chain` | 链式调用 | 输入输出 | LangChain chain |
+| `retriever` | 检索 | 查询、文档列表、分数 | 向量检索、全文检索 |
+| `embedding` | 嵌入计算 | 模型、维度、token | 文本向量化 |
+| `evaluator` | 评估 | 评分结果 | LLM-as-Judge |
+| `guardrail` | 护栏 | 检查结果、拦截原因 | 安全检查、内容过滤 |
+
+### 2.2 Generation 的特殊属性
+
+`generation` 类型有额外的属性用于成本和 token 计算：
 
 ```python
 with langfuse.start_as_current_observation(
     name="generate-sql",
     as_type="generation",
-    model="gpt-4o",                          # 模型名（用于成本计算）
-    model_parameters={                        # 模型参数
+    model="gpt-4o",                     # 模型名 → 匹配 Models 页的单价
+    model_parameters={                   # 模型参数
         "temperature": 0,
-        "max_tokens": 2000,
+        "max_tokens": 4000,
+        "top_p": 1.0,
     },
-    input={"messages": [...]},               # prompt / 消息列表
-    output={"content": "SELECT ..."},         # completion
-):
-    pass
+    input={                              # prompt / 消息列表
+        "messages": [
+            {"role": "system", "content": "你是 SQL 专家..."},
+            {"role": "user", "content": question},
+        ],
+    },
+) as gen:
+    response = call_llm(question)
+    gen.update(
+        output={"content": sql},         # completion
+        usage={                          # 手动指定 token（可选，自动模式更好）
+            "input": 500,
+            "output": 200,
+            "total": 700,
+        },
+    )
 ```
 
-## 2. 创建 Trace
+**成本自动计算**：如果模型已在 **Settings → Models** 页配置了单价，Langfuse 会根据 token 用量自动计算成本。
 
-### 2.1 基础用法
+## 3. 嵌套规则与 OTel Context
+
+### 3.1 自动嵌套（同线程）
+
+在同一线程内，`with` 块自动嵌套：
+
+```python
+# 父 observation
+with langfuse.start_as_current_observation(name="parent", as_type="agent"):
+    # 子 observation 自动成为 parent 的子节点
+    with langfuse.start_as_current_observation(name="child", as_type="span"):
+        # 孙 observation
+        with langfuse.start_as_current_observation(name="grandchild", as_type="tool"):
+            pass
+```
+
+原理：SDK 基于 Python `contextvars` 管理当前 observation 的上下文，`with` 块的嵌套自动维护父子关系。
+
+### 3.2 手动嵌套（跨线程/异步）
+
+跨线程时 `contextvars` 不会自动传递，需要手动指定 `trace_context`：
+
+```python
+import threading
+
+# 主线程创建 trace
+with langfuse.start_as_current_observation(name="main", as_type="agent") as root:
+    trace_id = root.trace_id  # 获取当前 trace ID
+    parent_span_id = root.id  # 获取当前 span ID
+
+    def worker():
+        # 子线程手动指定 trace_context
+        with langfuse.start_as_current_observation(
+            name="worker-task",
+            as_type="tool",
+            trace_context={
+                "trace_id": trace_id,
+                "parent_span_id": parent_span_id,
+            },
+        ) as span:
+            do_work()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+```
+
+### 3.3 异步任务嵌套（asyncio）
+
+```python
+import asyncio
+
+async def main():
+    with langfuse.start_as_current_observation(name="main", as_type="agent") as root:
+        trace_id = root.trace_id
+
+        async def sub_task():
+            with langfuse.start_as_current_observation(
+                name="sub-task",
+                as_type="tool",
+                trace_context={"trace_id": trace_id},
+            ):
+                await asyncio.sleep(1)
+
+        # asyncio.gather 内的协程自动继承 contextvars
+        await asyncio.gather(sub_task(), sub_task())
+```
+
+> ⚠️ **注意**：`asyncio.gather` / `asyncio.create_task` 在 CPython 中会自动继承 `contextvars`，但 `threading.Thread` 不会。使用 `asyncio.to_thread()` 时也需要手动传递。
+
+### 3.4 OTel NonRecordingSpan 注入
+
+在复杂的 Agent 框架（如 DeepAgents/LangGraph）中，子 Agent 运行在独立的工作线程中，OTel context 可能丢失。解决方案是注入 `NonRecordingSpan`：
+
+```python
+from opentelemetry import trace as otel_trace
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+
+# 创建携带父 trace_id 的 NonRecordingSpan
+span_context = SpanContext(
+    trace_id=int(parent_trace_id.replace("-", ""), 16),
+    span_id=int(parent_span_id.replace("-", ""), 16),
+    is_remote=False,
+    trace_flags=TraceFlags(TraceFlags.SAMPLED),
+)
+non_recording = NonRecordingSpan(span_context)
+
+# 在子 Agent 执行前设置 context
+token = otel_trace.set_current_span(non_recording)
+try:
+    # 子 Agent 的 CallbackHandler 会在这个 context 下创建 observation
+    result = await sub_agent.ainvoke(input, config)
+finally:
+    otel_trace.get_current_span().end()
+```
+
+这是本项目中 `deepagents_async_config_patch.py` 的核心机制（详见 [08-NL2SQL 项目实践](08-NL2SQL项目实践.md)）。
+
+## 4. 创建 Trace 的完整示例
+
+### 4.1 多层嵌套 Agent
 
 ```python
 from langfuse import Langfuse
 
 langfuse = Langfuse()
 
-# 最外层 as_type="agent" 自动成为 trace 根
-with langfuse.start_as_current_observation(
-    name="my-agent",
-    as_type="agent",
-    input="用户的问题",
-    metadata={"source": "web"},
-    session_id="session-001",     # 多轮会话分组
-    user_id="user-42",            # 用户标识
-) as trace:
-    # 子步骤自动嵌套在这个 trace 下
+def multi_agent_pipeline(user_question: str):
+    """模拟一个多层 Agent 的完整执行"""
+
+    # ━━━ 最外层 = trace 根 ━━━
     with langfuse.start_as_current_observation(
-        name="step-1",
-        as_type="span",
-        input={"data": "..."},
-    ) as span:
-        result = process_data()
-        span.update(output=result)
-    
-    # 设置 trace 级别的输出
-    langfuse.set_current_trace_io(
-        input="用户的问题",
-        output="最终回答",
-    )
-
-langfuse.flush()
-```
-
-### 2.2 嵌套示例（多层 Agent）
-
-```python
-# 主 Agent
-with langfuse.start_as_current_observation(
-    name="main-agent", as_type="agent",
-    input=user_question,
-):
-    # 子 Agent 1：Schema 发现
-    with langfuse.start_as_current_observation(
-        name="schema-linking", as_type="agent",
-        input={"question": user_question},
+        name="orchestrator",
+        as_type="agent",
+        input=user_question,
+        session_id="session-001",
+        user_id="user-42",
+        metadata={
+            "db_name": "chinook",
+            "query_type": "aggregation",
+            "release": "v1.2.0",
+        },
     ):
-        # LLM 调用
+        # ━━━ 子 Agent 1：意图识别 ━━━
         with langfuse.start_as_current_observation(
-            name="llm-schema", as_type="generation",
-            model="gpt-4o",
-            input={"prompt": "识别涉及的表和字段..."},
-        ) as gen:
-            schema = call_llm("识别涉及的表和字段...")
-            gen.update(output=schema)
+            name="intent-classifier",
+            as_type="agent",
+            input={"question": user_question},
+        ) as intent_agent:
+            with langfuse.start_as_current_observation(
+                name="classify",
+                as_type="generation",
+                model="gpt-4o-mini",
+                input={"prompt": f"Classify intent: {user_question}"},
+            ) as gen:
+                intent = "data_query"
+                gen.update(output={"intent": intent, "confidence": 0.95})
+            intent_agent.update(output={"intent": intent})
 
-    # 子 Agent 2：SQL 生成
-    with langfuse.start_as_current_observation(
-        name="sql-generation", as_type="agent",
-        input={"question": user_question, "schema": schema},
-    ):
+        # ━━━ 子 Agent 2：SQL 生成 ━━━
         with langfuse.start_as_current_observation(
-            name="llm-sql", as_type="generation",
-            model="gpt-4o",
-            input={"prompt": f"基于 {schema} 生成 SQL..."},
-        ) as gen:
-            sql = call_llm(f"基于 {schema} 生成 SQL...")
-            gen.update(output=sql)
+            name="sql-generator",
+            as_type="agent",
+            input={"question": user_question, "intent": intent},
+        ) as sql_agent:
+            # Schema 检索
+            with langfuse.start_as_current_observation(
+                name="schema-retrieval",
+                as_type="retriever",
+                input={"query": user_question},
+            ) as ret:
+                schema = {"tables": ["artist"], "columns": ["name", "artistid"]}
+                ret.update(output={"documents": [str(schema)]})
 
-    # 工具调用：执行 SQL
-    with langfuse.start_as_current_observation(
-        name="execute-sql", as_type="tool",
-        input={"sql": sql},
-    ) as tool:
-        result = execute_sql(sql)
-        tool.update(output={"rows": len(result), "data": result[:5]})
+            # SQL 生成
+            with langfuse.start_as_current_observation(
+                name="sql-llm",
+                as_type="generation",
+                model="gpt-4o",
+                model_parameters={"temperature": 0},
+                input={"schema": schema, "question": user_question},
+            ) as gen:
+                sql = "SELECT COUNT(*) FROM artist"
+                gen.update(output=sql)
+            sql_agent.update(output=sql)
 
-langfuse.flush()
+        # ━━━ 工具调用：执行 SQL ━━━
+        with langfuse.start_as_current_observation(
+            name="execute-sql",
+            as_type="tool",
+            input={"sql": sql},
+        ) as tool:
+            result = {"rows": [{"count": 275}], "error": None}
+            tool.update(output=result, metadata={"execution_time_ms": 45})
+
+        # ━━━ 打分 ━━━
+        langfuse.score_current_trace(name="end-to-end-quality", value=0.9)
+        langfuse.set_current_trace_io(input=user_question, output=f"共 275 位艺术家")
+
+    langfuse.flush()
 ```
 
-在 Langfuse UI 中看到的结构：
+在 UI 中看到的 trace 树：
 
 ```
-main-agent (12.3s, $0.05)
-├── schema-linking (3.1s)
-│   └── llm-schema (generation, 2.8s, 800 tokens)
-├── sql-generation (5.2s)
-│   └── llm-sql (generation, 4.5s, 1200 tokens)
-└── execute-sql (tool, 1.1s)
+orchestrator (8.2s, $0.05)
+├── intent-classifier (1.2s)
+│   └── classify (generation, 0.8s, 150 tokens, gpt-4o-mini)
+├── sql-generator (4.5s)
+│   ├── schema-retrieval (retriever, 0.3s)
+│   └── sql-llm (generation, 3.8s, 800 tokens, gpt-4o)
+└── execute-sql (tool, 0.045s)
+Scores: end-to-end-quality = 0.9
 ```
 
-### 2.3 Trace ID 预生成
+## 5. 命名规范与最佳实践
 
-如果需要提前生成 trace ID（例如跨服务传递）：
+### 5.1 命名原则（来自 Langfuse 官方 Best Practices）
+
+> "Keep dynamic values out of names. A name should identify the operation, not a single execution of it."
+
+| 属性 | ✅ 放什么 | ❌ 不放什么 |
+|------|----------|-----------|
+| `name` | 操作标识（低基数） | 用户问题、ID、时间戳 |
+| `input` | 用户问题原文 | 原始 JSON blob |
+| `output` | 最终回答 | 全部中间结果 |
+| `metadata` | db_name、user_role | 敏感数据（PII） |
+| `tags` | 功能标签 | 高基数动态值 |
+
+### 5.2 命名建议
+
+| 层级 | 建议 | 好例子 | 坏例子 |
+|------|------|--------|--------|
+| Trace | Agent 名 / 操作类型 | `"chat-turn"` | `"user-asked-about-sales-at-3pm"` |
+| Generation | 描述 LLM 用途 | `"generate-sql"` | `"gpt4o-call"` |
+| Tool | 工具名 | `"execute-sql"` | `"tool-1"` |
+| Span | 步骤描述 | `"schema-linking"` | `"step-3"` |
+| Chain | 流程描述 | `"sql-pipeline"` | `"chain"` |
+
+### 5.3 Metadata 规范
 
 ```python
-# 预生成 trace ID
-tid = langfuse.create_trace_id()
+metadata = {
+    # ✅ 结构化、低基数
+    "db_name": "chinook",
+    "user_role": "analyst",
+    "query_type": "aggregation",
+    "complexity": "medium",
+    "prompt_version": "v12",
+    "model": "gpt-4o",
 
-# 在后续调用中使用
-with langfuse.start_as_current_observation(
-    name="downstream-service",
-    as_type="span",
-    trace_context={"trace_id": tid},
-):
-    pass
+    # ✅ 可筛选的分类信息
+    "skill_tags": ["nl2sql", "sql-of-thought"],
+    "tables_involved": ["artist", "album"],
+
+    # ❌ 不要放敏感数据
+    # "password": "...",
+    # "api_key": "...",
+
+    # ❌ 不要放超长文本
+    # "full_conversation_history": "... 100KB ...",
+}
 ```
 
-## 3. Session（会话分组）
-
-通过 `session_id` 将多个 trace 归组到同一个会话中：
+### 5.4 大文本处理
 
 ```python
-session_id = f"session-{user_id}-{conversation_id}"
+MAX_OUTPUT_CHARS = 8000
 
-# 第一轮
-with langfuse.start_as_current_observation(
-    name="chat-turn-1", as_type="agent",
-    session_id=session_id,
-    input="第一个问题",
-):
-    ...
-
-# 第二轮（同一 session）
-with langfuse.start_as_current_observation(
-    name="chat-turn-2", as_type="agent",
-    session_id=session_id,
-    input="第二个问题（追问）",
-):
-    ...
+def safe_output(result):
+    """截断超长输出，避免 trace 膨胀"""
+    text = str(result)
+    if len(text) > MAX_OUTPUT_CHARS:
+        return {
+            "truncated": True,
+            "preview": text[:MAX_OUTPUT_CHARS],
+            "total_chars": len(text),
+            "note": f"完整结果已落盘: vfs://large_results/{trace_id}",
+        }
+    return result
 ```
 
-在 **Sessions** 页面可以看到同一会话的所有 trace。
+## 6. flush() 的重要性
 
-## 4. Metadata 与 Tags
+### 6.1 为什么必须 flush
 
-### 4.1 Metadata（键值对）
+SDK 采用**批量异步上报**机制：trace 数据先缓存在内存中，按 `flush_interval`（默认 1s）和 `batch_size`（默认 100）批量发送到服务端。
 
-任意 JSON 可序列化的数据：
+**如果不调用 `flush()`**：
 
-```python
-with langfuse.start_as_current_observation(
-    name="query-agent", as_type="agent",
-    input=question,
-    metadata={
-        "db_name": "chinook",
-        "user_role": "analyst",
-        "query_type": "aggregation",
-        "tables_involved": ["artist", "album"],
-        "complexity": "medium",
-    },
-):
-    ...
-```
+- 程序正常退出 → 缓存中的数据**可能丢失**
+- 程序异常退出 → 缓存中的数据**一定丢失**
+- 短生命周期脚本 → 数据**大概率丢失**
 
-### 4.2 Tags（标签）
-
-用于分类和筛选：
+### 6.2 正确的 flush 方式
 
 ```python
-with langfuse.start_as_current_observation(
-    name="query-agent", as_type="agent",
-    input=question,
-    # tags 在最外层 trace 上设置
-):
-    # 通过 score 或 update 添加 tags
-    pass
-```
-
-### 4.3 动态更新
-
-```python
-with langfuse.start_as_current_observation(
-    name="my-span", as_type="span",
-) as span:
-    result = do_work()
-    # 运行过程中动态添加 metadata
-    span.update(metadata={"result_size": len(result), "cache_hit": True})
-```
-
-## 5. 最佳实践
-
-### 5.1 命名规范
-
-| 层级 | 建议 | 示例 |
-|------|------|------|
-| Trace | Agent 名称 | `"nl2sql-agent"`, `"report-builder"` |
-| Generation | 描述 LLM 用途 | `"generate-sql"`, `"summarize-result"` |
-| Tool | 工具名称 | `"execute-sql"`, `"search-knowledge"` |
-| Span | 步骤描述 | `"data-preprocessing"`, `"format-output"` |
-
-### 5.2 Input/Output 格式
-
-- **Input**：尽量结构化（dict），方便后续筛选和分析
-- **Output**：包含关键指标（如行数、错误信息）
-- **大文本**：截断到合理长度（建议 < 8000 字符），避免存储压力
-
-### 5.3 flush() 必调
-
-```python
-# ✅ 正确：with 块结束后立即 flush
-with langfuse.start_as_current_observation(...):
-    ...
+# ✅ 方式 1：显式 flush
 langfuse.flush()
 
-# ✅ 正确：程序退出前 flush
+# ✅ 方式 2：atexit 注册
 import atexit
 atexit.register(langfuse.flush)
 
-# ❌ 错误：忘记 flush → 数据丢失
-with langfuse.start_as_current_observation(...):
-    ...
-# 程序退出，数据未上报！
+# ✅ 方式 3：try-finally 保证
+try:
+    with langfuse.start_as_current_observation(...):
+        ...
+finally:
+    langfuse.flush()
+
+# ✅ 方式 4：context manager + flush
+from contextlib import contextmanager
+
+@contextmanager
+def traced_agent(name):
+    with langfuse.start_as_current_observation(name=name, as_type="agent") as obs:
+        yield obs
+    langfuse.flush()
 ```
 
-## 6. 下一步
+## 7. Trace ID 预生成与跨服务传递
+
+### 7.1 预生成 Trace ID
+
+```python
+# 在请求入口预生成
+trace_id = langfuse.create_trace_id()
+
+# 传递给下游服务
+headers = {"X-Trace-Id": trace_id}
+response = requests.post(downstream_url, headers=headers, json=payload)
+
+# 在下游服务中使用
+with langfuse.start_as_current_observation(
+    name="downstream-service",
+    as_type="span",
+    trace_context={"trace_id": trace_id},
+):
+    process_request()
+```
+
+### 7.2 HTTP 传播
+
+```python
+# 上游：注入 trace context 到 HTTP header
+from opentelemetry.propagate import inject
+
+headers = {}
+inject(headers)
+response = requests.post(url, headers=headers)
+
+# 下游：从 HTTP header 提取 trace context
+from opentelemetry.propagate import extract
+
+ctx = extract(request.headers)
+with langfuse.start_as_current_observation(
+    name="downstream",
+    as_type="span",
+    trace_context=ctx,
+):
+    ...
+```
+
+## 8. 下一步
 
 - [04-评估与打分](04-评估与打分.md)：学习如何为 trace 添加评分
 - [08-NL2SQL 项目实践](08-NL2SQL项目实践.md)：查看本项目的 Trace 嵌套方案
+- [09-LangChain 集成](09-LangChain集成.md)：LangChain/LangGraph 自动追踪

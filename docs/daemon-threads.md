@@ -57,7 +57,9 @@ grep -rn "threading.Thread(" src/ --include="*.py" | grep -v "^src/test/"
 | 常量 | 值 | 含义 |
 |------|-----|------|
 | `POST_COMPLETE_MAX_CYCLES` | 20 | 完成后继续监控 10s（20×0.5s）让耗时稳定 |
-| `STALE_RUN_TIMEOUT` | 600 | 子 run 跑超 10min 视为卡死，强制结束 |
+| `STALE_RUN_TIMEOUT` | 600 | **无进展**持续 10min 视为卡死（2026-10-16 起改成停滞口径，不再按「跑了多久」） |
+| `ABSOLUTE_RUN_TIMEOUT` | 3600 | 单条 run 总时长上限 1h（兜死循环/无限重写；停滞判据之外的第二道） |
+| `STALL_PROBE_EVERY_CYCLES` | 8 | 进展探针间隔（8×0.5s=4s；探针要 `get_state`，别每轮都探） |
 | `INTERRUPTED_STUCK_TIMEOUT` | 120 | 子 run 停在 `interrupted` 超 2min 视为卡死 |
 | `COMPLETE_WRITE_MAX_SECONDS` | 300 | 完成态写入重试上限（主线程持续 in-flight 时放手） |
 | `REGRESSION_GUARD_MAX_SECONDS` | 900 | 终态被陈旧快照打回后，最多再守 15min |

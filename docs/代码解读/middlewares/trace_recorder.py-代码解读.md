@@ -1,46 +1,98 @@
-# trace_recorder.py 代码解读
+# trace_recorder.py — TraceRecorderMiddleware 代码解读
 
-> 文件路径：`src/agent/middlewares/trace_recorder.py`（195 行）
-> 解读日期：2026-09-18
+> 源文件：`src/agent/middlewares/trace_recorder.py`
+> 类别：**可观测性**
+> 挂载点：`wrap_model_call` + `wrap_tool_call`（最外层）
 
-## 一句话概括
+## 1. 解决的问题
 
-`TraceRecorderMiddleware`：本地自包含追踪——在模型/工具调用边界把事件写入 SQLite EventStore（`agent.trace.store`），生产不依赖 LangSmith/Langfuse 也能回溯 agent 执行过程；并负责**子 agent 谱系登记**（SUBAGENT_SPAWN）。挂载在中间件链**最外层**。
+本地自包含追踪：事件写 EventStore（SQLite），生产无 LangSmith/Langfuse 仍可回溯。与 Langfuse 互补——Langfuse 是云端遥测，TraceRecorder 是本地黑匣子。
 
-## 事件采集
+## 2. 核心机制
 
-### `wrap_model_call` → LLM_CALL_START / END / ERROR
-- START：model 类名、messages 数、tools 数；
-- END：duration_ms、input/output/total tokens（从响应 AIMessage 的 `usage_metadata` 提取）、message_count；
-- 异常：记 LLM_CALL_ERROR（含 error_type + message）后**原样上抛**。
+### 2.1 wrap_model_call
 
-### `wrap_tool_call` → TOOL_CALL_START / END
-- START：tool 名、args 摘要（截 200 字符）；
-- 结果摘要 `_summarize_result`：ToolMessage 取 content 前 200；**Command 型返回值**（如 `start_async_task` 返回 Command）取 `update` 的 keys 列表。
+```
+LLM_CALL_START（模型名 / 消息数）
+    → handler(request) 执行 LLM 调用
+    → LLM_CALL_END（耗时 / usage）
+异常 → ERROR 事件后上抛
+```
 
-## 子 agent 谱系登记（核心增值）
+### 2.2 wrap_tool_call
 
-检测 `start_async_task`：从 `Command.update["async_tasks"]` 提取每个子任务的 `thread_id` / `task_instructions`，然后：
-1. 记 **SUBAGENT_SPAWN** 事件（subagent_thread_ids + 任务指令截 200）；
-2. `upsert_lineage(sub_thread_id, main_thread_id, task_instructions)` 建立**父子线程谱系**——后续按子线程 id 即可回溯到主会话。
+```
+TOOL_CALL_START（工具名 / 参数摘要 ≤200 字符）
+    → handler(request) 执行工具
+    → TOOL_CALL_END（结果摘要）
+```
 
-## thread_id 策略
+**特殊检测**：`start_async_task` 工具——从返回的 `Command.update.async_tasks` 提取子 thread_id：
 
-wrap_tool_call 拿不到 model request，无法直接取 state：
-- LLM 调用时缓存 `_cached_thread_id`（来自 `request.state["messages"]` 最后一条消息的 `thread_id`）；
-- 工具调用时**复用该缓存**；
-- parent_thread_id 读 `configurable.trace_parent_thread_id`（deepagents_async_config_patch 注入——子 agent 事件中区分主/子线程）。
+- 记 `SUBAGENT_SPAWN` 事件
+- `upsert_lineage` 建立父子线程谱系
 
-## 与 TokenMeter 的分工（防双写）
+### 2.3 事件类型
 
-**不写 `state.token_stats`**——token 统计统一由 TokenMeterMiddleware 写 state（实测双写导致 reducer 累加重复、统计翻倍），本中间件**只记事件**（token 用量进事件 data 供回溯）。
+| 事件 | 触发 | 记录内容 |
+|---|---|---|
+| `LLM_CALL_START` | 模型调用前 | 模型名、消息数、thread_id |
+| `LLM_CALL_END` | 模型调用后 | 耗时(ms)、input/output tokens |
+| `TOOL_CALL_START` | 工具调用前 | 工具名、参数摘要 |
+| `TOOL_CALL_END` | 工具调用后 | 结果摘要、耗时 |
+| `ERROR` | 任何异常 | 异常类型、消息 |
+| `SUBAGENT_SPAWN` | 子 agent 创建 | 父 thread_id、子 thread_id |
 
-## 容错
+### 2.4 thread_id 策略
 
-`_record_event` 全程 try/except，记录失败只 warning（`[TraceRecorder]`），绝不影响 agent 执行。
+- LLM 调用时缓存 `_cached_thread_id`（从 `configurable` 读取）
+- 工具调用复用它（`wrap_tool_call` 拿不到 model request 的 configurable）
+- `parent_thread_id` 读 `configurable.trace_parent_thread_id`（deepagents patch 注入）
 
-## 关联文件
+### 2.5 参数摘要
 
-- `agent/trace/store.py`：EventStore / upsert_lineage
-- `token_meter.py`：token 写 state 的唯一出口
-- `deepagents_async_config_patch.py`：trace_parent_thread_id 注入方
+工具调用参数超 200 字符时截断：
+
+```python
+summary = json.dumps(args, ensure_ascii=False)
+if len(summary) > 200:
+    summary = summary[:197] + "..."
+```
+
+## 3. 关键设计决策
+
+### 3.1 不写 state.token_stats
+
+避免与 TokenMeter 双写导致 reducer 累加重复（实测翻倍）。职责分明：
+
+- TokenMeter → 写 state（前端展示）
+- TraceRecorder → 写 SQLite（本地追踪）
+
+### 3.2 为什么挂载在最外层
+
+- 最外层 = 最先启动、最后结束
+- 能记录所有内层中间件的耗时（包括 Langfuse span 的开销）
+- 异常不会被内层中间件吞掉
+
+### 3.3 为什么用 SQLite 而非日志文件
+
+- SQLite 支持查询（按 thread_id 过滤、按时间范围）
+- 结构化数据比文本日志更易分析
+- 与 EventStore 共用同一个 SQLite 文件
+
+## 4. 与 Langfuse 的关系
+
+| 维度 | TraceRecorder | Langfuse |
+|---|---|---|
+| 存储 | 本地 SQLite | 云端 |
+| 粒度 | 每次 LLM/tool 调用 | skill 级 span |
+| 评分 | 无 | 五维评分 |
+| 用途 | 本地调试、离线回溯 | 生产监控、评估 |
+
+两者并行运行，互不依赖。
+
+## 5. 错误处理
+
+- EventStore 写入失败 → 记 warning，不影响主流程
+- configurable 读取失败 → thread_id 记为 "unknown"
+- handler 抛异常 → 记 ERROR 事件后原样上抛
