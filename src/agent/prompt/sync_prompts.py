@@ -5,14 +5,26 @@ Langfuse UI 编辑 prompt 是版本管理的入口；本脚本负责「本地文
 初始化/同步，保证云端与磁盘基线一致，之后改动一律在 Langfuse UI 完成（打标签即发版）。
 
 用法（PYTHONPATH=src，脚本自载项目 .env）：
-    python -m agent.prompt.sync_prompts --all                          # 同步主/子两个 system prompt
-    python -m agent.prompt.sync_prompts --name main_system_prompt      # 同步单个（默认文件映射）
-    python -m agent.prompt.sync_prompts --name main_system_prompt --file prompt/MAIN_AGENT_PROMPT.md
-    python -m agent.prompt.sync_prompts --name X --file Y --label staging --commit "..."   # 打 staging 标签
-    python -m agent.prompt.sync_prompts --all --force                  # 内容未变也强制新版本
-    python -m agent.prompt.sync_prompts --skills                       # M6：同步全部 14 个 SKILL.md
-    python -m agent.prompt.sync_prompts --skills --label staging       # skill 打 staging 标签（A/B）
-    python -m agent.prompt.sync_prompts --all --skills                 # 两个渠道一起推（可组合）
+    python -m agent.prompt.sync_prompts --env dev  --all               # 推到 dev 34 的 Langfuse
+    python -m agent.prompt.sync_prompts --env prod --all               # 推到 prod 64 的 Langfuse
+    python -m agent.prompt.sync_prompts --env dev --name main_system_prompt
+    python -m agent.prompt.sync_prompts --env prod --name X --file Y --label staging --commit "..."
+    python -m agent.prompt.sync_prompts --env prod --all --force       # 内容未变也强制新版本
+    python -m agent.prompt.sync_prompts --env dev  --skills            # M6：同步全部 SKILL.md
+    python -m agent.prompt.sync_prompts --env dev  --all --skills      # 两个渠道一起推（可组合）
+
+⚠️ `--env` **必填**：不传直接失败，绝不猜目标。解析出的 `LANGFUSE_BASE_URL` 还必须与
+所选环境的主机一致（dev→192.168.25.34，prod→192.168.25.64），否则同样失败——防止
+「以为推 dev、实际推生产」。
+
+环境文件：**每个环境只读自己那一份**，都不加载 `.env` 基线——
+`--env dev` → `.env.dev`，`--env prod` → `.env.prod`。
+凭据可按环境显式覆盖（优先级最高，shell export 或写进对应环境文件）：
+
+    LANGFUSE_DEV_BASE_URL / LANGFUSE_DEV_PUBLIC_KEY / LANGFUSE_DEV_SECRET_KEY
+    LANGFUSE_PROD_BASE_URL / LANGFUSE_PROD_PUBLIC_KEY / LANGFUSE_PROD_SECRET_KEY
+
+三项必须齐全；只配一部分也算配置错误（会被当成「误把生产凭据推去 dev」拦下）。
 
 ⚠️ 本脚本**不在发版脚本里** —— 发版只换 `/app/src`，而运行期提示词取自 Langfuse、
 运行期技能取自 `<AGENT_DATA_ROOT>/shared/skills`。所以「改 prompt / 改 SKILL.md」这类修复，
@@ -27,11 +39,30 @@ trace metadata.skills 会带 Langfuse 解析版本 + source 标记（见 skill_m
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 # 项目根：src/agent/prompt/ → 上溯 3 层
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# 环境 -> 目标。`host` 是硬判据：解析出的 LANGFUSE_BASE_URL 主机必须与之一致，否则拒绝上传。
+_ENV_SPEC = {
+    "dev": {
+        "host": "192.168.25.34",
+        "env_file": ".env.dev",
+        "title": "dev 34",
+    },
+    "prod": {
+        "host": "192.168.25.64",
+        "env_file": ".env.prod",
+        "title": "prod 64",
+    },
+}
+
+# 按环境显式覆盖的三件套（本机 .env 里配，优先级最高）
+_CRED_SUFFIXES = ("BASE_URL", "PUBLIC_KEY", "SECRET_KEY")
 
 # 默认 prompt 名 → 本地文件（相对项目根）
 _DEFAULT_FILES = {
@@ -40,19 +71,68 @@ _DEFAULT_FILES = {
 }
 
 
-def _load_env() -> None:
-    """加载项目根 env（幂等；langfuse 密钥/开关都在这）。
-
-    生产部署在容器（env_file: .env.prod 注入）；宿主机/本机手动跑时统一由
-    agent.settings.env_loader 叠加 .env.prod 的 LANGFUSE_*（生产项目凭据）。
-    """
+def _die(msg: str) -> None:
+    # 可能早于 main() 的 stdout 重配（如被其他脚本直接 import 调用），先兜住 GBK 控制台
     try:
-        from agent.settings.env_loader import load_env
-        load_env()
-    except Exception as e:  # 捕获异常对象 e
-        import logging
-        # 打印出具体的错误类型和原因，这是排查问题的关键
-        logging.error(f"Failed to load .env.prod file. Error: {e}", exc_info=True)
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+    print(msg, flush=True)
+    sys.exit(1)
+
+
+def _load_env(env: str) -> None:
+    """按所选环境加载 env，再叠加该环境的显式凭据覆盖。
+
+    **每个环境只读自己那一份文件**，互不叠加、都不加载 `.env` 基线：
+    - `dev`  → `.env.dev`
+    - `prod` → `.env.prod`
+
+    `override=False`：启动前已注入的真实 env（shell export / 容器 env_file）恒优先，
+    文件只填缺。
+    """
+    from dotenv import load_dotenv
+
+    env_file = _PROJECT_ROOT / _ENV_SPEC[env]["env_file"]
+    if not env_file.is_file():
+        _die(f"  ✗ --env {env} 需要 {env_file}，文件不存在")
+    load_dotenv(env_file, override=False)
+
+    # per-env 三件套：写在环境文件加载之后，才能盖过文件里的同名变量
+    prefix = f"LANGFUSE_{env.upper()}_"
+    overrides = {s: (os.environ.get(prefix + s) or "").strip().strip('"') for s in _CRED_SUFFIXES}
+    given = {s: v for s, v in overrides.items() if v}
+    if given and len(given) != len(_CRED_SUFFIXES):
+        missing = [prefix + s for s in _CRED_SUFFIXES if not given.get(s)]
+        _die(f"  ✗ {prefix}* 配置不完整，缺少：{', '.join(missing)}（三项必须齐全）")
+    for suffix, value in given.items():
+        os.environ["LANGFUSE_" + suffix] = value
+
+
+def _assert_target(env: str) -> None:
+    """上传前的硬闸：目标主机必须与所选环境一致，凭据必须齐全。
+
+    这一闸挡的是「--env dev 但 .env.dev 里写的还是生产地址」——只切 DEPLOY_ENV
+    不做校验时，脚本会静默把 dev 的 prompt 推到生产 Langfuse。
+    """
+    spec = _ENV_SPEC[env]
+    base = (os.environ.get("LANGFUSE_BASE_URL") or "").strip().strip('"')
+    host = urlparse(base).hostname or ""
+    if not base or host != spec["host"]:
+        _die(
+            f"  ✗ 目标校验失败：--env {env} 期望 {spec['title']}（host={spec['host']}），"
+            f"实际 LANGFUSE_BASE_URL={base or '(未设置)'}\n"
+            f"    修法（二选一）：\n"
+            f"      1) shell 里 export 三项（或写进 {spec['env_file']}）：\n"
+            f"         LANGFUSE_{env.upper()}_BASE_URL=http://{spec['host']}:3010\n"
+            f"         LANGFUSE_{env.upper()}_PUBLIC_KEY=...\n"
+            f"         LANGFUSE_{env.upper()}_SECRET_KEY=...\n"
+            f"      2) 修正 {spec['env_file']} 里被写成其他环境的 LANGFUSE_BASE_URL / 凭据"
+        )
+    missing = [k for k in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY") if not os.environ.get(k)]
+    if missing:
+        _die(f"  ✗ 缺少凭据：{', '.join(missing)}（--env {env}）")
+    print(f"  · 目标 = {spec['title']}  {base}", flush=True)
 
 
 def _get_client():
@@ -143,8 +223,13 @@ def main(argv: list[str] | None = None) -> None:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         pass
-    _load_env()
-    ap = argparse.ArgumentParser(description="同步本地 prompt 到 Langfuse")
+    ap = argparse.ArgumentParser(description="同步本地 prompt 到 Langfuse（--env 必填）")
+    ap.add_argument(
+        "--env",
+        required=True,
+        choices=sorted(_ENV_SPEC),
+        help="目标环境（必填）：dev=34 / prod=64；不传直接失败，不做默认猜测",
+    )
     ap.add_argument("--all", action="store_true", help="同步所有默认 prompt")
     ap.add_argument("--name", default="", help="prompt 名（默认映射 main_system_prompt / nl2sql_system_prompt）")
     ap.add_argument("--file", default=None, help="本地 prompt 文件（相对项目根或绝对路径）")
@@ -153,6 +238,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--commit", default="", help="本次变更说明")
     ap.add_argument("--force", action="store_true", help="内容未变也强制新版本")
     args = ap.parse_args(argv)
+
+    # 先定目标再碰网络：_load_env 按 --env 选文件，_assert_target 不一致就退出
+    _load_env(args.env)
+    _assert_target(args.env)
 
     # ⚠️ 这三个开关**必须各自独立判断**，不能写成 if/elif 链：写成链时
     # `--all --skills` 会静默丢掉 `--all`（只跑 skills，system prompt 一个都不推），
