@@ -1,5 +1,5 @@
 ---
-version: 0.1.2
+version: 0.1.3
 name: wren-orchestrator
 description: "触发：基于 WrenAI 语义库的自然语言数据问题（官方 SOP 通道）。按 6 步单循环编排：五路并行取料 → 用户澄清 → 具名指标判路由 → 生成（query_cube / 手写）→ dry_run 修正 → SQL 性能优化 → run_sql → 输出答案。store_query 记忆回写**不在循环内**（由 FeedbackStore 桥接异步执行）。不预设子问题分解，复杂时临时拆分。"
 ---
@@ -8,7 +8,7 @@ description: "触发：基于 WrenAI 语义库的自然语言数据问题（官�
 
 ## 概述
 
-WrenAI 官方 `wren_workflow`（`mcp_server.py:622-644`）的落地编排，加入两个本项目扩展步骤：**用户澄清**（步骤2）与 **SQL 性能优化**（步骤5）。哲学不变：**单 Agent、工具优先、循环式**。`query_cube` 在**cube 已声明的 measure / dimensions / time_dimensions 范围内是硬车道**：只要问题要的口径在 cube 里有具名指标，必须走 `wren-metric-query`，手写出等价 SQL 也算违规；只有 cube 表达不了（行级明细 / 窗口函数 / 跨 cube 关联 / 未声明维度）才转手写，且须写明原因。官方第 6 步的 `store_query` 回写**移出会话循环**：对错判定交给 FeedbackStore 桥接体系（用户👍=L1、人工金标=L2）异步执行，杜绝 LLM 自评污染 `knowledge/sql/*.md`。
+WrenAI 官方 `wren_workflow`（`mcp_server.py:622-644`）的落地编排，加入两个本项目扩展步骤：**用户澄清**（步骤2）与 **SQL 性能优化**（步骤5）。哲学不变：**单 Agent、工具优先、循环式**。`query_cube` 在**cube 已声明的 measure / dimensions / time_dimensions 范围内是硬车道**：只要问题要的口径在 cube 里有具名指标，必须走 `wren-metric-query`，手写出等价 SQL 也算违规；整体降级手写只允许「降级硬规则」两种情形（query_cube 实调失败 / 记录级逐条清单，见下），且答复须写明情形。官方第 6 步的 `store_query` 回写**移出会话循环**：对错判定交给 FeedbackStore 桥接体系（用户👍=L1、人工金标=L2）异步执行，杜绝 LLM 自评污染 `knowledge/sql/*.md`。
 
 ## 能力 skill 清单
 
@@ -33,8 +33,8 @@ skill_sop/
  └─(3) 判路由（本文件执行，零工具调用）：
         具名指标三条件全满足      → **必须** wren-metric-query（纯 Cube）
         ①②满足、③维度缺          → wren-metric-query 出主体 + wren-sql-author 包外层（混合）
-        measure 匹配不上 / cube   → wren-sql-author（手写，答复须写明 cube 为何表达不了）
-        表达不了（见下）
+        measure 匹配不上 / cube   → wren-sql-author（手写，须满足「降级硬规则」
+        表达不了（见下）             并在答复写明情形）
  └─(4) dry_run → 失败即改（回对应能力修，≤3 次）
  └─(5) wren-perf-optimize：规则集检测 + 语义不变优化；改过必重 dry_run
  └─(6) wren-execution：run_sql(sql, limit=N)；正文不写 LIMIT → 输出答案
@@ -64,6 +64,20 @@ skill_sop/
 ⚠️ 轴区间的 `end` 是**开区间上界**（编译成 `>= start AND < end`）：要含 9/30 必须传 `2026-10-01`，传 `2026-09-30` 会静默丢掉 9/30 一整天。详见 `wren-metric-query`。
 
 `describe_cube` 是**执行前的参数确认**（拿 measures / time_dimensions 的名字去组 `query_cube` 参数），**不是**口径词典、**不是**手写 SQL 的表达式来源。
+
+## 降级硬规则（整体降级手写 SQL 仅此两种情形）
+
+答复必须写明命中哪一种情形：
+
+- **(a) 实调失败**：`query_cube` 被**实际调用**且失败——答复附报错原文。不允许以 `describe_cube` 输出「预判它会失败」代替实调。
+- **(b) 记录级逐条清单**：需求明确要求**逐条列出报工/订单等记录明细**（如需 id / create_time 等 cube 未声明列，或同日多条记录须保留不合并）——cube 输出 = GROUP BY 聚合，天然给不了逐条清单。
+
+两条禁令：
+
+- **禁止未试先降**：除 (b) 外，未实际调用 `query_cube` 就直接手写 SQL = 违规（上面的「豁免理由」清单同样适用）。
+- **禁止转述能力**：凡断言「cube 不支持某维度 / 某粒度 / 底座是聚合数据」，必须**逐字引用** `describe_cube`（或取料包结构轴）返回的 measures / dimensions / time_dimensions(levels) 原文；转述、凭印象的结论一律无效——**底座是视图 ≠ 聚合数据**（视图是行级明细，聚合发生在 query_cube 的 GROUP BY）。
+
+部分能力缺口（窗口函数、cube 外补维度、跨 cube 关联）走**混合路径**（cube 出主体 + 手写外层），**不是**整体降级理由。
 
 ## 铁律
 

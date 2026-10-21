@@ -1,5 +1,5 @@
 ---
-version: 0.1.0
+version: 0.1.1
 name: wren-sql-author
 description: "触发：非指标路径或混合路径。基于取料包（结构+范例+规则+知识）手写项目方言 SQL；混合场景以 query_cube 编译结果为子查询/CTE 底座外层补维度。dry_run 失败即改，≤3 次。只生成 SELECT 只读查询。"
 ---
@@ -16,6 +16,7 @@ description: "触发：非指标路径或混合路径。基于取料包（结构
 
 ## 硬约束
 
+- **降级入口闸**：整体降级到本 skill 只接受两种情形——**(a)** `query_cube` 被实际调用且失败（作答附报错原文）/ **(b)** 需求明确要求记录级逐条清单（如需 id / create_time 等 cube 未声明列）。作答必须写明命中哪一种；**禁止未试先降**；对 cube 能力的断言（不支持哪些维度/粒度、底座性质）必须逐字引用 `describe_cube` 返回原文，**禁止转述**——底座是视图 ≠ 聚合数据（详见 wren-orchestrator「降级硬规则」）。
 - **只读**：仅 `SELECT` / `WITH ... SELECT`。
 - **正文不写 LIMIT**：top-N 用 `ORDER BY`，行数由编排器 `run_sql(sql, limit=N)` 控制（服务端默认 1000、硬上限 10000，自带 LIMIT 会双重语法错误）。
 - **时间边界**：相对时间词必须解析成方言字面量（日期函数保持方言一致）。
