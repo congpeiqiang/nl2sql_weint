@@ -414,8 +414,17 @@ def create_model(
         base_url=base_url,
         model=resolved_model,
         temperature=temperature,
-        timeout=60,
-        max_retries=3,
+        # timeout：SDK 单次尝试的读超时（流式=chunk 间隔上限）。原 60s 对思考型
+        # 模型 + 大上下文系统性过紧（2026-10-21 事故：qwen3.8-max 子线程 46 条
+        # 消息，首字 >60s，两轮共 8 次尝试全超时，任务终态 timeout）。
+        # max_retries 必须同步降为 0：单次模型调用的最坏时长 =
+        # (max_retries+1)×timeout，必须 < 看门狗 STALE_RUN_TIMEOUT=600s
+        # （sync_subagent_todos.py），否则友好超时文案还没落地就被看门狗按
+        # 「无进展」打死（interrupted）。300×1=300s 安全；60×4=240s 是旧上限。
+        # 瞬时故障的韧性不丢：ModelTimeoutMiddleware 仍对连接类/空流做带退避
+        # 重试（P3-4），timeout 类则立即转友好文案（不重试，重试也大概率再超时）。
+        timeout=300,
+        max_retries=0,
     )
     if max_tokens is not None:
         common_kwargs["max_tokens"] = max_tokens
