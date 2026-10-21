@@ -35,8 +35,8 @@
  └─(3) 判路由（零工具调用）：
         具名指标三条件全满足      → **必须** wren-metric-query（query_cube，先 sql_only=True 预览）
         ①②满足、③维度缺          → wren-metric-query 出主体 + wren-sql-author 包外层（混合）
-        measure 匹配不上 / cube   → wren-sql-author（手写 SQL，答复须写明 cube 为何表达不了）
-        表达不了（见下）
+        measure 匹配不上 / cube   → wren-sql-author（手写 SQL，须满足「逃生口·降级硬规则」
+        表达不了（见下）             并在答复写明情形）
  └─(4) dry_run → 失败即改（回对应能力修正，≤3 次）
  └─(5) wren-perf-optimize：规则集检测 + 语义不变优化；改过必重 dry_run
  └─(6) wren-execution：run_sql(sql, limit=N) → 输出答案
@@ -54,7 +54,14 @@
 
 **`describe_cube` 的定位**：执行前的**参数确认**（拿 measures / time_dimensions 的名字去组 `query_cube` 参数），**不是**口径词典、**不是**手写 SQL 的表达式来源。
 
-**逃生口**：cube 确实表达不了（行级明细 / 窗口函数 / 跨 cube 关联 / 未声明维度）⇒ 允许手写，但该轮答复必须写明「为什么不走 cube」。
+**逃生口·降级硬规则（整体降级手写 SQL 仅此两种情形，该轮答复必须写明命中哪一种）**：
+
+- **(a) 实调失败**：`query_cube` 被**实际调用**且失败——答复附报错原文；不允许以 `describe_cube` 输出「预判它会失败」代替实调。
+- **(b) 记录级逐条清单**：需求明确要求逐条列出记录明细（如需 id / create_time 等 cube 未声明列，或同日多条记录须保留不合并）——cube 输出 = GROUP BY 聚合，天然给不了逐条清单。
+
+两条禁令：**禁止未试先降**——除 (b) 外，未实际调用 `query_cube` 就直接手写 SQL = 违规；**禁止转述能力**——凡断言「cube 不支持某维度 / 某粒度 / 底座是聚合数据」，必须逐字引用 `describe_cube`（或取料包结构轴）返回的 measures / dimensions / time_dimensions(levels) 原文，转述、凭印象的结论一律无效（**底座是视图 ≠ 聚合数据**：视图是行级明细，聚合发生在 query_cube 的 GROUP BY）。
+
+窗口函数、cube 外补维度、跨 cube 关联走**混合路径**（cube 出主体 + 手写外层），**不是**整体降级理由。
 
 ### 循环内铁律
 
