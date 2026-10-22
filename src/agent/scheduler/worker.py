@@ -373,6 +373,9 @@ async def _fire(
             "langgraph_auth_user_id": row["owner"],
             "user_id": row["owner"],
             "db_name": row["db_name"],
+            # 定时 run 标记：主 agent 的 HITL 审批闸门据此跳过审批——后台 run 无人
+            # 值守，interrupt 会被 langgraph 顶层图抑制（工具不执行、也没有卡片可点）。
+            "scheduled_run": True,
         }
         if row["llm_route"]:
             configurable["llm_route"] = row["llm_route"]
@@ -448,6 +451,14 @@ async def _reconcile_task(
         client = client if client is not None else _make_client()
         runs = await client.runs.list(thread_id=rtid, limit=5)
     except Exception as exc:
+        # 会话被用户删了（langgraph DELETE 只删注册表行，不 cancel run）：这是
+        # 确定性结论，不是瞬时故障 —— 立刻收口清 running_thread_id。否则
+        # `due_tasks`（只选 running_thread_id=''）会一直跳过这个任务，要等
+        # RECONCILE_GIVEUP_S=70min 超龄才恢复。语义：删会话只取消这一次 run，
+        # **下次定时照跑**。
+        if is_thread_gone(exc):
+            _give_up(f"会话已删除（run 查询 {type(exc).__name__}），本次按取消处理")
+            return
         if stale:
             _give_up(f"run 查询失败且在飞超龄（thread 可能被删）: {exc}")
             return

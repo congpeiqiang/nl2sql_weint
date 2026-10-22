@@ -37,6 +37,7 @@ import api.report_file  # noqa: E402
 import api.sql_approval  # noqa: E402
 import api.task_cancel  # noqa: E402
 import api.thread_compact  # noqa: E402
+import api.thread_delete  # noqa: E402
 import api.thread_export  # noqa: E402
 import api.thread_fork  # noqa: E402
 import api.thread_run_status  # noqa: E402
@@ -70,6 +71,7 @@ ROUTES: list[BaseRoute] = [
     *api.sql_approval.routes,
     *api.task_cancel.routes,
     *api.thread_compact.routes,
+    *api.thread_delete.routes,     # 删会话 = 取消这次 run + 删注册表（定时下轮照跑）
     *api.thread_export.routes,
     *api.thread_fork.routes,
     *api.thread_run_status.routes,

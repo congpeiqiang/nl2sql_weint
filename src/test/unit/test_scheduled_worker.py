@@ -447,6 +447,35 @@ class TestReconcile:
         asyncio.run(worker._reconcile_task(tid, store=store, now=NOW))
         assert store.get_task(tid)["running_thread_id"] == ""
 
+    def test_reconcile_thread_deleted_gives_up_immediately(self, store, monkeypatch):
+        """会话被用户删（runs.list 抛 NotFoundError）⇒ **立刻**收口，不等在飞超龄。
+
+        语义：删会话只取消「这一次」run，下次定时照跑。而 `due_tasks` 只选
+        `running_thread_id=''` 的行 —— 不收口的话 20 分钟周期的任务要连跳三轮
+        （等 RECONCILE_GIVEUP_S=70min 超龄），恰恰违反这个语义。
+        """
+
+        class NotFoundError(Exception):
+            pass
+
+        client = FakeClient()
+
+        async def _gone(thread_id=None, limit=None):
+            raise NotFoundError(f"thread {thread_id} not found")
+
+        client.runs.list = _gone
+        monkeypatch.setattr(worker, "_make_client", lambda: client)
+        tid = _row(store)
+        store.claim(tid, "2026-01-01T11:00:00+00:00", "2026-01-01T13:00:00+00:00", NOW_ISO)
+        store.set_running_thread(tid, "th-1", "run-1")
+        store.record_run(tid, "th-1", "run-1", NOW_ISO)
+        store.update_task(tid, {"updated_at": NOW_ISO})  # 新鲜：按超龄判据本会 return
+        asyncio.run(worker._reconcile_task(tid, store=store, now=NOW))
+        row = store.get_task(tid)
+        assert row["running_thread_id"] == "", "线程被删必须立刻收口，否则后续定时轮次全被跳过"
+        assert row["last_status"] == "interrupted"
+        assert store.list_runs(tid)[0]["status"] == "interrupted"
+
     def test_reconcile_nonterminal_stale_gives_up(self, store, monkeypatch):
         """run 长期非终态（看门狗也失灵）+ 超龄 → 按 interrupted 收口，防永久卡死。"""
         client = FakeClient(runs_list=[{"run_id": "run-1", "status": "running"}])
