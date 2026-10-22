@@ -11,6 +11,10 @@
 #   2) 校验产物 BUILD_ID 本地 == 服务器（不一致直接失败）；
 #   3) 构建失败不再被 `| tail -3` 吃掉退出码（原写法 `$?` 是 tail 的 0）；
 #   4) 验证步骤比对 http_code，非 200 直接 throw（不再无条件打印 OK）。
+# 2026-10-22 加固（事故：355 片 scp 全回 0，服务器拼出的 tar 少 13,312 字节 ⇒ tar -xf
+#   rc=2，却被报成「镜像构建失败」且日志是上一版内容）：
+#   5) 上传后、**删除 .next 之前**做整包 md5 对账（定式同 release-backend-bluegreen.ps1）；
+#   6) 失败信息区分「分片损坏 / 真构建失败」，并提示日志可能没被覆盖。
 # 2026-09-22 合并分片上传逻辑（原 docs/prod环境 版本），解决 VPN 链路大文件断传。
 # 2026-10-05（档 1）：`up -d` **不再带 nginx**（改由 nginx 的请求期解析自己发现新前端 IP，
 #   见 docker/nginx.conf）；验证从「盲等 15s + 打一次 /」改成**轮询 / 到 200**，并追加两发
@@ -64,7 +68,14 @@ if (Test-Path $tarPath) { Remove-Item $tarPath }
 tar -cf $tarPath --exclude=.next/cache -C $LocalRoot .next public package.json yarn.lock
 if ($LASTEXITCODE -ne 0) { throw "打包失败" }
 $tarMB = [math]::Round((Get-Item $tarPath).Length/1MB,2)
-Write-Host "   打包完成：$tarMB MB"
+# 2026-10-22 加固：分片上传只信 scp 退出码是不够的 —— 本次实测 355 片全部回 0，
+# 服务器上拼出来的 tar 却比本地少 13,312 字节（tar -tf rc=2，解出 616/1977 个文件），
+# 而脚本把失败报成了「前端镜像构建失败」，日志里还是上一版的旧内容（docker-compose
+# build 根本没执行到 ⇒ /tmp/fe_build.log 没被覆盖，不能拿它判本次失败）。
+# 定式与 release-backend-bluegreen.ps1 第 3 步一致：把本地 md5 带上去，在**删除任何
+# 既有产物之前**对账（放进 && 链里，md5 不过 ⇒ rm -rf .next 不会执行，旧树不动）。
+$localMd5 = (Get-FileHash -Algorithm MD5 -Path $tarPath).Hash.ToLower()
+Write-Host "   打包完成：$tarMB MB  md5=$localMd5"
 
 # SSH/SCP 公共选项：keepalive 防止链路空闲被判死；ConnectTimeout 避免卡在握手
 $SshOpt = @("-o","ServerAliveInterval=20","-o","ServerAliveCountMax=6","-o","ConnectTimeout=15")
@@ -125,8 +136,12 @@ Write-Host "== 5/6 服务器拼接 + 校验 BUILD_ID + 重建镜像 + 三步重�
 # 新旧两个 chunk，旧的已无人引用但依然可被旧 HTML 命中）。
 # 只清 `.next`（纯构建产物）：`public/`、`package.json`、`yarn.lock`、`next.config.ts`、
 # `Dockerfile` 都不动 —— 后两个还是上面 scp 上来的明文版，绝不能被 tar 覆盖。
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && rm -f ${tarFile}.part* && rm -rf .next && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend > /tmp/fe_build.log 2>&1; rc=`$?; tail -3 /tmp/fe_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi; docker-compose stop frontend; docker-compose rm -f frontend; docker-compose up -d --no-deps frontend"
-if ($LASTEXITCODE -ne 0) { throw "前端镜像构建失败（完整日志：服务器 /tmp/fe_build.log）" }
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && echo '${localMd5}  ${tarFile}' | md5sum -c - && rm -f ${tarFile}.part* && rm -rf .next && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend > /tmp/fe_build.log 2>&1; rc=`$?; tail -3 /tmp/fe_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi; docker-compose stop frontend; docker-compose rm -f frontend; docker-compose up -d --no-deps frontend"
+# 三种失败要能分开（原来一律报「镜像构建失败」，10-22 那次因此查错方向）：
+#   · md5 对账不过 ⇒ 分片损坏/有残片，**服务器上什么都没动**（.next 未删）；
+#   · tar -xf 失败   ⇒ 包不完整（正常不会走到，md5 已经拦在前面）；
+#   · BUILD_FAILED   ⇒ 真构建失败，看 /tmp/fe_build.log。
+if ($LASTEXITCODE -ne 0) { throw "服务器端失败（区分办法：md5 对账不过=分片损坏，清 ${AppDir}/frontend/${tarFile}* 后重跑；BUILD_FAILED=真构建失败，看 /tmp/fe_build.log——注意日志未被覆盖时那是上一版内容）" }
 
 Write-Host "== 6/6 验证 ==" -ForegroundColor Cyan
 # 轮询 `/` 直到 200（不再盲等 15s）；随后打一发**经 nginx 的 /ok** 证明后端链路没被动过
