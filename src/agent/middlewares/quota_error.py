@@ -1,7 +1,8 @@
 """QuotaErrorMiddleware — LLM 额度耗尽错误 → 前端友好中文提示。
 
 需求：模型账号额度耗尽时（DeepSeek 等返回 HTTP 402/403，如 "Free quota
-exhausted" / "insufficient_quota" / "Insufficient Balance"），后端原始异常
+exhausted" / "insufficient_quota" / "Insufficient Balance"；网关返回 429
+"BudgetLimitExceeded"），后端原始异常
 会被 LangGraph 序列化进 run stream 的 error 事件。但前端 SDK（useStream）
 只把 error 放进 stream.error 状态，聊天界面不渲染它——表现为「卡住、无提示」。
 
@@ -33,9 +34,13 @@ ContextT = TypeVar("ContextT")
 ResponseT = TypeVar("ResponseT")
 
 # ── 额度耗尽友好提示（前端直接展示）──────────────────────────────
+# 2026-10-20 补 `BudgetLimitExceeded`：网关（new-api/one-api）对「预算用尽」
+# 用的是 budget 一词，原文既没有 quota 也没有 balance，旧关键词表全部漏判，
+# 用户只看到一段英文原文（会话 01a158a1）。
 QUOTA_EXHAUSTED_MESSAGE = (
-    "模型额度已用完（API 返回额度/余额不足，如 402/403 insufficient_quota）。"
-    "请到「模型配置」更换该模型的 API Key，或为该账号充值后重试。"
+    "模型额度已用完（供应商返回额度/预算不足：402/403/429，"
+    "如 insufficient_quota、Insufficient Balance、BudgetLimitExceeded）。"
+    "请为该账号充值或提高额度，或在「模型配置」里换一个可用模型/API Key 后重试。"
 )
 
 # ── 额度/余额错误识别关键词（大小写不敏感）────────────────────────
@@ -49,13 +54,16 @@ _QUOTA_STRONG_KEYWORDS = (
     "insufficient balance",
     "balance insufficient",
     "no enough balance",
+    # 网关（new-api / one-api）的预算用尽文案：既无 quota 也无 balance
+    "budgetlimitexceeded",
+    "budget limit",
     "额度",
     "余额不足",
     "欠费",
 )
 # 弱关键词：必须同时见到 HTTP 状态码（402/403/429）才判定，
-# 避免把含 "quota/balance" 的业务文本（如 SQL 报错）误判为额度问题
-_QUOTA_WEAK_KEYWORDS = ("quota", "balance", "余额")
+# 避免把含 "quota/balance/budget" 的业务文本（如 SQL 报错、维度预算）误判为额度问题
+_QUOTA_WEAK_KEYWORDS = ("quota", "balance", "budget", "余额")
 
 # 命中这些 HTTP 状态码且消息含额度关键词时才翻译（避免误伤其他 403 鉴权错误）
 _QUOTA_STATUS_CODES = (402, 403, 429)
