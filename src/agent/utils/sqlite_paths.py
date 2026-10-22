@@ -41,7 +41,7 @@ from pathlib import Path
 _logger = logging.getLogger(__name__)
 
 #: 一库一目录的库名（**目录名 == 库名**；顺序 = 首启接管顺序）
-STORE_NAMES: tuple[str, ...] = ("eval_queue", "trace_bind", "pending_terminal")
+STORE_NAMES: tuple[str, ...] = ("eval_queue", "trace_bind", "pending_terminal", "scheduled_tasks")
 
 #: SQLite 在库文件旁边生成的附属文件。**主库必须最后搬**（见文件头）。
 _SIDECARS: tuple[str, ...] = ("-wal", "-shm", "-journal")

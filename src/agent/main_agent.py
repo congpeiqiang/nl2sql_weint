@@ -24,6 +24,8 @@ from agent.tools.report_builder import build_report_tool
 # 归因分解（S3）：与 build_report 同层 —— 指纹在主 state（读指纹是一次取值，
 # 无跨图协议），cube 元信息有进程内 reader，追问归因不必再起子 run（方案 §4.4）。
 from agent.tools.attribution_analyze import attribution_analyze_tool
+# 定时任务（阶段3）：单工具多 action，只调 agent.scheduler.service（与 REST 同一实现层）
+from agent.tools.manage_scheduled_task import manage_scheduled_task_tool
 from agent.settings.file_permissions import FILE_PERMISSIONS
 from agent.middlewares.query_keywords import QueryKeywordsMiddleware
 from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
@@ -289,7 +291,7 @@ MAIN_AGENT_MIDDLEWARE: list = [
 
 agent = create_deep_agent(
     model=_agent_model,
-    tools=[*mcp_tools, build_report_tool, attribution_analyze_tool],
+    tools=[*mcp_tools, build_report_tool, attribution_analyze_tool, manage_scheduled_task_tool],
     subagents=[nl2sql_async],
     memory=["/shared/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
     middleware=MAIN_AGENT_MIDDLEWARE,

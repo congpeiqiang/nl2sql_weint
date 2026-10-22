@@ -9,11 +9,39 @@ from starlette.testclient import TestClient
 
 
 @pytest.fixture(scope="module")
-def client():
-    """创建测试客户端（启动 app）。"""
+def client(tmp_path_factory):
+    """创建测试客户端（启动 app）。
+
+    数据根隔离（2026-10-21 补）：lifespan 会 ``adopt_all_stores()`` + 起定时任务
+    worker（tick/心跳/建库），裸跑 app 会把这些写进 ``.env`` 冻结的真实数据根
+    （workspace_manager 的 data_root 是 import 期冻结，env 覆盖无效 —— 必须钉
+    ``sqlite_paths.data_root``，与 test_scheduled_api fixture 同款）。冒烟测试不该
+    碰真实数据根，更不该触发 adopt_legacy_store 去搬真实根上的老文件。
+    """
+    import os
+
+    data_root = tmp_path_factory.mktemp("smoke_agent_data")
+    for sub in ("shared", "workspace", "auth"):
+        (data_root / sub).mkdir()
+    os.environ["AGENT_DATA_ROOT"] = str(data_root)
+    import agent.utils.sqlite_paths as sqlite_paths
+    from agent.scheduler.store import reset_store_for_tests
+
+    orig_data_root = sqlite_paths.data_root
+    sqlite_paths.data_root = lambda: data_root
+    reset_store_for_tests()
     from api.custom_app import app
-    with TestClient(app, raise_server_exceptions=False) as c:
-        yield c
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as c:
+            yield c
+    finally:
+        from agent.scheduler import worker as _sched_worker
+
+        _sched_worker.stop_worker()
+        reset_store_for_tests()
+        sqlite_paths.data_root = orig_data_root
+        os.environ.pop("AGENT_DATA_ROOT", None)
 
 
 class TestApiSmoke:
