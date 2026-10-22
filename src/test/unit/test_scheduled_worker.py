@@ -233,6 +233,8 @@ class TestFire:
         assert cfg["configurable"]["db_name"] == "db1"
         assert cfg["configurable"]["llm_route"] == "weint"
         assert cfg["configurable"]["llm_model"] == "qwen3.8-max"
+        # 定时 run 标记：主 agent 的 HITL 闸门据此跳过审批（后台 interrupt 无卡可点）
+        assert cfg["configurable"]["scheduled_run"] is True
         assert "[定时任务]" in rc["input"]["messages"][0]["content"]
         assert "每日工时" in rc["input"]["messages"][0]["content"]
         # 落库：真实 thread 顶掉占位 + task_runs 流水

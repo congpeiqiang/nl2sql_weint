@@ -17,7 +17,12 @@ from deepagents import create_deep_agent, AsyncSubAgent, DeepAgentState
 from deepagents.backends import FilesystemBackend, CompositeBackend
 from agent.backends.dynamic_workspace import DynamicFilesystemBackend, DynamicLocalShellBackend
 from deepagents.middleware import SkillsMiddleware
-from langchain.agents.middleware import ModelRequest, dynamic_prompt
+from langchain.agents.middleware import (
+    HumanInTheLoopMiddleware,
+    InterruptOnConfig,
+    ModelRequest,
+    dynamic_prompt,
+)
 from agent.llms.model import deepseek_model
 from agent.tools.mcp_tool import main_tools as mcp_tools
 from agent.tools.report_builder import build_report_tool
@@ -200,6 +205,55 @@ execute_guard = ExecuteGuardMiddleware()
 # P1-17：execute 产出的图表（chart-saver skill 的 .svg/.png）登记归属。挂在这里是唯一
 # 能做对的地方——子进程拿不到请求身份（见 chart_artifact_owner.py 文件头）。
 chart_owner = ChartArtifactOwnerMiddleware()
+# 定时任务审批闸门（2026-10-22）：manage_scheduled_task 的变更类动作会让 agent 安排
+# 无人值守的未来运行，执行前必须经用户确认；list/runs 只读放行，避免每问一句都弹卡。
+# 允许 edit：模型把「每天九点」解析成 cron 有偏差时，用户可在卡上直接改参数再批准
+# （edit 后的 args 仍过 pydantic + service 校验，坏参数只会返回机读错误，不会静默
+#  写坏任务）。action 缺失/非法时交给工具自身校验报错，不弹无意义的审批卡。
+_SCHEDULED_MUTATING_ACTIONS = frozenset(
+    {"create", "pause", "resume", "remove", "run_now"}
+)
+
+
+def _current_configurable() -> dict:
+    """读当前 run 的 configurable。
+
+    项目定式：必须走 ``langgraph.config.get_config()``（thinking_toggle.py
+    2026-08-14 实证；直接读 runtime 拿不到）。读不到时返回空 dict。
+    """
+    try:
+        from langgraph.config import get_config as _get_config
+
+        cfg = _get_config() or {}
+    except Exception:  # noqa: BLE001 —— 无 run 上下文（测试/离线调用）
+        return {}
+    return cfg.get("configurable") or {}
+
+
+def _scheduled_hitl_when(request) -> bool:
+    """manage_scheduled_task 是否需要人工审批（True=弹卡）。
+
+    - 只读 action（list/runs）→ 不审批；
+    - 定时触发的后台 run（configurable.scheduled_run，worker._fire 写入）→ 不审批：
+      无人值守，interrupt 会被 langgraph 顶层图抑制（工具不执行、也没有卡片可点），
+      这里直接放行（副作用仍过 service 校验 + owner 权限）；
+    - 其余交互式 run → 审批；读不到 config 也按审批兜底（fail-closed 到人）。
+    """
+    action = (request.tool_call.get("args") or {}).get("action")
+    if action not in _SCHEDULED_MUTATING_ACTIONS:
+        return False
+    return not bool(_current_configurable().get("scheduled_run"))
+
+
+scheduled_hitl = HumanInTheLoopMiddleware(
+    interrupt_on={
+        "manage_scheduled_task": InterruptOnConfig(
+            allowed_decisions=["approve", "reject", "edit"],
+            description="该操作会创建或修改定时任务，请确认参数后批准。",
+            when=_scheduled_hitl_when,
+        )
+    },
+)
 
 nl2sql_async = AsyncSubAgent(
     name="nl2sql",
@@ -273,6 +327,10 @@ MAIN_AGENT_MIDDLEWARE: list = [
     ModelRequiredMiddleware(),
     QuotaErrorMiddleware(),
     ModelTimeoutMiddleware(),
+    # 定时任务审批闸门：紧跟三道模型门禁之后。after_model 钩子按列表**逆序**执行
+    # （langchain factory 从列表尾节点起链），放这里等于「trace/langfuse/瘦身等
+    # 都处理完这轮模型输出之后才拦」，被拦那轮的记录不会丢。
+    scheduled_hitl,
     execute_guard,
     chart_owner,
     skills_middleware,

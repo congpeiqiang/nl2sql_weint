@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 from agent.scheduler import service
 from agent.scheduler.store import FIRING, ScheduledTaskStore, get_store
+from agent.utils.sdk_errors import is_thread_gone
 
 logger = logging.getLogger(__name__)
 

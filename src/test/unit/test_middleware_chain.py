@@ -9,9 +9,14 @@ class TestMainAgentMiddlewareChain:
         return [type(mw).__name__ for mw in MAIN_AGENT_MIDDLEWARE]
 
     def test_chain_length(self):
-        """主 Agent 应有 17 层中间件。"""
+        """主 Agent 应有 18 层中间件。"""
         chain = self._get_middleware_types()
-        assert len(chain) == 17, f"期望 17 层，实际 {len(chain)}: {chain}"
+        assert len(chain) == 18, f"期望 18 层，实际 {len(chain)}: {chain}"
+
+    def test_scheduled_hitl_inside_guards(self):
+        """定时任务审批闸门紧跟三道模型门禁之后（after_model 逆序执行 ⇒ 录完再拦）。"""
+        chain = self._get_middleware_types()
+        assert chain[3] == "HumanInTheLoopMiddleware", chain
 
     def test_guard_middlewares_outermost(self):
         """门禁类中间件必须在最外层（列表头部）。"""
