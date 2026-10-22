@@ -600,14 +600,24 @@ def _row_values_covered(norm_cells: list, row_vals) -> bool:
     """候选**某一行**的全部非空值是否都能在答案该行的单元格里找到（行内证据）。
 
     比拍平集合更严（必须落在同一行）也更公道（NULL/空值不参与、也就不会成为反证）。
+
+    ⚠️ **单值行不作行内证据**（2026-10-21，prod thread 01a15d6d）：DISTINCT 探值的
+    单值行（如 `AI与数据产品线/产品管理部`）经 `_value_matches_cell` 的 `cc in vv`
+    子串方向命中答案短单元格（`产品管理部`）⇒ 零成本「覆盖」全部答案行、tier0 假阳性
+    绕过通道闸（报告 §4 又印探值 SQL + 「未使用 Cube」反话）。行内取证的本意是 NULL
+    占位宽容（b816d442），那种候选行本就是多值的 ⇒ 要求 ≥2 个非空归一值。
     """
+    norm_vals = []
     for v in row_vals:
         vv = _match_norm(v.strip().lower())
-        if not vv:
-            continue
-        if not any(_value_matches_cell(cc, vv) for cc in norm_cells):
-            return False
-    return True
+        if vv:
+            norm_vals.append(vv)
+    if len(norm_vals) < 2:
+        return False
+    return all(
+        any(_value_matches_cell(cc, vv) for cc in norm_cells)
+        for vv in norm_vals
+    )
 
 
 def _final_row_covered_by(cells, vals, row_values=None) -> bool:
@@ -620,7 +630,12 @@ def _final_row_covered_by(cells, vals, row_values=None) -> bool:
     `row_values`（候选的**按行**值集合，`_run_sql_row_values`）非空时再给一次机会：
     只要候选存在某一行，其全部非空值都能在答案这一行里找到，也算覆盖——数据库该列为
     NULL 而模型写了占位文案时，拍平比对会把这一行判成“无证据”，行内取证则不受影响。
-    两条路都是**放宽**，原本已命中的判定一个都不会变。
+
+    ⚠️ **数值佐证**（2026-10-21，prod thread 01a15d6d）：覆盖成立后，若答案该行含
+    **纯数字**单元格（`_is_plain_number`），至少一个必须被候选值命中——探值/枚举类
+    候选（DISTINCT 部门名之类）没有数值列，光靠文本子串命中不得冒充产出。「至少
+    一个」而非「全部」：容忍模型派生列（百分比、合计、`92 天（2212 h）` 这类格式化
+    时长本就不算纯数字格）。答案行没有纯数字格时保持旧行为。
     """
     norm_cells = []
     for c in cells:
@@ -629,11 +644,15 @@ def _final_row_covered_by(cells, vals, row_values=None) -> bool:
             norm_cells.append(cc)
     if not norm_cells:
         return True
-    if all(_cell_covered_by_any(cc, vals) for cc in norm_cells):
-        return True
-    if row_values:
-        return any(_row_values_covered(norm_cells, rv) for rv in row_values)
-    return False
+    covered = all(_cell_covered_by_any(cc, vals) for cc in norm_cells)
+    if not covered and row_values:
+        covered = any(_row_values_covered(norm_cells, rv) for rv in row_values)
+    if not covered:
+        return False
+    num_cells = [cc for cc in norm_cells if _is_plain_number(cc)]
+    if num_cells and not any(_cell_covered_by_any(cc, vals) for cc in num_cells):
+        return False
+    return True
 
 
 def _is_plain_number(s) -> bool:
@@ -1739,6 +1758,22 @@ def _watchdog_kill_reason(run) -> Optional[str]:
         return None
 
 
+def _restart_killed(run) -> bool:
+    """该 run 是否被「发版/重启换进程」带走（2026-10-22）。
+
+    判据只有一处：`sync_subagent_todos._killed_by_restart` —— run 停在 interrupted
+    且最后一次状态变化早于本进程启动。用户点停止有它自己的证据（async_tasks 已是
+    cancelled），不会被判到这里。异常 fail-open 视作「不是重启」。
+    （延迟导入：同 `_watchdog_kill_reason`，模块级导入会成环。）
+    """
+    try:
+        from agent.subagents.sync_subagent_todos import _killed_by_restart
+        return bool(_killed_by_restart(run))
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[check_progress] 重启判据失败（按非重启处理）: %s", f"{type(e).__name__}: {e}")
+        return False
+
+
 def _interrupted_stuck_seconds(run) -> Optional[float]:
     """run 停在 interrupted 已有多久（秒）。
 
@@ -2018,7 +2053,9 @@ def _enhanced_build_check_result(run, thread_id, thread_values, full=False):
         #   ② 看门狗 `runs.cancel(action=interrupt)` —— 永不恢复（2026-10-16 事故：
         #      这条被当成 ① 归一成 running，把 watcher 刚落好的 timeout 打回，
         #      还对用户说「会自动恢复」，白等 35 分钟）。
-        # 判据取两条独立证据，命中任一条即如实报为 timeout：
+        # 判据取三条独立证据，命中任一条即如实报为失败：
+        #   · 重启带走：`updated_at` 早于本进程启动 ⇒ 上一任进程（发版/部署）把它
+        #     留下了，既不会自恢复，也不是用户点停止（2026-10-22 用户要求区分）
         #   · 进程内标记：这条 run 就是被我们自己 cancel 的（确定性，无猜测）
         #   · 时长熔断：run 已停在 interrupted 超过 grace，且从未恢复
         _kill_reason = _watchdog_kill_reason(run)
@@ -2027,7 +2064,22 @@ def _enhanced_build_check_result(run, thread_id, thread_values, full=False):
             _stuck_secs is not None
             and _stuck_secs > _INTERRUPTED_STUCK_GRACE_SECS
         )
-        if _kill_reason or _stuck_too_long:
+        if _restart_killed(run):
+            _logger.warning(
+                "[check_progress] 子 run 的 interrupted 早于本进程启动"
+                "（updated_at=%s）⇒ 判为服务重启中断（不是用户取消）",
+                (run or {}).get("updated_at"),
+            )
+            result["status"] = "error"
+            result["error_kind"] = "service_restart"
+            result["note"] = (
+                "The subagent was terminated by a service restart/deploy, NOT by "
+                "the user pressing stop, and it will NOT resume automatically. "
+                "Tell the user it can simply be retried (re-dispatched or the "
+                "question re-asked) — do not describe it as 'cancelled by you' or "
+                "as a timeout."
+            )
+        elif _kill_reason or _stuck_too_long:
             _why = _kill_reason or f"stuck in 'interrupted' for {int(_stuck_secs)}s"
             _logger.warning(
                 "[check_progress] 子 run 停在 interrupted 且不会恢复（%s）→ 改判 timeout",
@@ -2096,8 +2148,8 @@ def _enhanced_build_check_command(result, task, tool_call_id):
     # 同款：这几个键是 watcher（sync_subagent_todos）写在 async_tasks 里的，本函数
     # 重建整条 → 不显式带上就被主 agent 的一次轮询抹掉。`error` 是失败原因（前端与
     # 失败汇报读它），`failure_reported` 是跨线程/重启的去重标记（抹掉会导致同一条
-    # 失败被再汇报一次）。
-    for _k in ("error", "error_kind", "failure_reported"):
+    # 失败被再汇报一次），`terminal_cause` 区分「重启中断」与「用户取消」的文案成因。
+    for _k in ("error", "error_kind", "failure_reported", "terminal_cause"):
         if task.get(_k) is not None and _k not in updated_task:
             updated_task[_k] = task[_k]
     # S8 答案指纹：**先 pop 再 dumps** —— 这个键是 state 内部通道，绝不能出现在给
@@ -2173,11 +2225,7 @@ def _relaunch_sync_after_redispatch(task_id, runtime, out):
             return
         if str(entry.get("status") or "") != "running":
             return  # 只有「刚被改回 running」的重派发才需要重建 watcher
-        # runtime.state 是图状态通道（不含 thread_id），主线程 id 只能从 config 取
-        cfg = (getattr(runtime, "config", None) or {}).get("configurable") or {}
-        main_thread_id = cfg.get("thread_id") or getattr(
-            getattr(runtime, "execution_info", None), "thread_id", None
-        )
+        main_thread_id = _main_thread_id_from_runtime(runtime)
         if not main_thread_id:
             _logger.warning(
                 "[check_progress] 重派发但取不到主线程 id，跳过 watcher 拉起: %s",
@@ -2199,6 +2247,75 @@ def _relaunch_sync_after_redispatch(task_id, runtime, out):
     except Exception as e:  # noqa: BLE001
         # watcher 拉起失败绝不能让工具调用失败
         _logger.warning("[check_progress] 重建 sync watcher 失败: %s", f"{type(e).__name__}: {e}")
+
+def _main_thread_id_from_runtime(runtime) -> Optional[str]:
+    """当前 run 所属线程的 id（对主 agent 的工具而言就是主线程 id）。
+
+    `runtime.state` 是图状态通道，不含 thread_id；只能从 run config 取。
+    """
+    cfg = (getattr(runtime, "config", None) or {}).get("configurable") or {}
+    return cfg.get("thread_id") or getattr(
+        getattr(runtime, "execution_info", None), "thread_id", None
+    )
+
+
+def _ensure_sync_watcher(task, runtime) -> bool:
+    """check_async_task 顺手自愈：state 说任务还在 running，但本进程没有 watcher → 重建。
+
+    为什么需要（2026-10-22 dev-34 事故）：watcher 是**派发进程内的 daemon 线程**
+    （见 `sync_subagent_todos.launch_sync`），发版换容器 / 进程重启会把主 run 连同
+    它一起杀掉；子 run 却会被新容器当孤儿回收后继续跑（`Background worker expired,
+    adding to queue`，实测排队 403s）。于是没人再写 `subagent_steps_map` /
+    `async_tasks`，前端卡片永久停在旧快照——子 run 后来 success 也刷不回来
+    （事故卡片停在「└ Schema 提取与裁剪 (2s...)」）。
+
+    拉起后交给 watcher 自己的启动自愈（P1-9）：子 run 已结束 → 立刻补写最终 steps
+    并清 active_queries；还在跑 → 正常接着盯。所以判据只看「state 说 running」，
+    不看 run 侧状态。
+
+    只在 watcher 失联时拉起（`launch_sync` 非幂等）。判据是**本进程**的注册表，
+    蓝绿双色并存时可能各起一个——与 `_relaunch_sync_after_redispatch`、
+    `api/sql_approval.py`、`api/task_cancel.py` 的既有写法一致。
+
+    Returns: 是否真的拉起了 watcher（供日志与测试断言）。
+    """
+    if not isinstance(task, dict) or str(task.get("status") or "") != "running":
+        return False
+    task_id = str(task.get("task_id") or task.get("thread_id") or "")
+    if not task_id:
+        return False
+    try:
+        from agent.subagents.sync_subagent_todos import is_sync_alive, launch_sync
+
+        if is_sync_alive(task_id):
+            return False
+        main_thread_id = _main_thread_id_from_runtime(runtime)
+        if not main_thread_id:
+            _logger.warning(
+                "[check_progress] watcher 已失联但取不到主线程 id，跳过重建: %s",
+                task_id[:8],
+            )
+            return False
+        launch_sync(
+            main_thread_id,
+            task_id,
+            str(task.get("agent_name") or "nl2sql"),
+            task,
+        )
+        _logger.info(
+            "[check_progress] watcher 失联，check 时重建: sub=%s main=%s run=%s",
+            task_id[:8],
+            str(main_thread_id)[:8],
+            str(task.get("run_id") or "")[:8],
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        # 自愈失败绝不能让 check 工具调用失败
+        _logger.warning(
+            "[check_progress] check 时重建 sync watcher 失败: %s",
+            f"{type(e).__name__}: {e}",
+        )
+        return False
 
 def _make_patched_build_check_tool(mod, orig_build_check_tool):
     """_patched_build_check_tool 的工厂。
@@ -2245,6 +2362,8 @@ def _make_patched_build_check_tool(mod, orig_build_check_tool):
             _add_incremental(result, thread_values, since)
             # 与 async_tasks 条目对账：条目已终态则结果不得说「在跑」
             _reconcile_result_with_task(result, task)
+            # 发版换容器会杀掉派发进程里的 watcher → 顺手重建（见 _ensure_sync_watcher）
+            _ensure_sync_watcher(task, runtime)
             return mod._build_check_command(result, task, runtime.tool_call_id)
 
         # ── async ──
@@ -2303,6 +2422,8 @@ def _make_patched_build_check_tool(mod, orig_build_check_tool):
             _add_incremental(result, thread_values, since)
             # 同上：与 async_tasks 条目对账（终态保护，2026-10-16 事故）
             _reconcile_result_with_task(result, task)
+            # 同上：watcher 随派发进程被杀时在这里自愈
+            _ensure_sync_watcher(task, runtime)
             return mod._build_check_command(result, task, runtime.tool_call_id)
 
         tool.func = _check_sync

@@ -483,12 +483,15 @@ async def _replay_row(store, row: dict, max_age: float, *, dry_run: bool, out: d
     base["agent_name"] = agent_name
     base["run_id"] = latest_id
     base["status"] = run_status
+    # 终态成因（`service_restart` = 发版/重启把 run 带走，不是用户点停止）：
+    # watcher 登记时塞进 task 快照，这里原样继承，文案/汇报两处都靠它。
+    cause = base.get("terminal_cause")
     if isinstance(entry, dict) and entry.get("failure_reported"):
         base["failure_reported"] = True
     if isinstance(entry, dict) and entry.get("description") and not base.get("description"):
         base["description"] = entry["description"]
     err = str(row["error"] or "")
-    if not err:
+    if not err and cause != "service_restart":
         try:
             err = await _terminal_error(client, sub_thread_id, run_status) or ""
         except Exception:  # noqa: BLE001
@@ -516,7 +519,7 @@ async def _replay_row(store, row: dict, max_age: float, *, dry_run: bool, out: d
             todos = await _extract_subagent_todos(client, sub_thread_id)
             if todos:
                 steps = render_final_steps(
-                    todos, agent_name, sub_thread_id, run_status
+                    todos, agent_name, sub_thread_id, run_status, cause
                 )
         except Exception as e:  # noqa: BLE001
             _logger.debug("[pending-terminal] 重算最终步骤失败(继续写终态): %s", e)
@@ -558,7 +561,7 @@ async def _replay_row(store, row: dict, max_age: float, *, dry_run: bool, out: d
     elif run_status in ("error", "timeout", "cancelled"):
         try:
             await _maybe_report_failure(
-                client, main_thread_id, sub_thread_id, agent_name, run_status
+                client, main_thread_id, sub_thread_id, agent_name, run_status, cause
             )
         except Exception as e:  # noqa: BLE001
             _logger.warning("[pending-terminal] 补触发失败汇报失败: %s", str(e)[:200])

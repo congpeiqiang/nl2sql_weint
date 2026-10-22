@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from typing import Optional
 
 from agent.utils.failure_signal import detail_of, last_failed_mark, run_status_for
+from agent.utils.sdk_errors import is_thread_gone
 
 _logger = logging.getLogger(__name__)
 # sync 运行在守护线程，start_server 的 logging 配置不覆盖它；
@@ -122,12 +123,207 @@ _DONE_LABELS = {
     "timeout": "超时终止",
 }
 
+# ── 「谁杀死了这条 run」：重启 ≠ 用户点停止（2026-10-22）──────────
+# 平台 run 只有 pending/running/error/success/timeout/interrupted 六态，
+# **没有 cancelled**；用户点「停止」与发版重启留下的 run 在状态上完全同形（都
+# 是 interrupted）。一手证据只能来自时间：
+#   · 用户停止 → `api/task_cancel.py` 已把 async_tasks[task].status 写成 cancelled，
+#     watcher 在进 interrupted 分支之前就按 cancelled 收尾（见 `_main_task_status`）；
+#   · 上下文压缩的瞬时暂停 → 发生在本进程内（updated_at ≥ 本进程启动）；
+#   · 发版/重启把 run 带走 → 上一任进程手里的 run，最后一次状态变化早于本进程启动。
+def _process_started_epoch() -> float:
+    """本进程**启动**时刻（epoch 秒）——重启判据的锚点。
+
+    不能拿「每次调用现取的时间」当锚点（它永远晚于 run 的 updated_at，判据恒不
+    成立），也不能拿**模块导入时刻**冒充进程启动：本模块可能在首个查询/首次自愈
+    时才被导入，那会把「导入前几分钟内的上下文压缩暂停」误判成重启（单测里当场
+    现形）。取法按平台，全都失败才退回导入时刻（已知偏晚，方向是少判，安全侧）：
+      · Linux：`/proc/self/stat` 的 starttime（自开机起的 USER_HZ 数）+ `/proc/stat` 的 btime；
+      · Windows：kernel32 `GetProcessTimes` 的创建时间（FILETIME，1601 纪元）。
+    """
+    try:  # Linux
+        _clk = float(_os_module.sysconf("SC_CLK_TCK"))
+        with open("/proc/stat", "r", encoding="utf-8") as _f:
+            _btime = next(int(_l.split()[1]) for _l in _f if _l.startswith("btime "))
+        with open("/proc/self/stat", "r", encoding="utf-8") as _f:
+            _stat = _f.read()
+        # comm（第 2 个字段）可能含空格/括号 ⇒ 从最后一个 ')' 之后再切：
+        # 切点后 fields[0] 是 state（第 3 个字段），starttime 是第 22 个 ⇒ index 19。
+        _fields = _stat[_stat.rindex(")") + 2:].split()
+        return _btime + int(_fields[19]) / _clk
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # Windows
+        import ctypes
+        from ctypes import wintypes
+
+        _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # 必须显式声明签名：不声明时 HANDLE 会被截成 32 位，GetProcessTimes 失败。
+        _k32.GetCurrentProcess.restype = ctypes.c_void_p
+        _k32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [
+            ctypes.POINTER(wintypes.FILETIME)
+        ] * 4
+        _k32.GetProcessTimes.restype = wintypes.BOOL
+        _created, _exited, _kernel, _user = (wintypes.FILETIME() for _ in range(4))
+        if not _k32.GetProcessTimes(
+            _k32.GetCurrentProcess(),
+            ctypes.byref(_created),
+            ctypes.byref(_exited),
+            ctypes.byref(_kernel),
+            ctypes.byref(_user),
+        ):
+            return _time_module.time()
+        _ticks = (_created.dwHighDateTime << 32) | _created.dwLowDateTime
+        return _ticks / 1e7 - 11644473600.0  # FILETIME(1601-01-01) → epoch(1970)
+    except Exception:  # noqa: BLE001
+        return _time_module.time()
+
+
+_PROCESS_STARTED_AT: float = _process_started_epoch()
+# 起进程与落 updated_at 之间的秒级抖动容差（时钟同源，留 2s 足够）
+_RESTART_SKEW_SECONDS = 2.0
+# 终态成因（写进 async_tasks[task]["terminal_cause"]，机器可读；状态仍是 error，
+# 这样所有既有终态集合（_RUN_DONE_STATUSES / check_progress / task_cancel /
+# pending_terminal / 前端 FAIL_TERMINAL_STATUSES）都不用改，漏改一处也不会让卡片转圈
+CAUSE_SERVICE_RESTART = "service_restart"
+# 用户可见文案（重启语义，供 async_tasks.error 与失败汇报共用）
+RESTART_KILLED_TEXT = "因服务重启中断（不是用户取消），可重试"
+
+
+def _parse_run_ts(raw) -> Optional[float]:
+    """平台时间戳（ISO8601，可能带 `Z`）→ epoch 秒；解析不了返回 None。
+
+    fail-open：宁可不判重启，也不能因为格式差异把用户停止误报成重启。
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.strip().replace("Z", "+00:00")).timestamp()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _killed_by_restart(
+    run_record: Optional[dict], process_started_at: Optional[float] = None
+) -> bool:
+    """这条 run 是不是「上一任进程（发版/重启）死掉时被带走的」。
+
+    判据：状态停在 interrupted，且 `updated_at` 早于本进程启动（留
+    `_RESTART_SKEW_SECONDS` 容差）。任一条件不成立/读不到时间 ⇒ False。
+    """
+    if not isinstance(run_record, dict):
+        return False
+    if str(run_record.get("status") or "") != "interrupted":
+        return False
+    updated_at = _parse_run_ts(run_record.get("updated_at"))
+    if updated_at is None:
+        return False
+    anchor = (
+        _PROCESS_STARTED_AT
+        if process_started_at is None
+        else float(process_started_at)
+    )
+    return updated_at < (anchor - _RESTART_SKEW_SECONDS)
+
+
+def _boot_terminal_cause(task: Optional[dict]) -> Optional[str]:
+    """启动即终态时从启动方条目接上终态成因。
+
+    路径：用户点「停止」把已死的卡写成 `error + terminal_cause=service_restart`
+    （见 `api/task_cancel._terminal_override`）→ 端点顺手拉起 watcher → watcher 启动
+    读到终态直接进完成分支。此时本地 `terminal_cause` 还是 None，不接这一手就会把
+    「因服务重启中断」又说成「执行失败」（失败汇报 + 最终步骤头两处文案漂移）。
+    """
+    cause = (task or {}).get("terminal_cause")
+    return cause if isinstance(cause, str) and cause else None
+
+
+def _failure_label(run_status: str, cause: Optional[str] = None) -> str:
+    """终态标签（失败汇报用）。cause=重启时压过状态语义。"""
+    if cause == CAUSE_SERVICE_RESTART:
+        return RESTART_KILLED_TEXT
+    return {
+        "error": "执行失败",
+        "timeout": "执行超时",
+        "cancelled": "已被取消",
+    }.get(run_status, "执行失败")
+
+
+def _failure_notice(
+    agent_name: str,
+    run_status: str,
+    cause: Optional[str] = None,
+    err: Optional[str] = None,
+) -> str:
+    """失败汇报的消息正文（注入主线程，让主 agent 转述给用户）。
+
+    `[系统自动通知]` 前缀是契约：langfuse 摘要 / 反馈 / 新问题检测都按它跳过，
+    别改。重启语义自带文案，不再拼 run.error（那种 run 的 error 通常是
+    "Cancelled"，拼上去只会让用户以为是用户取消）。
+    """
+    label = _failure_label(run_status, cause)
+    if cause == CAUSE_SERVICE_RESTART:
+        guidance = (
+            "请向用户说明：这是服务重启（发版/部署）导致的任务中断，"
+            "不是用户点了停止；可直接重新发起该查询。"
+        )
+        detail = ""
+    else:
+        guidance = "请向用户说明失败原因与建议。"
+        detail = f"：{err}。" if err else "。"
+    return f"[系统自动通知] 子任务 {agent_name} {label}{detail}{guidance}"
+
+
+def _done_label(run_status: str, cause: Optional[str] = None) -> str:
+    """最终步骤头文案（卡片上「执行进度 (…)」括号里那句）。"""
+    if cause == CAUSE_SERVICE_RESTART:
+        return "服务重启中断"
+    return _DONE_LABELS.get(run_status, "已完成")
+
 # ── P1-3 SQL 审批等待 ─────────────────────────────────────────
 # 该注释已过期：2026-08-28 审批闸门升级为只读硬拦截（不再 raise interrupt），
 # 子 run 的 interrupted 不再是「等审批」，而是 deepagents 上下文压缩的瞬时暂停。
 # 同步器已在 _RUN_DONE_STATUSES 移除 interrupted（不把瞬时暂停当终态），并用
 # INTERRUPTED_STUCK_TIMEOUT 兜底防永久卡死。此常量仅历史审批路径保留。
 _AWAIT_APPROVAL_TIMEOUT = 7200  # 等待审批上限 2h（超了按 timeout 强制收尾）
+
+# ── 会话被删 ⇒ watcher 收工（2026-10-22 dev-34 事故）─────────────
+# 用户删掉会话时 `DELETE /threads/{id}` 只删注册表行——langgraph 的 delete_thread
+# 不 cancel 任何在飞 run（实读源码 + 实测），主 run 继续跑、继续派发子任务；而
+# 本 watcher 此后每一轮都撞 `NotFoundError: thread ... not found`，外层
+# `except Exception` 只打一行 warning 就继续 ⇒ **没有退出条件**：4 分钟实测
+# 6682 行日志（约 27 行/秒），白烧 CPU 与 API。404 = 会话真的不在了（不是瞬时
+# 故障），给一个短宽限覆盖容器切换/读副本抖动的窗口期，过了就收工。
+NOT_FOUND_GRACE_S = 10.0
+
+
+def _is_thread_gone(exc: BaseException) -> bool:
+    """异常是不是「线程已不存在」。判据与调度器 reconcile 共用（`utils.sdk_errors`）。"""
+    return is_thread_gone(exc)
+
+
+class _ThreadGoneGuard:
+    """连续 NotFoundError 的收工判定。
+
+    `alive()` 见到存活信号（成功读到 run 状态）就清零重新计时——避免「启动时
+    一次抖动 + 很久之后一次抖动」被误判成持续失联。
+    """
+
+    def __init__(self, grace_s: Optional[float] = None) -> None:
+        self._grace = NOT_FOUND_GRACE_S if grace_s is None else grace_s
+        self._since: Optional[float] = None
+
+    def alive(self) -> None:
+        self._since = None
+
+    def on_not_found(self) -> bool:
+        """记一次 NotFoundError，返回「该收工了吗」。"""
+        now = _time_module.monotonic()
+        if self._since is None:
+            self._since = now
+            return self._grace <= 0
+        return (now - self._since) >= self._grace
+
 
 # ── 同步循环时限常量（模块级：便于离线测试把这些上限压到毫秒级）──────
 POST_COMPLETE_MAX_CYCLES = 20      # 完成后继续监控 10s (20 × 0.5s) 让耗时稳定
@@ -362,6 +558,9 @@ async def _async_sync_loop(
     approval_clear_written = False    # 恢复后已清除 awaiting_approval（写入新条目）
     approval_wait_start: Optional[float] = None
     interrupted_since: Optional[float] = None  # 子 run 进入 interrupted（瞬时暂停态）的时间点
+    # 终态成因（None=按状态语义）。目前只有 `service_restart`：发版/重启把 run
+    # 带走时状态恒为 interrupted，靠 `_killed_by_restart` 与用户停止分开。
+    terminal_cause: Optional[str] = None
     completion_write_retries = 0  # async_tasks 写入失败重试次数
     completion_started_at: Optional[float] = None  # 进入完成分支的时间点（重试上限判定起点）
     # ── P3 终态回退守护 / 重派发交接 ──
@@ -375,6 +574,7 @@ async def _async_sync_loop(
     main_step_durations: dict = {}  # {content: "Xs"} 已完成步骤耗时
 
     wait_for_run_cycles = 0  # 等待 run 出现的周期数
+    thread_gone = _ThreadGoneGuard()  # 会话被删 ⇒ 收工（见 NOT_FOUND_GRACE_S）
     loop_start = time.monotonic()  # 本任务开始时间（用于运行时长保护）
     # 卡死预算的计时起点：**当前 run 的 created_at**（惰性取一次，取不到退回 loop_start）。
     # 用 loop_start 是错的口径（它含 watcher 自己的起跑开销，而 run 可能排队后才创建），
@@ -395,6 +595,9 @@ async def _async_sync_loop(
     # 前端进度条回退（trace a6f86bbd：卡片从 8/8 回到 6/8 再回到「查询执行」转圈）。
     # 已完成的步骤按内容记账，永不回退。
     _seen_completed: set[str] = set()
+    # 当前步（单元素容器，内容 key）：模型重写 todo 把它降回 pending 时靠它救回来，
+    # 否则卡片僵在「查询执行 (15m23s...)」且 header 被误判 completed（dev-34 10-22）。
+    _seen_active: list[str] = []
     _seeded_steps: list = []
 
     # ── P1-9 启动自愈：async_tasks 终态写入与 active_queries=false 是两个不原子写，
@@ -433,6 +636,8 @@ async def _async_sync_loop(
                 sub_thread_id[:8], _boot_status,
             )
             run_status = _boot_status
+            # 终态成因跟着启动方条目走（否则失败汇报/步骤头会把重启中断说成执行失败）
+            terminal_cause = _boot_terminal_cause(task)
             sub_agent_done = True
             active_queries_written = True
             # P3：启动即终态（P1-9 自愈 / P0 钉扎的 run 在 bootstrap 前就结束了）
@@ -451,16 +656,18 @@ async def _async_sync_loop(
             )
             for _s in _seeded_steps:
                 _c = str((_s or {}).get("content") or "")
-                if _c.startswith(_SUBAGENT_PREFIX) and (
-                    _s or {}
-                ).get("status") == "completed":
-                    _seen_completed.add(
-                        _strip_duration_suffix(_c[len(_SUBAGENT_PREFIX):])
-                    )
+                if not _c.startswith(_SUBAGENT_PREFIX):
+                    continue
+                _key = _strip_duration_suffix(_c[len(_SUBAGENT_PREFIX):])
+                _st = (_s or {}).get("status")
+                if _st == "completed":
+                    _seen_completed.add(_key)
+                elif _st == "in_progress":
+                    _seen_active[:] = [_key]  # 重启自愈：当前步基线也要接上
             if _seeded_steps:
                 _boot_placeholder = _merge_steps_monotonic(
                     _seeded_steps, [], _seen_completed, sub_thread_id, agent_name,
-                    redispatched=True,
+                    redispatched=True, seen_active=_seen_active,
                 )
                 try:
                     await asyncio.to_thread(
@@ -515,10 +722,13 @@ async def _async_sync_loop(
                 # run 状态是 success（top-level graph suppress interrupt），取消端点
                 # cancel run 是 no-op，sync 下一轮仍会把 awaiting_approval 重新中继
                 # 回主线程 → 审批卡死而复生。
-                if (
-                    await _read_task_status(client, main_thread_id, sub_thread_id)
-                    == "cancelled"
-                ):
+                _main_task_status = await _read_task_status(
+                    client, main_thread_id, sub_thread_id
+                )
+                # 主线程读得动 = 会话还在 ⇒ NotFound 计时清零（用子线程的 run 状态
+                # 当存活信号是错的：子线程不像主线程那样会被用户删）。
+                thread_gone.alive()
+                if _main_task_status == "cancelled":
                     _logger.info(
                         "[sync] 任务 %s 已被用户取消，按终态收尾", sub_thread_id[:8]
                     )
@@ -631,8 +841,38 @@ async def _async_sync_loop(
                 # 0.5s 空转轮询永不结束。注意：不能用 loop_start（那是任务总时长，会误杀
                 # 「第 10 分钟才短暂 interrupted、随后正常完成」的合法长查询）。
                 if run_status == "interrupted":
-                    if interrupted_since is None:
+                    if terminal_cause == CAUSE_SERVICE_RESTART:
+                        # 已判定重启中断，终态写入还在重试（主线程 in-flight 时连续被拒）：
+                        # 保持 error，别让下一轮的 interrupted 读值把它打回瞬时暂停分支。
+                        run_status = "error"
+                    elif interrupted_since is None:
                         interrupted_since = time.monotonic()
+                        # ① 先判「上一任进程（发版/重启）把它带走了」：这种 run 不会
+                        # 自恢复（上一任的 worker 已经没了），观测到即成立——证据是
+                        # 时间，不会随时间变强，所以**不当场收尾就只是白等 120s 再
+                        # 错报成「执行超时」**。排在瞬时暂停兜底之前判定。
+                        # 用户点停止不靠这条判据：那条路径 async_tasks 已是 cancelled，
+                        # 上面 `_main_task_status` 分支先收尾，根本进不到这里。
+                        _rec = await _get_run_record(
+                            client,
+                            sub_thread_id,
+                            expect_run_id=(task or {}).get("run_id") if pin_run_id else None,
+                        )
+                        if _killed_by_restart(_rec):
+                            terminal_cause = CAUSE_SERVICE_RESTART
+                            run_status = "error"
+                            interrupted_since = None
+                            _logger.warning(
+                                "[sync] 子 run %s 的 interrupted 早于本进程启动"
+                                "（updated_at=%s，进程起于 %s）⇒ 判为服务重启中断，"
+                                "立即收尾（不是用户取消）",
+                                str((_rec or {}).get("run_id"))[:8],
+                                (_rec or {}).get("updated_at"),
+                                time.strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ",
+                                    time.gmtime(_PROCESS_STARTED_AT),
+                                ),
+                            )
                     elif (time.monotonic() - interrupted_since) > INTERRUPTED_STUCK_TIMEOUT:
                         _logger.warning(
                             "[sync] 子 run 停留在 interrupted 超过 %ds，视为卡死，强制结束（分类为 timeout）",
@@ -874,7 +1114,7 @@ async def _async_sync_loop(
             # ── 3. 子智能体运行中：写入 subagent_steps 独立字段 ──
             if not sub_agent_done:
                 sub_todos = await _extract_subagent_todos(
-                    client, sub_thread_id
+                    client, sub_thread_id, seen_active=_seen_active
                 )
                 if sub_todos and sub_todos != last_sub_todos:
                     # 构建子智能体步骤列表（含进度头），步骤 id 加 task 前缀防 React key 冲突。
@@ -882,7 +1122,8 @@ async def _async_sync_loop(
                     # （重派发/模型重写 todo 时子线程会从 pending 重来）。
                     task_prefix = sub_thread_id[:8]
                     steps = _merge_steps_monotonic(
-                        None, sub_todos, _seen_completed, sub_thread_id, agent_name
+                        None, sub_todos, _seen_completed, sub_thread_id, agent_name,
+                        seen_active=_seen_active,
                     )
                     completed = sum(
                         1 for s in steps[1:] if s["status"] == "completed"
@@ -944,7 +1185,11 @@ async def _async_sync_loop(
                         if final_sub_todos:
                             # 渲染与补写器共用（render_final_steps）：两处逻辑不许漂移
                             final_steps_cache = render_final_steps(
-                                final_sub_todos, agent_name, sub_thread_id, run_status
+                                final_sub_todos,
+                                agent_name,
+                                sub_thread_id,
+                                run_status,
+                                terminal_cause,
                             )
                     if final_steps_cache:
                         try:
@@ -1007,13 +1252,22 @@ async def _async_sync_loop(
                                 sub_thread_id, query_header_entry
                             )
                         base["status"] = run_status  # "success" / "error" / "cancelled" / "timeout"
+                        # 终态成因（2026-10-22）：`service_restart` = 发版/重启把 run 带走，
+                        # 不是用户点停止。机器可读字段，前端/补写器据此区分文案。
+                        if terminal_cause:
+                            base["terminal_cause"] = terminal_cause
                         # 终态错误详情透传（方案2）：非 success 时取 run.error 截断写入，
                         # 供前端侧边栏展示具体失败原因（此前恒为 None，用户看不到任何原因）。
-                        _err_text = await _terminal_error(
-                            client, sub_thread_id, run_status
-                        )
-                        if _err_text:
-                            base["error"] = _err_text
+                        # 重启中断例外：这类 run 的 run.error 通常是 "Cancelled"，
+                        # 拼上去会让用户以为是用户取消 —— 用自带文案替换。
+                        if terminal_cause == CAUSE_SERVICE_RESTART:
+                            base["error"] = RESTART_KILLED_TEXT
+                        else:
+                            _err_text = await _terminal_error(
+                                client, sub_thread_id, run_status
+                            )
+                            if _err_text:
+                                base["error"] = _err_text
                         now_str = time.strftime(
                             "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                         )
@@ -1086,6 +1340,7 @@ async def _async_sync_loop(
                         sub_thread_id,
                         agent_name,
                         run_status,
+                        terminal_cause,
                     )
 
                 # ── 成功续跑：子任务完成后通知主 agent 生成图表/报告 ──
@@ -1216,10 +1471,23 @@ async def _async_sync_loop(
                     await _handoff_terminal_write(
                         main_thread_id, sub_thread_id, agent_name,
                         run_status, watched_run_id, final_steps_cache, task,
+                        terminal_cause,
                     )
                     break
 
         except Exception as e:
+            # 会话被删（主/子线程都不在了）⇒ 收工。不收工的话这行 warning 会以
+            # 每 0.5s 一次的频率无限刷下去：2026-10-22 实测 4 分钟 6682 行。
+            if _is_thread_gone(e) and thread_gone.on_not_found():
+                _logger.error(
+                    "[sync] 会话已删除（NotFoundError 持续 %.0fs），watcher 收工: "
+                    "main=%s sub=%s sub_run=%s",
+                    NOT_FOUND_GRACE_S,
+                    str(main_thread_id)[:8],
+                    str(sub_thread_id)[:8],
+                    str(watched_run_id or "")[:8],
+                )
+                break
             _logger.warning("[sync] 同步失败: %s", f"{type(e).__name__}: {e}")
 
     _logger.info("[sync] 退出: %s", sub_thread_id[:8])
@@ -1251,6 +1519,30 @@ async def _get_run_status(
         return runs[0].get("status", "unknown")
     except Exception as e:
         _logger.warning("[sync] get_run_status failed: %s", f"{type(e).__name__}: {e}")
+        return None
+
+
+async def _get_run_record(
+    client, thread_id: str, expect_run_id: Optional[str] = None
+) -> Optional[dict]:
+    """取 run 的完整记录（含 `updated_at`），供「重启带走」判据用。
+
+    与 `_get_run_status` 同一条列出路径（钉扎语义一致）；读不到返回 None，
+    调用方按 fail-open 处理（不判重启）。
+    """
+    try:
+        if expect_run_id:
+            runs = await client.runs.list(thread_id=thread_id, limit=5)
+            for r in runs or []:
+                if r.get("run_id") == expect_run_id:
+                    return r
+            return None
+        runs = await client.runs.list(thread_id=thread_id, limit=1)
+        if not runs:
+            return None
+        return runs[0]
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[sync] get_run_record failed: %s", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1477,6 +1769,7 @@ def _merge_steps_monotonic(
     sub_thread_id: str,
     agent_name: str,
     redispatched: bool = False,
+    seen_active: Optional[list] = None,
 ) -> list:
     """把子智能体 todos 渲染成前端 steps，并保证「已完成的步骤永不回退」（P2b）。
 
@@ -1485,12 +1778,18 @@ def _merge_steps_monotonic(
         sub_todos: _extract_subagent_todos 的结果（content 已含耗时后缀）
         seen_completed: 已完成的步骤内容（去前缀去耗时后缀）集合，**原地更新**
         redispatched: 重派发占位写入（此时无 sub_todos，header 强制 in_progress）
+        seen_active: 可变的「当前步」单元素容器（内容 key），跨轮保持；None = 不锁存
 
     子 run 被 update_async_task 重派发、或模型重写 todo 列表时，子线程 todos 会把
     已完成的步骤重新标成 pending/in_progress；照抄就会让前端进度条回退（trace
     a6f86bbd：卡片 8/8 → 6/8 → 「查询执行」重新转圈）。此处以内容为 key 记账：
     凡曾 completed 过的步骤，渲染时一律 completed。
     header 步骤由本函数生成（content 随计数变化），不参与单调集合。
+
+    当前步同样单调（2026-10-22 dev-34 实证：模型 12:57:42 把「查询执行」改回
+    pending、之后 14 分钟不再写 todos，卡片就此僵在「查询执行 (15m23s...)」且
+    header 被判成 completed）。规则：快照里有更靠后的步 in_progress ⇒ 跟随它；
+    一个 in_progress 都没有 ⇒ 把上次的当前步救回来（只要它还没 completed）。
     """
     task_prefix = sub_thread_id[:8]
     items: list = []  # [(content, status)]，content 不含 "└ " 前缀
@@ -1515,6 +1814,24 @@ def _merge_steps_monotonic(
             if _strip_duration_suffix(body) in seen_completed:
                 status = "completed"
             items.append((body, status))
+
+    # 当前步单调：模型重写 todo 把当前步降回 pending 时，保持它仍是当前步。
+    # 注意顺序：必须先跑完上面的 completed 单调化 —— 模型把某个「曾完成」的步写成
+    # in_progress（12:57:42 的 Schema）时，它已被改判 completed，不能算作接棒。
+    if seen_active is not None:
+        active_keys = [
+            _strip_duration_suffix(content)
+            for content, st in items
+            if st == "in_progress"
+        ]
+        if active_keys:
+            seen_active[:] = [active_keys[-1]]
+        elif seen_active and seen_active[0]:
+            latch_key = seen_active[0]
+            for i, (content, st) in enumerate(items):
+                if st != "completed" and _strip_duration_suffix(content) == latch_key:
+                    items[i] = (content, "in_progress")
+                    break
 
     completed = sum(1 for _, st in items if st == "completed")
     total = len(items)
@@ -1545,15 +1862,18 @@ def render_final_steps(
     agent_name: str,
     sub_thread_id: str,
     run_status: str,
+    cause: Optional[str] = None,
 ) -> list:
     """把子智能体最终 todos 渲染成落 state 的 steps 载荷（全部 completed）。
 
     P2-4 起由 watcher 与补写器（`pending_terminal._replay_row`）**共用** ——
     补写器在主线程空闲后重放终态时，若登记行没带步骤快照，就用同一函数现算，
     避免两处渲染逻辑漂移（步骤 id 前缀/终态文案不一致会让前端卡片错乱）。
+
+    cause：终态成因（如 `service_restart`），决定括号里的文案。
     """
     task_prefix = sub_thread_id[:8]
-    done_label = _DONE_LABELS.get(run_status, "已完成")
+    done_label = _done_label(run_status, cause)
     return [
         {
             "id": f"__subagent_header_{task_prefix}__",
@@ -1578,6 +1898,7 @@ async def _handoff_terminal_write(
     watched_run_id: Optional[str] = None,
     steps: Optional[list] = None,
     task: Optional[dict] = None,
+    cause: Optional[str] = None,
 ) -> bool:
     """放弃本轮写入 → 把终态**登记**成待补写行，交给补写器（P2-4）。
 
@@ -1594,6 +1915,11 @@ async def _handoff_terminal_write(
     try:
         from agent.subagents.pending_terminal import record_terminal  # 惰性：防 import 环
 
+        # 终态成因随 task 快照带过去（补写器 task_json → base 原样继承），
+        # 重启中断的文案/汇报语义才不会在补写路径上丢成「执行失败」。
+        _task = dict(task or {})
+        if cause:
+            _task["terminal_cause"] = cause
         rid = await asyncio.to_thread(
             record_terminal,
             main_thread_id,
@@ -1602,8 +1928,8 @@ async def _handoff_terminal_write(
             run_status,
             str(watched_run_id or ""),
             steps,
-            dict(task or {}),
-            "",
+            _task,
+            RESTART_KILLED_TEXT if cause == CAUSE_SERVICE_RESTART else "",
         )
         return rid is not None
     except Exception as e:  # noqa: BLE001
@@ -1768,7 +2094,9 @@ async def _snapshot_main_todos(client, main_thread_id: str) -> list:
 
 
 def _compute_step_durations(
-    sub_thread_id: str, completed_steps: set | None = None
+    sub_thread_id: str,
+    completed_steps: set | None = None,
+    active_steps: set | None = None,
 ) -> dict:
     """从本地进度文件读取每步耗时，返回 {step_name: duration_str}。
 
@@ -1778,6 +2106,10 @@ def _compute_step_durations(
             某些 step 在进度文件中可能缺少 `to:"completed"` 事件（写入时机晚于
             write_todos），导致被误判为进行中并输出 "Xs..."（看起来仍在计时）。
             传入该集合后，对已完成的 step 强制输出固定耗时（不带省略号）。
+        active_steps: 当前仍在进行的 step 集合（含展示层锁存的当前步）。带 `...`
+            后缀（表示继续续秒）只给这些步 —— 其余步一旦有 `to=pending/completed`
+            的离开事件就停表。2026-10-22 dev-34：模型把「查询执行」改回 pending 后
+            计时仍在涨，卡片看起来「卡了 15 分钟」，实际是假计时。
     """
     import time as _time
 
@@ -1802,12 +2134,19 @@ def _compute_step_durations(
         for step, evts in transitions.items():
             started = None
             ended = None
-            # 取「最后一次」in_progress 与「最后一次」completed。
+            # 取「最后一次」in_progress 及其**离开事件**。
             # 若 step 重复执行（多个 in_progress），以最后一段执行时间为准。
+            # to=pending 也是离开事件：模型重写 todo 把当前步降回 pending 时，
+            # 若不认它，计时会一直涨（假计时）。但被展示层锁存为当前步的除外
+            # ——那次回退本身就是假的（见 _merge_steps_monotonic）。
             for ev in evts:
-                if ev.get("to") == "in_progress":
+                to = ev.get("to")
+                if to == "in_progress":
                     started = ev["ts"]
-                elif ev.get("to") == "completed":
+                    ended = None
+                elif started is not None and to in ("completed", "pending"):
+                    if to == "pending" and active_steps and step in active_steps:
+                        continue
                     ended = ev["ts"]
             # 如果没有 in_progress 记录但有 completed，用 started_at 作为开始时间
             if not started and ended and started_at:
@@ -1825,6 +2164,9 @@ def _compute_step_durations(
                 if step in completed_steps:
                     # 进度文件缺 completed 事件，但该 step 实际已完成 → 固定耗时，不带 ...
                     durations[step] = _fmt(max(secs, 0))
+                elif active_steps is not None and step not in active_steps:
+                    # 已经不是当前步（没拿到离开事件，只可能是快照回退）→ 不续秒
+                    durations[step] = _fmt(max(secs, 0))
                 else:
                     durations[step] = _fmt(max(secs, 0), "...")
         return durations
@@ -1833,13 +2175,18 @@ def _compute_step_durations(
         return {}
 
 
-async def _extract_subagent_todos(client, sub_thread_id: str) -> list:
+async def _extract_subagent_todos(
+    client, sub_thread_id: str, seen_active: Optional[list] = None
+) -> list:
     """从子智能体线程提取最新 todos（含每步耗时）。
 
     2026-09-04（层2 监督机配套）改权威源：**优先读子线程 state 的 `todos` 通道**——
     它由每次 write_todos（模型自发）与 ProgressBoundaryMiddleware（确定性 after_model 推进）
     共同更新；且 todos 通道独立于 messages，不随 auto-compress 剪消息而丢失。
     messages 反扫（写 AI tool_calls / ToolMessage）仅作 state.todos 为空时的兜底。
+
+    `seen_active`（看 `_merge_steps_monotonic`）：快照里一个 in_progress 都没有时，
+    把上一轮锁存的当前步也算作进行中，好让它的耗时不因假回退而停表。
     """
     try:
         state = await client.threads.get_state(thread_id=sub_thread_id)
@@ -1864,9 +2211,19 @@ async def _extract_subagent_todos(client, sub_thread_id: str) -> list:
             completed_steps = {
                 it["content"] for it in items if it["status"] == "completed"
             }
+            active_steps = {
+                it["content"] for it in items if it["status"] == "in_progress"
+            }
+            # 一个 in_progress 都没有 ⇒ 沿用上一轮锁存的当前步（假回退场景），
+            # 否则它的耗时会因为 to=pending 事件被停表。
+            if not active_steps and seen_active and seen_active[0]:
+                if seen_active[0] not in completed_steps:
+                    active_steps = {seen_active[0]}
             # 传入 completed_steps：已完成的 step 强制固定耗时（不带 "..."），
             # 避免进度文件缺 completed 事件时误输出 "Xs..."（已完成还在计时）。
-            durations = _compute_step_durations(sub_thread_id, completed_steps)
+            durations = _compute_step_durations(
+                sub_thread_id, completed_steps, active_steps
+            )
 
             def _with_duration(content: str) -> str:
                 dur = durations.get(content, "")
@@ -2070,6 +2427,7 @@ async def _report_subagent_failure(
     sub_thread_id: str,
     agent_name: str,
     run_status: str,
+    cause: Optional[str] = None,
 ) -> bool:
     """子任务失败终态自动汇报主 agent（方案1，修断链 B）。
 
@@ -2077,16 +2435,12 @@ async def _report_subagent_failure(
     然后 runs.create 注入一条 [系统自动通知] 失败说明，让主 agent 生成用户可读的
     失败消息（此前失败后无任何机制触发主 agent 转述 → 前端聊天区静默）。
 
+    cause：终态成因；`service_restart` 时文案改成「因服务重启中断，可重试」，
+    与用户点停止（cancelled → 已被取消）在聊天区就分得开（2026-10-22 用户要求）。
+
     返回是否成功触发续跑（成功由调用方写 state 的 failure_reported 去重标记；
     失败/主线程忙返回 False，静默降级不级联）。
     """
-    # 终态标签（error/timeout 用失败语义；cancelled 是用户主动取消 → 确认回执）
-    _label = {
-        "error": "执行失败",
-        "timeout": "执行超时",
-        "cancelled": "已被取消",
-    }.get(run_status, "执行失败")
-
     try:
         # 1. 等主线程当前 run 结束（最多 30s）。无 run / 已是终态即认为空闲。
         #    子任务失败时主线程最新 run 通常是 launch run（success），立即通过；
@@ -2117,18 +2471,15 @@ async def _report_subagent_failure(
         #    - _extract_subagent_todos / message_feedback 也过滤 [系统 → 不会被当新问题/新查询
         #    错误详情来自方案2 的 async_tasks[task].error（run.error 压平+截断 500）。
         _err = ""
-        try:
-            _entry = await _read_async_task(
-                client, main_thread_id, sub_thread_id
-            )
-            _err = ((_entry or {}).get("error") or "").strip()
-        except Exception:  # noqa: BLE001
-            pass
-        content = (
-            f"[系统自动通知] 子任务 {agent_name} {_label}"
-            + (f"：{_err}。" if _err else "。")
-            + "请向用户说明失败原因与建议。"
-        )
+        if cause != CAUSE_SERVICE_RESTART:  # 重启语义自带文案，别拼 run.error
+            try:
+                _entry = await _read_async_task(
+                    client, main_thread_id, sub_thread_id
+                )
+                _err = ((_entry or {}).get("error") or "").strip()
+            except Exception:  # noqa: BLE001
+                pass
+        content = _failure_notice(agent_name, run_status, cause, _err)
         run = await client.runs.create(
             thread_id=main_thread_id,
             assistant_id="chat_agent",
@@ -2154,6 +2505,7 @@ async def _maybe_report_failure(
     sub_thread_id: str,
     agent_name: str,
     run_status: str,
+    cause: Optional[str] = None,
 ) -> None:
     """方案1 入口：state 标记去重（跨线程/重启）→ 触发汇报 → 成功则写 failure_reported。"""
     # 1. 已有标记（此前已汇报）→ 跳过
@@ -2171,7 +2523,7 @@ async def _maybe_report_failure(
 
     # 2. 触发（内部等主线程空闲 ≤30s；失败静默降级）
     _ok = await _report_subagent_failure(
-        client, main_thread_id, sub_thread_id, agent_name, run_status
+        client, main_thread_id, sub_thread_id, agent_name, run_status, cause
     )
 
     # 3. 成功 → 写 failure_reported 标记（**有界重试**，读-改-写复用锁）
