@@ -552,3 +552,82 @@ class TestLifecycle:
         assert snap["tasks_enabled"] == 1
         assert snap["last_tick_at"].endswith("+00:00")
         assert snap["fires_ok"] >= 1
+
+
+def _async(v):
+    async def f(*a, **k):
+        return v
+
+    return f
+
+
+class TestFirePinnedReplay:
+    """`_fire` 的回放接线（计划 T21）。
+
+    这三行（`pinned_replay=True` / `input=replay_input` / `record_run(pin_mode=…)`）
+    是「模型不许重新取数」这条硬闸的唯一实现：被删掉不会报错，只会让回放退化成
+    「再查一遍」。所以必须从 `_fire` 这一层钉住，而不只是测 `_try_pinned_fire`。
+    """
+
+    SPEC = json.dumps(
+        {
+            "v": 1,
+            "channel": "sql",
+            "db_name": "db1",
+            "tz": TZ,
+            "sql_template": "SELECT 1",
+            "params": [],
+            "expect_columns": ["a"],
+            "row_limit": 5000,
+            "semantic_version": "abc",
+            "warnings": [],
+        }
+    )
+
+    def _pinned(self, store):
+        tid = _row(store)
+        store.set_pin(
+            tid,
+            spec_json=self.SPEC,
+            semantic_version="abc",
+            source_thread_id="th",
+            now_iso=NOW_ISO,
+        )
+        store.claim(tid, "2026-01-01T11:00:00+00:00", "2026-01-01T13:00:00+00:00", NOW_ISO)
+        return tid
+
+    def test_fire_pinned_sets_replay_flag_and_tool_input(
+        self, store, fake_client, monkeypatch
+    ):
+        monkeypatch.setattr(worker.pin_service, "semantic_version_of", _async("abc"))
+
+        class _Res:
+            sql, cube_query, cube_args, cube_tool = "SELECT 1", "", {}, ""
+            columns, rows, row_count, truncated = ["a"], [{"a": 1}], 1, False
+            params = {}
+
+        monkeypatch.setattr(worker, "run_pinned_spec", _async(_Res()))
+        tid = self._pinned(store)
+        asyncio.run(worker._fire(tid, store=store, now=NOW))
+
+        rc = fake_client.runs_created[0]
+        assert rc["config"]["configurable"]["pinned_replay"] is True
+        # 回放载荷 = user + assistant(tool_calls) + tool 三段，模型看到的“结果”在最后
+        assert rc["input"]["messages"][-1]["role"] == "tool"
+        assert rc["input"]["messages"][-1]["name"] == "check_async_task"
+        assert store.list_runs(tid)[0]["pin_mode"] == "replay"
+
+    def test_fire_version_mismatch_uses_normal_input(
+        self, store, fake_client, monkeypatch
+    ):
+        monkeypatch.setattr(worker.pin_service, "semantic_version_of", _async("zzz"))
+        tid = self._pinned(store)
+        asyncio.run(worker._fire(tid, store=store, now=NOW))
+
+        rc = fake_client.runs_created[0]
+        assert "pinned_replay" not in rc["config"]["configurable"]
+        assert rc["input"]["messages"][-1]["role"] == "user"
+        run = store.list_runs(tid)[0]
+        assert run["pin_mode"] == "fallback"
+        assert run["pin_reason"].startswith("semantic_version_changed")
+        assert store.get_task(tid)["pin_status"] == "invalid"
