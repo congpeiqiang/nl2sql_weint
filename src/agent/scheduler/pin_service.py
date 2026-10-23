@@ -198,7 +198,9 @@ async def pin_task(
         )},
         "pin_status": row.get("pin_status", ""),
         "channel": spec.get("channel", ""),
-        "params": spec.get("params") or [],
+        # 实际下发的那条（含引擎追加/收敛的 LIMIT）——前端「以后跑这条」直接展示它
+        "preview_sql": result.sql,
+        "params": result.params or {},
         "warnings": warns,
     }
 

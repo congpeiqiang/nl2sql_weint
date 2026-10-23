@@ -83,6 +83,7 @@ def _wire(monkeypatch, *, columns=("a",), exec_error=None):
     class _Res:
         sql, cube_query, cube_args, cube_tool, channel = "SELECT 1", "", {}, "", "sql"
         rows, truncated, row_count = [[1]], False, 1
+        params = {"month_start": "2026-10-01"}
         columns: list = []
 
     async def fake_run(spec, **kw):
@@ -134,6 +135,15 @@ async def test_pin_task_stores_expect_columns_from_verification(monkeypatch, tmp
     await pin_service.pin_task(task, now=now, store=s)
     spec = __import__("json").loads(s.get_task("t1")["pin_spec"])
     assert spec["expect_columns"] == ["a"]
+
+
+async def test_pin_task_returns_preview_sql(monkeypatch, tmp_path, now):
+    """前端要展示「以后每次都跑这条」，回填的是**实际下发**的那条（含 limit）。"""
+    s, task = _seed(tmp_path)
+    _wire(monkeypatch)
+    out = await pin_service.pin_task(task, now=now, store=s)
+    assert out["preview_sql"] == "SELECT 1"
+    assert out["params"] == {"month_start": "2026-10-01"}
 
 
 async def test_capture_spec_without_source_run(monkeypatch, tmp_path, now):
