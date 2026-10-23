@@ -46,6 +46,7 @@ from agent.middlewares.execute_guard import ExecuteGuardMiddleware
 from agent.middlewares.chart_artifact_owner import ChartArtifactOwnerMiddleware
 from agent.middlewares.quota_error import QuotaErrorMiddleware
 from agent.middlewares.model_timeout import ModelTimeoutMiddleware
+from agent.middlewares.pinned_replay import PINNED_REPLAY_SECTION, PinnedReplayMiddleware
 # 账号级模型门禁（2026-09-28）：新账号不继承共享模型配置，没配就明确报错、绝不回落。
 # 必须最外层（列表首元素）：命中时连模型实例都不构造。
 from agent.middlewares.model_required import ModelRequiredMiddleware
@@ -105,6 +106,23 @@ def _build_system_prompt() -> str:
 SYSTEM_PROMPT = _build_system_prompt()
 
 
+def _get_configurable() -> dict:
+    """当前 run 的 configurable（``request.runtime.config`` 恒空，必须走这里）。
+
+    单独成函数是为了测试 monkeypatch——与 ``middlewares/pinned_replay._cfg``
+    各自独立实现，不互相 import（一个读 db_name、一个读 pinned_replay，
+    合在一起会让两个模块平白耦合）。
+    """
+    try:
+        from langgraph.config import get_config as _cfg
+
+        if _cfg is not None:
+            return _cfg().get("configurable", {}) or {}
+    except Exception:  # noqa: BLE001  读取失败则走默认
+        pass
+    return {}
+
+
 @dynamic_prompt
 def dynamic_prompt(request: ModelRequest) -> str:
     """从 configurable 读当前数据库名并注入系统提示词。
@@ -113,19 +131,17 @@ def dynamic_prompt(request: ModelRequest) -> str:
     前端切库后 configurable.db_name 是最新的，但主 agent LLM 读不到——委派子 agent 时
     【数据库名称】会写错（默认 imdb）。本函数把当前库名动态注入，
     保证 start_async_task 的 description 写对库名（与子 agent 的 dynamic_prompt 同构）。
+
+    固化回放 run（``pinned_replay``）额外在最前面拼 ``PINNED_REPLAY_SECTION``：
+    数据已经在上下文里了，必须先讲清楚「不要再派子任务」。
     """
     # 用 .text 属性取纯文本（content 可能是 str 也可能是 block 列表，
     # 子 agent 是列表故用 content[-1]["text"]，主 agent 是 str 会炸）。
     prompt = getattr(request.system_message, "text", None) or ""
     if not prompt:
         return ""
-    db_name = ""
-    try:
-        from langgraph.config import get_config as _cfg
-        if _cfg is not None:
-            db_name = (_cfg().get("configurable", {}) or {}).get("db_name", "") or ""
-    except Exception:  # noqa: BLE001  读取失败则走默认
-        db_name = ""
+    cfg = _get_configurable()
+    db_name = cfg.get("db_name", "") or ""
     if db_name:
         # 前置到提示词最顶部（实证 2026-08-11：追加在末尾时，模型对对话历史/总结里
         # 自己上轮说过的库名信任度更高，切库后仍按旧库委派——clickhouse→imdb 回归）。
@@ -139,6 +155,10 @@ def dynamic_prompt(request: ModelRequest) -> str:
             f"`{db_name}`，禁止使用其他库名或默认值（尤其禁止写 imdb）。\n\n"
         )
         prompt = db_section + prompt
+    if cfg.get("pinned_replay"):
+        # 回放段再前置一次：它比「当前数据库」还硬——本轮连委派都不许，
+        # 而 db_section 的通篇都在讲「委派时怎么报库名」。
+        prompt = PINNED_REPLAY_SECTION + prompt
     return prompt
 
 
@@ -331,6 +351,9 @@ MAIN_AGENT_MIDDLEWARE: list = [
     # （langchain factory 从列表尾节点起链），放这里等于「trace/langfuse/瘦身等
     # 都处理完这轮模型输出之后才拦」，被拦那轮的记录不会丢。
     scheduled_hitl,
+    # 固化回放：紧跟审批闸门（同属「拦截模型可见能力」这一层）。回放 run 已有数据，
+    # 摘掉 start_async_task 让模型根本看不到委派能力。
+    PinnedReplayMiddleware(),
     execute_guard,
     chart_owner,
     skills_middleware,

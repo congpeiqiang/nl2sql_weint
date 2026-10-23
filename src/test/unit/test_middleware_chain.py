@@ -9,9 +9,9 @@ class TestMainAgentMiddlewareChain:
         return [type(mw).__name__ for mw in MAIN_AGENT_MIDDLEWARE]
 
     def test_chain_length(self):
-        """主 Agent 应有 18 层中间件。"""
+        """主 Agent 应有 19 层中间件（18 → 19：2026-10-23 加 PinnedReplayMiddleware）。"""
         chain = self._get_middleware_types()
-        assert len(chain) == 18, f"期望 18 层，实际 {len(chain)}: {chain}"
+        assert len(chain) == 19, f"期望 19 层，实际 {len(chain)}: {chain}"
 
     def test_scheduled_hitl_inside_guards(self):
         """定时任务审批闸门紧跟三道模型门禁之后（after_model 逆序执行 ⇒ 录完再拦）。"""
