@@ -15,6 +15,15 @@
 #   rc=2，却被报成「镜像构建失败」且日志是上一版内容）：
 #   5) 上传后、**删除 .next 之前**做整包 md5 对账（定式同 release-backend-bluegreen.ps1）；
 #   6) 失败信息区分「分片损坏 / 真构建失败」，并提示日志可能没被覆盖。
+# 2026-10-22 二次加固（同日第二次事故：整包 md5 拦住后要**整轮重传 371MB**才修好一片）：
+#   7) 逐片 md5：上传时记录每片哈希 → 传清单 → 服务器 `md5sum -c` 定位坏片 → 只补传坏片
+#      （5 轮）。整包 md5 仍是最后闸门，但坏片不再需要从头再传一遍。
+# 2026-10-22 根因修复（「以前能发、这次发不了」的两个真因，都不是链路问题）：
+#   8) `--exclude=.next/dev`：本地跑 `next dev` 留下的 329MB 开发态产物被打进发布包，
+#      包从 28MB 涨到 371MB，分片从 28 片变成 354 片；
+#   9) 分片名 `{0:D2}` → `{0:D4}`：两位数补零在 >99 片时按字典序拼包**乱序**
+#      （实测该主机顺序 p00 p09 p10 p100 p101 p354 p99）。
+#   8+9 叠加才炸：片数 ≤99 时 D2 恰好也是对的，所以 10-20 那次 28 片一切正常。
 # 2026-09-22 合并分片上传逻辑（原 docs/prod环境 版本），解决 VPN 链路大文件断传。
 # 2026-10-05（档 1）：`up -d` **不再带 nginx**（改由 nginx 的请求期解析自己发现新前端 IP，
 #   见 docker/nginx.conf）；验证从「盲等 15s + 打一次 /」改成**轮询 / 到 200**，并追加两发
@@ -65,15 +74,24 @@ Write-Host "== 3/6 打包构建产物（不含 node_modules / next.config.ts）=
 $tarFile = "frontend_release.tar"
 $tarPath = Join-Path $WorkDir $tarFile
 if (Test-Path $tarPath) { Remove-Item $tarPath }
-tar -cf $tarPath --exclude=.next/cache -C $LocalRoot .next public package.json yarn.lock
+# 2026-10-22 第三次加固的两个根因之一：`.next/dev` 必须排除。
+# 本地跑过 `next dev`（Turbopack）会留下 `.next/dev`（本项目实测 329MB），`yarn build`
+# **不清它** ⇒ 发布包从 28MB 涨到 371MB ⇒ 分片 28 → 354 片 ⇒ 撞上下面的分片命名地雷。
+# 它纯属本地开发态产物，对生产构建无用。（另一个根因见下面 part 命名处的 D4 注释。）
+tar -cf $tarPath --exclude=.next/cache --exclude=.next/dev -C $LocalRoot .next public package.json yarn.lock
 if ($LASTEXITCODE -ne 0) { throw "打包失败" }
 $tarMB = [math]::Round((Get-Item $tarPath).Length/1MB,2)
-# 2026-10-22 加固：分片上传只信 scp 退出码是不够的 —— 本次实测 355 片全部回 0，
-# 服务器上拼出来的 tar 却比本地少 13,312 字节（tar -tf rc=2，解出 616/1977 个文件），
-# 而脚本把失败报成了「前端镜像构建失败」，日志里还是上一版的旧内容（docker-compose
-# build 根本没执行到 ⇒ /tmp/fe_build.log 没被覆盖，不能拿它判本次失败）。
-# 定式与 release-backend-bluegreen.ps1 第 3 步一致：把本地 md5 带上去，在**删除任何
-# 既有产物之前**对账（放进 && 链里，md5 不过 ⇒ rm -rf .next 不会执行，旧树不动）。
+# 闸门：包一旦又把 dev 态产物带进来，宁可现在失败也别发一个臃肿镜像。
+$devEntries = @(tar -tf $tarPath | Select-String -SimpleMatch ".next/dev/")
+if ($devEntries.Count -gt 0) { throw "打包结果里混进了 .next/dev（$($devEntries.Count) 个条目）——本地存在 next dev 产物，exclude 失效了，先查 $tarPath" }
+# 2026-10-22 加固：分片上传只信 scp 退出码是不够的（`tar -xf rc=2` 曾被误报成
+# 「前端镜像构建失败」，日志还是上一版旧内容 —— docker-compose build 根本没执行到，
+# 不能拿 /tmp/fe_build.log 判本次失败）。
+# ⚠️ 当时的「服务器 tar 比本地少 13,312 / 6,144 字节 = 链路截断」已被证伪：那是拿两次
+# **不同 build** 的包比大小（BUILD_ID 每次随机重生成）。逐片 md5 实测链路不截断，
+# 真因是上面那条 D2 字典序拼包乱序。定式与 release-backend-bluegreen.ps1 第 3 步一致：
+# 把本地 md5 带上去，在**删除任何既有产物之前**对账（放进 && 链里，md5 不过 ⇒
+# rm -rf .next 不会执行，旧树不动）。
 $localMd5 = (Get-FileHash -Algorithm MD5 -Path $tarPath).Hash.ToLower()
 Write-Host "   打包完成：$tarMB MB  md5=$localMd5"
 
@@ -84,17 +102,45 @@ Write-Host "== 4/6 分片上传到服务器（$ChunkMB MB/片，每片重试 $Ma
 $partSize = [int]($ChunkMB * 1MB)
 $bytes  = [IO.File]::ReadAllBytes($tarPath)
 $nPart  = [math]::Ceiling($bytes.Length / $partSize)
+$partHash = @{}
 
 # 清掉上次残留
-ssh @SshOpt "${SshUser}@${Server}" "rm -f ${AppDir}/frontend/${tarFile} ${AppDir}/frontend/${tarFile}.part*" | Out-Null
+ssh @SshOpt "${SshUser}@${Server}" "rm -f ${AppDir}/frontend/${tarFile} ${AppDir}/frontend/${tarFile}.part* ${AppDir}/frontend/parts.md5" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "无法连接服务器——检查 VPN" }
+
+# 单片落地 + scp（含重试）。抽成函数是为了坏片补传能复用同一套重试逻辑。
+function Send-Part([int]$idx) {
+    $off  = $idx * $partSize
+    $len  = [math]::Min($partSize, $bytes.Length - $off)
+    $name = "${tarFile}.part{0:D4}" -f $idx
+    $local = Join-Path $WorkDir $name
+    $fs = [IO.File]::Create($local); $fs.Write($bytes, $off, $len); $fs.Close()
+    $ok = $false
+    for ($try = 1; $try -le $MaxRetry; $try++) {
+        # 必须 $null = 接住：PS 里原生命令的 stdout 会混进函数返回值，
+        # scp 的进度输出会让调用方永远拿到「真值」，失败被当成成功。
+        $null = scp @SshOpt $local "${SshUser}@${Server}:${AppDir}/frontend/$name"
+        if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+        Write-Host ("   分片 {0}/{1} 第 {2}/{3} 次被重置，3s 后重试…" -f ($idx+1), $nPart, $try, $MaxRetry) -ForegroundColor Yellow
+        Start-Sleep -Seconds 3
+    }
+    Remove-Item $local -ErrorAction SilentlyContinue
+    return $ok
+}
 
 for ($i = 0; $i -lt $nPart; $i++) {
     $off  = $i * $partSize
     $len  = [math]::Min($partSize, $bytes.Length - $off)
-    $name = "${tarFile}.part{0:D2}" -f $i
+    # 2026-10-22 第三次加固的另一个根因：分片名必须补零到 4 位。
+    # 原写法 `{0:D2}` ⇒ 0~99 是两位、100 以上三位；服务器 `cat ${tarFile}.part*`
+    # 按**字典序**展开（实测该主机 en_US.UTF-8 下顺序是 p00 p09 p10 p100 p101 p354 p99），
+    # 三位数分片全插进两位数之间 ⇒ 拼出来的 tar 是乱序排列 ⇒ md5 对不上 / tar -xf rc=2。
+    # 28 片时看不出问题（都两位数），一旦超过 99 片必炸 —— 所以这里不能省。
+    $name = "${tarFile}.part{0:D4}" -f $i
     $local = Join-Path $WorkDir $name
     $fs = [IO.File]::Create($local); $fs.Write($bytes, $off, $len); $fs.Close()
+    # 记下本地这份的哈希：服务器侧逐片对账的基准（scp 退出码 0 也可能少字节）
+    $partHash[$i] = (Get-FileHash -Algorithm MD5 -Path $local).Hash.ToLower()
     $ok = $false
     for ($try = 1; $try -le $MaxRetry; $try++) {
         scp @SshOpt $local "${SshUser}@${Server}:${AppDir}/frontend/$name"
@@ -108,6 +154,32 @@ for ($i = 0; $i -lt $nPart; $i++) {
 }
 Write-Host "   全部 $nPart 片已上传（共 $tarMB MB）" -ForegroundColor Green
 Remove-Item $tarPath -ErrorAction SilentlyContinue
+
+# 逐片 md5 对账：传清单 → 服务器 md5sum -c → 只补传坏片（5 轮）
+$manifestPath = Join-Path $WorkDir "parts.md5"
+$manifestLines = for ($i = 0; $i -lt $nPart; $i++) {
+    "{0}  {1}" -f $partHash[$i], ("${tarFile}.part{0:D4}" -f $i)
+}
+Set-Content -Path $manifestPath -Value $manifestLines -Encoding ASCII
+scp @SshOpt $manifestPath "${SshUser}@${Server}:${AppDir}/frontend/parts.md5"
+if ($LASTEXITCODE -ne 0) { throw "parts.md5 清单上传失败" }
+Remove-Item $manifestPath -ErrorAction SilentlyContinue
+# 只输出坏片名单：md5sum 的失败行有两种形态（`file: FAILED` / `md5sum: file: No such file`），
+# 先剥 "md5sum: " 前缀再截掉第一个 ": " 之后的内容，两次都得到裸文件名。
+$badCmd = "cd ${AppDir}/frontend && md5sum -c parts.md5 2>&1 | grep -v ': OK`$' | sed -e 's/^md5sum: //' -e 's/: .*`$//' | grep '^${tarFile}.part' | sort -u"
+for ($round = 1; $round -le 5; $round++) {
+    $badRaw = ssh @SshOpt "${SshUser}@${Server}" $badCmd
+    $bad = @($badRaw | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne "" })
+    if ($bad.Count -eq 0) { Write-Host ("   逐片 md5 全过（第 {0} 轮，{1} 片）" -f $round, $nPart) -ForegroundColor Green; break }
+    if ($round -eq 5) { throw ("分片校验 5 轮后仍有坏片：{0} —— 检查 VPN/链路，或把 -ChunkMB 调小重跑" -f ($bad -join ', ')) }
+    Write-Host ("   第 {0} 轮发现 {1} 个坏片，只补传这些：{2}" -f $round, $bad.Count, ($bad -join ' ')) -ForegroundColor Yellow
+    foreach ($fileName in $bad) {
+        if ($fileName -match '\.part(\d+)$') {
+            $idx = [int]$Matches[1]
+            if (-not (Send-Part $idx)) { throw "坏片 $fileName 补传失败（已重试 $MaxRetry 次）" }
+        }
+    }
+}
 
 # 上传明文 next.config.ts + Dockerfile（源码里那份是 DLP 密文，不能用于服务器构建）
 Write-Host "   上传明文 next.config.ts + Dockerfile ..."
@@ -136,7 +208,7 @@ Write-Host "== 5/6 服务器拼接 + 校验 BUILD_ID + 重建镜像 + 三步重�
 # 新旧两个 chunk，旧的已无人引用但依然可被旧 HTML 命中）。
 # 只清 `.next`（纯构建产物）：`public/`、`package.json`、`yarn.lock`、`next.config.ts`、
 # `Dockerfile` 都不动 —— 后两个还是上面 scp 上来的明文版，绝不能被 tar 覆盖。
-ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && echo '${localMd5}  ${tarFile}' | md5sum -c - && rm -f ${tarFile}.part* && rm -rf .next && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend > /tmp/fe_build.log 2>&1; rc=`$?; tail -3 /tmp/fe_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi; docker-compose stop frontend; docker-compose rm -f frontend; docker-compose up -d --no-deps frontend"
+ssh @SshOpt "${SshUser}@${Server}" "cd ${AppDir}/frontend && cat ${tarFile}.part* > ${tarFile} && echo '${localMd5}  ${tarFile}' | md5sum -c - && rm -f ${tarFile}.part* parts.md5 && rm -rf .next && tar -xf ${tarFile} && rm -f ${tarFile} && echo BUILD_ID=`$(cat .next/BUILD_ID) && cd ${AppDir} && docker-compose build frontend > /tmp/fe_build.log 2>&1; rc=`$?; tail -3 /tmp/fe_build.log; if [ `$rc -ne 0 ]; then echo BUILD_FAILED rc=`$rc; exit `$rc; fi; docker-compose stop frontend; docker-compose rm -f frontend; docker-compose up -d --no-deps frontend"
 # 三种失败要能分开（原来一律报「镜像构建失败」，10-22 那次因此查错方向）：
 #   · md5 对账不过 ⇒ 分片损坏/有残片，**服务器上什么都没动**（.next 未删）；
 #   · tar -xf 失败   ⇒ 包不完整（正常不会走到，md5 已经拦在前面）；
