@@ -5,7 +5,16 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from agent.scheduler.query_spec import SpecError, render_text, resolve_anchors, templatize
+from agent.scheduler.query_spec import (
+    SpecError,
+    build_check_payload,
+    extract_spec,
+    render_spec,
+    render_text,
+    resolve_anchors,
+    templatize,
+    validate_columns,
+)
 
 TZ = "Asia/Shanghai"
 
@@ -116,3 +125,177 @@ def test_render_moves_with_time():
     tmpl, _, _ = templatize("dt = '2026-10-01'", _anchors())
     later = resolve_anchors(datetime(2026, 11, 15, 9, 0, tzinfo=ZoneInfo(TZ)), TZ)
     assert render_text(tmpl, later) == "dt = '2026-11-01'"
+
+
+# ── spec 提取 / 渲染 / 列漂移 ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def now():
+    """固化参考时刻：2026-10-23 11:00 北京（UTC 03:00，见 Review Focus #5）。"""
+    return datetime(2026, 10, 23, 11, 0, tzinfo=ZoneInfo(TZ))
+
+
+def _check_sql():
+    return {
+        "status": "success",
+        "thread_id": "t-sub",
+        "result": "| a | b |\n|---|---|\n| 1 | 2 |",
+        "sql": "SELECT dept, SUM(hours) FROM t WHERE dt >= '2026-10-01'",
+        "dialect_sql": "SELECT `dept`, SUM(`hours`) FROM `t` WHERE `dt` >= '2026-10-01'",
+    }
+
+
+def test_extract_sql_prefers_dialect_sql(now):
+    spec, warns = extract_spec(
+        _check_sql(),
+        db_name="witops",
+        tz="Asia/Shanghai",
+        semantic_version="abc123",
+        source_thread_id="t-main",
+        now=now,
+    )
+    assert spec["channel"] == "sql"
+    assert spec["sql_template"].startswith("SELECT `dept`")
+    assert "{{p:month_start}}" in spec["sql_template"]
+    assert spec["params"] == ["month_start"]
+    assert spec["v"] == 1 and spec["semantic_version"] == "abc123"
+    assert warns == []
+
+
+def test_extract_cube(now):
+    check = {
+        "status": "success",
+        "thread_id": "t-sub",
+        "result": "x",
+        "sql_kind": "cube",
+        "cube_query": "x > '2026-10-01'",
+        "cube_args": {
+            "cube": "workhour",
+            "measures": ["workhour.total_hours"],
+            "dimensions": ["dept.name"],
+            "filters": ["workhour.dt:gte:2026-10-01"],
+            "time_dimension": "workhour.dt:day:2026-10-01,2026-10-24",
+        },
+        "cube_tool": "query_cube",
+    }
+    spec, _ = extract_spec(
+        check,
+        db_name="witops",
+        tz="Asia/Shanghai",
+        semantic_version="",
+        source_thread_id="t",
+        now=now,
+    )
+    assert spec["channel"] == "cube"
+    assert spec["cube_template"]["filters"] == ["workhour.dt:gte:{{p:month_start}}"]
+    assert (
+        spec["cube_template"]["time_dimension"]
+        == "workhour.dt:day:{{p:month_start}},{{p:tomorrow}}"
+    )
+    assert set(spec["cube_template"]) <= {
+        "cube",
+        "measures",
+        "dimensions",
+        "filters",
+        "time_dimension",
+    }
+
+
+def test_extract_refuses_without_sql_or_cube(now):
+    with pytest.raises(SpecError) as e:
+        extract_spec(
+            {"status": "success", "thread_id": "t", "result": "x"},
+            db_name="d",
+            tz="Asia/Shanghai",
+            semantic_version="",
+            source_thread_id="t",
+            now=now,
+        )
+    assert e.value.code == "no_query"
+
+
+def test_extract_strips_cube_window_keys(now):
+    check = {
+        "status": "success",
+        "thread_id": "t",
+        "result": "x",
+        "sql_kind": "cube",
+        "cube_args": {
+            "cube": "c",
+            "measures": ["c.m"],
+            "limit": 100,
+            "offset": 0,
+            "granularity": "day",
+        },
+    }
+    with pytest.raises(SpecError) as e:
+        extract_spec(
+            check,
+            db_name="d",
+            tz="Asia/Shanghai",
+            semantic_version="",
+            source_thread_id="t",
+            now=now,
+        )
+    assert e.value.code == "cube_key_unsupported"
+
+
+def test_render_moves_with_time(now):
+    spec, _ = extract_spec(
+        _check_sql(),
+        db_name="d",
+        tz="Asia/Shanghai",
+        semantic_version="",
+        source_thread_id="t",
+        now=now,
+    )
+    later = now.replace(month=11, day=15)
+    out = render_spec(spec, later)
+    assert "'2026-11-01'" in out["sql"]
+    assert out["params"] == {"month_start": "2026-11-01"}
+
+
+def test_render_rejects_unknown_spec_version(now):
+    with pytest.raises(SpecError) as e:
+        render_spec({"v": 99, "channel": "sql", "sql_template": "SELECT 1"}, now)
+    assert e.value.code == "spec_version_unknown"
+
+
+def test_render_rejects_placeholder_not_in_params(now):
+    spec = {"v": 1, "channel": "sql", "sql_template": "SELECT '{{p:today}}'", "params": []}
+    with pytest.raises(SpecError) as e:
+        render_spec(spec, now)
+    assert e.value.code == "render_failed"
+
+
+def test_validate_columns_case_and_order_insensitive():
+    spec = {"expect_columns": ["dept", "Sum_Hours"]}
+    assert validate_columns(spec, ["SUM_HOURS", "DEPT"])[0] is True
+
+
+def test_validate_columns_detects_drift():
+    spec = {"expect_columns": ["dept", "hours"]}
+    ok, detail = validate_columns(spec, ["dept", "cost"])
+    assert ok is False
+    assert "missing=[hours]" in detail and "extra=[cost]" in detail
+
+
+def test_check_payload_has_signature_keys():
+    spec = {"channel": "sql", "sql_template": "SELECT 1", "expect_columns": ["a"]}
+    p = build_check_payload(
+        spec,
+        thread_id="t-new",
+        columns=["a"],
+        rows=[(1,)],
+        sql="SELECT 1",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=1,
+        truncated=False,
+    )
+    assert {"status", "thread_id", "result", "sql"} <= p.keys()
+    assert p["status"] == "success" and p["thread_id"] == "t-new"
+    assert "固化回放" in p["result"] and "| a |" in p["result"]
+    assert p["pinned_replay"] is True

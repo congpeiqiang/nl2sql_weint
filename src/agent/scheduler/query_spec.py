@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import calendar
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 #: 固化 spec 的版本。未知版本一律拒绝（未来兼容闸）。
@@ -144,3 +144,228 @@ def placeholders(template: str) -> list[str]:
 def end_of_month(d: date) -> date:
     """当月最后一天（供后续任务复用，避免各处自己算）。"""
     return d.replace(day=calendar.monthrange(d.year, d.month)[1])
+
+
+#: cube 查询定义允许固化的键（wren ``query_cube`` 真正收下的编译键）。
+CUBE_KEYS: tuple[str, ...] = (
+    "cube",
+    "measures",
+    "dimensions",
+    "filters",
+    "time_dimension",
+)
+
+#: 固化执行时结果集的行上限（超出按截断回放，不判失效）。
+DEFAULT_ROW_LIMIT = 5000
+
+
+def extract_spec(
+    check: dict,
+    *,
+    db_name: str,
+    tz: str,
+    semantic_version: str,
+    source_thread_id: str,
+    now: datetime,
+    date_bindings: dict[str, str] | None = None,
+    accept_constants: bool = False,
+) -> tuple[dict, list[str]]:
+    """check_async_task 结果 → 固化 spec。
+
+    通道由 ``check["sql_kind"]`` 决定：``"cube"`` 走 cube 定义，其余走物理 SQL。
+    ``expect_columns`` 这里留空——它必须来自**验证执行**的真实列（Task 5 填）。
+    """
+    anchors = resolve_anchors(now, tz)
+    base = {
+        "v": SPEC_VERSION,
+        "db_name": db_name,
+        "tz": tz,
+        "semantic_version": semantic_version,
+        "source_thread_id": source_thread_id,
+        "captured_at": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+    if check.get("sql_kind") == "cube":
+        args = check.get("cube_args") or {}
+        if not isinstance(args, dict):
+            raise SpecError("no_query", "cube_args 不是对象")
+        unknown = [k for k in args if k not in CUBE_KEYS]
+        if unknown:
+            raise SpecError(
+                "cube_key_unsupported",
+                f"{unknown}；cube 只认 {list(CUBE_KEYS)}",
+            )
+        if not args.get("cube") or not args.get("measures"):
+            raise SpecError("no_query", "cube 定义缺少 cube 或 measures")
+
+        used: list[str] = []
+        warns: list[str] = []
+
+        def _add(u: list[str], w: list[str]) -> None:
+            for x in u:
+                if x not in used:
+                    used.append(x)
+            warns.extend(w)
+
+        template: dict = {}
+        for key in ("cube", "measures", "dimensions"):
+            if key in args:
+                template[key] = args[key]
+        if args.get("filters"):
+            rendered_filters = []
+            for f in args["filters"]:
+                t, u, w = templatize(str(f), anchors, date_bindings, accept_constants)
+                rendered_filters.append(t)
+                _add(u, w)
+            template["filters"] = rendered_filters
+        if args.get("time_dimension"):
+            t, u, w = templatize(
+                str(args["time_dimension"]), anchors, date_bindings, accept_constants
+            )
+            template["time_dimension"] = t
+            _add(u, w)
+
+        return (
+            {
+                **base,
+                "channel": "cube",
+                "cube_template": template,
+                "params": used,
+                "expect_columns": [],
+                "row_limit": DEFAULT_ROW_LIMIT,
+                "warnings": warns,
+            },
+            warns,
+        )
+
+    sql = (check.get("dialect_sql") or "").strip() or (check.get("sql") or "").strip()
+    if not sql:
+        raise SpecError("no_query", "既没有物理 SQL 也没有 cube 定义")
+    template_sql, used, warns = templatize(sql, anchors, date_bindings, accept_constants)
+    return (
+        {
+            **base,
+            "channel": "sql",
+            "sql_template": template_sql,
+            "params": used,
+            "expect_columns": [],
+            "row_limit": DEFAULT_ROW_LIMIT,
+            "warnings": warns,
+        },
+        warns,
+    )
+
+
+def _template_placeholders(spec: dict) -> list[str]:
+    """spec 模板里出现的占位符（sql 或 cube 通道）。"""
+    found: list[str] = []
+    if spec.get("channel") == "sql":
+        found.extend(placeholders(spec.get("sql_template") or ""))
+    else:
+        tpl = spec.get("cube_template") or {}
+        for f in tpl.get("filters") or []:
+            found.extend(placeholders(str(f)))
+        found.extend(placeholders(str(tpl.get("time_dimension") or "")))
+    return list(dict.fromkeys(found))
+
+
+def render_spec(spec: dict, now: datetime) -> dict:
+    """按当次时间把 spec 渲染成可直接执行的 SQL / cube 定义。
+
+    Returns: ``{"channel", "sql", "cube", "params"}``；``sql`` / ``cube`` 互斥。
+    """
+    if spec.get("v") != SPEC_VERSION:
+        raise SpecError("spec_version_unknown", str(spec.get("v")))
+    anchors = resolve_anchors(now, spec.get("tz") or "Asia/Shanghai")
+
+    declared = set(spec.get("params") or [])
+    needed = _template_placeholders(spec)
+    missing = [p for p in needed if p not in declared]
+    if missing:
+        raise SpecError(
+            "render_failed", f"模板占位符 {missing} 不在 params 里（spec 被改坏了？）"
+        )
+
+    params = {p: anchors[p] for p in needed}
+    if spec.get("channel") == "sql":
+        return {
+            "channel": "sql",
+            "sql": render_text(spec.get("sql_template") or "", anchors),
+            "cube": None,
+            "params": params,
+        }
+
+    tpl = spec.get("cube_template") or {}
+    cube: dict = {}
+    for key in ("cube", "measures", "dimensions"):
+        if key in tpl:
+            cube[key] = tpl[key]
+    if tpl.get("filters"):
+        cube["filters"] = [render_text(str(f), anchors) for f in tpl["filters"]]
+    if tpl.get("time_dimension"):
+        cube["time_dimension"] = render_text(str(tpl["time_dimension"]), anchors)
+    return {"channel": "cube", "sql": None, "cube": cube, "params": params}
+
+
+def validate_columns(spec: dict, columns: list[str]) -> tuple[bool, str]:
+    """结果列与 ``expect_columns`` 比对：大小写不敏感、忽略顺序。
+
+    顺序和大小写由驱动决定，不该算漂移；少列/多列才是（口径或表结构变了）。
+    """
+    expect = {str(c).lower() for c in spec.get("expect_columns") or []}
+    got = {str(c).lower() for c in columns}
+    if not expect:
+        return True, ""
+    missing = sorted(expect - got)
+    extra = sorted(got - expect)
+    if not missing and not extra:
+        return True, ""
+    return False, f"missing=[{', '.join(missing)}] extra=[{', '.join(extra)}]"
+
+
+def build_check_payload(
+    spec: dict,
+    *,
+    thread_id: str,
+    columns: list[str],
+    rows: list,
+    sql: str,
+    cube_query: str,
+    cube_args: dict,
+    cube_tool: str,
+    row_count: int,
+    truncated: bool,
+) -> dict:
+    """合成一条 `check_async_task` 结果——报告的**唯一**数据源。
+
+    ``build_report`` 按内容签名认它（status / thread_id / result 三键 + success），
+    所以这几个键一个都不能少。
+    """
+    head = f"> 固化回放：按已固化查询取数，共 {row_count} 行"
+    if truncated:
+        head += "（结果已截断）"
+    lines = [head, ""]
+    cols = [str(c) for c in columns]
+    if cols:
+        lines.append("| " + " | ".join(cols) + " |")
+        lines.append("|" + "|".join(["---"] * len(cols)) + "|")
+        for r in rows:
+            cells = list(r) if isinstance(r, (list, tuple)) else [r]
+            lines.append("| " + " | ".join(str(c) for c in cells) + " |")
+
+    payload: dict = {
+        "status": "success",
+        "thread_id": thread_id,
+        "result": "\n".join(lines),
+        "result_size": row_count,
+        "row_count": row_count,
+        "truncated": truncated,
+        "sql": sql,
+        "pinned_replay": True,
+    }
+    if spec.get("channel") == "cube":
+        payload["sql_kind"] = "cube"
+        payload["cube_query"] = cube_query
+        payload["cube_args"] = cube_args
+        payload["cube_tool"] = cube_tool
+    return payload
