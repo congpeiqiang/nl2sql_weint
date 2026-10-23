@@ -108,13 +108,20 @@ async def test_pin_task_happy_path(monkeypatch, tmp_path, now):
     assert row["pin_semantic_version"] == ""
 
 
-async def test_pin_task_column_drift_rejected(monkeypatch, tmp_path, now):
+async def test_pin_task_does_not_pretend_to_check_columns(monkeypatch, tmp_path, now):
+    """固化期**不**做列比对（那是个永远为真的死分支）。
+
+    来源会话里没有驱动返回的列名，`extract_spec` 的 `expect_columns` 恒为空；
+    基线由验证执行本身定下，漂移在触发时比对（见 test_scheduler_pin_replay 的
+    `columns_changed` 用例）。
+    """
     s, task = _seed(tmp_path)
-    _wire(monkeypatch, columns=("b",))
-    with pytest.raises(pin_service.PinError) as e:
-        await pin_service.pin_task(task, now=now, store=s)
-    assert e.value.code == "columns_changed"
-    assert s.get_task("t1")["pin_status"] == ""  # 失败不落库
+    _wire(monkeypatch, columns=("a", "b"))
+    await pin_service.pin_task(task, now=now, store=s)
+    import json
+
+    spec = json.loads(s.get_task("t1")["pin_spec"])
+    assert spec["expect_columns"] == ["a", "b"]
 
 
 async def test_pin_task_never_pins_on_exec_failure(monkeypatch, tmp_path, now):

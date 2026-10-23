@@ -16,6 +16,8 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from agent.utils.caliber_evidence import extract_caliber_block
+
 #: 固化 spec 的版本。未知版本一律拒绝（未来兼容闸）。
 SPEC_VERSION = 1
 
@@ -183,6 +185,9 @@ def extract_spec(
         "semantic_version": semantic_version,
         "source_thread_id": source_thread_id,
         "captured_at": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        # 「业务口径」节逐字随 spec 走：回放时没有子 agent、也拿不到 knowledge
+        # 正文，报告的口径节只能从这段原文里抽。
+        "caliber_block": extract_caliber_block(str(check.get("result") or "")),
     }
 
     if check.get("sql_kind") == "cube":
@@ -370,10 +375,17 @@ def build_check_payload(
         for r in rows:
             lines.append("| " + " | ".join(_row_cells(r, cols)) + " |")
 
+    result_text = "\n".join(lines)
+    caliber = str(spec.get("caliber_block") or "").strip()
+    if caliber:
+        # 回放没有子 agent 可写口径节 ⇒ 把固化时逐字存下的那段接回结果末尾。
+        # `build_report` 的 `_parse_caliber_block` 只认**末尾**的块。
+        result_text = f"{result_text}\n\n{caliber}"
+
     payload: dict = {
         "status": "success",
         "thread_id": thread_id,
-        "result": "\n".join(lines),
+        "result": result_text,
         "result_size": row_count,
         "row_count": row_count,
         "truncated": truncated,

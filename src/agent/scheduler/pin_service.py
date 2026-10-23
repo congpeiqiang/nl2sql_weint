@@ -1,8 +1,9 @@
 """固化查询的编排层：取来源会话的结果 → 固化 → **验证执行** → 落库。
 
-为什么必须验证执行一次：``expect_columns`` 只能来自真实执行返回的列。来源会话
-里那段文本是模型当时写给人看的，列名大小写/顺序/子查询别名都可能与本次驱动
-返回的不一致；拿文本当基线，第二次触发就会误报列漂移。
+为什么必须验证执行一次：一是确认这条 SQL 今天还能跑通（源 run 可能已经是几天
+前的），二是把 ``expect_columns`` 定成**真实执行**返回的列——来源会话里只有模型
+写给人看的文本，列名大小写/顺序/子查询别名都可能与驱动返回的不一致；拿文本当
+基线，第二次触发就会误报列漂移。列漂移的**比对点**在触发时（worker），不在固化时。
 
 固化失败一律**不落库**——半截的 spec 比没有 spec 更糟：它会以 active 状态被
 回放，直到某次列漂移才暴露。
@@ -17,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from agent.scheduler.pin_exec import PinExecError, run_pinned_spec
-from agent.scheduler.query_spec import SpecError, extract_spec, validate_columns
+from agent.scheduler.query_spec import SpecError, extract_spec
 from agent.scheduler.store import ScheduledTaskStore, get_store
 from agent.utils.git_repo import repo_info
 from agent.utils.semantic_db import SemanticDbDetector
@@ -173,10 +174,10 @@ async def pin_task(
     except PinExecError as e:
         raise PinError(e.code, e.detail) from e
 
-    ok, detail = validate_columns(spec, result.columns)
-    if not ok:
-        raise PinError("columns_changed", detail)
-
+    # 这里**不**比对列：``extract_spec`` 出来的 `expect_columns` 是空的（来源
+    # 会话里只有模型写给人看的文本，没有驱动返回的列名），拿它比对必然通过——
+    # 一度写成 `validate_columns(spec, result.columns)` 是个永远为真的死分支
+    # （2026-10-23 评审 I3）。基线就是这次验证执行的列，漂移在**触发时**比。
     spec["expect_columns"] = [str(c) for c in result.columns]
     st.set_pin(
         task_id,

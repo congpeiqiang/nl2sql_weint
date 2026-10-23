@@ -346,3 +346,56 @@ def test_check_payload_states_shown_row_cap():
     )
     assert "1001" in p["result"]
     assert "前 3 行" in p["result"]
+
+
+def test_extract_spec_carries_caliber_block(now):
+    """来源答复里的「业务口径」节必须随 spec 一起固化。
+
+    回放时没有子 agent、也没有 knowledge 正文，`build_report` 只能从结果文本里
+    抽口径节 —— 不带上它，固化报告就永久缺「业务口径」且不会有任何说明。
+    """
+    check = {
+        "dialect_sql": "SELECT 1 WHERE dt >= '2026-10-22'",
+        "result": (
+            "已查询完成：共 2 行。\n\n"
+            "## 业务口径\n"
+            "- 工时 | 仅统计已审批的报工单 | 工时制度 §3.1\n"
+            "- 部门 | 按在职人员所属部门 | 组织架构说明\n"
+        ),
+    }
+    spec, _ = extract_spec(
+        check, db_name="d", tz=TZ, semantic_version="abc",
+        source_thread_id="t", now=now,
+    )
+    assert "## 业务口径" in spec["caliber_block"]
+    assert "工时制度 §3.1" in spec["caliber_block"]
+
+
+def test_extract_spec_without_caliber_block():
+    spec, _ = extract_spec(
+        {"dialect_sql": "SELECT 1", "result": "已完成，共 3 行。"},
+        db_name="d", tz=TZ, semantic_version="abc",
+        source_thread_id="t", now=datetime(2026, 10, 23, 11, tzinfo=ZoneInfo(TZ)),
+    )
+    assert spec["caliber_block"] == ""
+
+
+def test_check_payload_replays_caliber_block():
+    p = build_check_payload(
+        {
+            "channel": "sql",
+            "sql_template": "SELECT 1",
+            "caliber_block": "## 业务口径\n- 工时 | 已审批 | 工时制度 §3.1\n",
+        },
+        thread_id="t",
+        columns=["a"],
+        rows=[{"a": 1}],
+        sql="SELECT 1",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=1,
+        truncated=False,
+    )
+    assert "## 业务口径" in p["result"]
+    assert "工时制度 §3.1" in p["result"]
