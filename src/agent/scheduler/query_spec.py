@@ -323,6 +323,21 @@ def validate_columns(spec: dict, columns: list[str]) -> tuple[bool, str]:
     return False, f"missing=[{', '.join(missing)}] extra=[{', '.join(extra)}]"
 
 
+def _row_cells(row: Any, cols: list[str]) -> list[str]:
+    """一行 → 单元格文本。
+
+    **真实形状是 ``dict``**：``db.multi_sql.df_to_result`` 用
+    ``df.to_dict(orient="records")``，所以按 ``columns`` 取值。只认 list/tuple
+    会把整行渲染成一个 ``str(dict)`` 单元格——表头 2 列、数据 1 列，模型据此
+    汇总/画图全错（2026-10-23 评审 C1）。
+    """
+    if isinstance(row, dict):
+        return [str(row.get(c, "")) for c in cols]
+    if isinstance(row, (list, tuple)):
+        return [str(c) for c in row]
+    return [str(row)]
+
+
 def build_check_payload(
     spec: dict,
     *,
@@ -342,6 +357,9 @@ def build_check_payload(
     所以这几个键一个都不能少。
     """
     head = f"> 固化回放：按已固化查询取数，共 {row_count} 行"
+    if row_count > len(rows):
+        # 载荷只带前 N 行：不写明的话模型会把「看到的」当成「全部」
+        head += f"（仅展示前 {len(rows)} 行）"
     if truncated:
         head += "（结果已截断）"
     lines = [head, ""]
@@ -350,8 +368,7 @@ def build_check_payload(
         lines.append("| " + " | ".join(cols) + " |")
         lines.append("|" + "|".join(["---"] * len(cols)) + "|")
         for r in rows:
-            cells = list(r) if isinstance(r, (list, tuple)) else [r]
-            lines.append("| " + " | ".join(str(c) for c in cells) + " |")
+            lines.append("| " + " | ".join(_row_cells(r, cols)) + " |")
 
     payload: dict = {
         "status": "success",

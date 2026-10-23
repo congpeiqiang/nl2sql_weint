@@ -299,3 +299,50 @@ def test_check_payload_has_signature_keys():
     assert p["status"] == "success" and p["thread_id"] == "t-new"
     assert "固化回放" in p["result"] and "| a |" in p["result"]
     assert p["pinned_replay"] is True
+
+
+def test_check_payload_renders_dict_rows_by_columns():
+    """真实行形状是 list[dict]（`db.multi_sql.df_to_result`），必须按列取值渲染。
+
+    只认 list/tuple 会把整行渲染成一个 `str(dict)` 单元格 ⇒ 报告 §1 的数据表
+    列数与表头对不上，模型据此汇总/画图必错。
+    """
+    import pandas as pd
+
+    from mcp_server.db_mcp_server.db.multi_sql import df_to_result
+
+    real = df_to_result(pd.DataFrame({"dept": ["A", "B"], "hours": [3, 5]}))
+    p = build_check_payload(
+        {"channel": "sql", "sql_template": "SELECT 1"},
+        thread_id="t",
+        columns=real["columns"],
+        rows=real["rows"],
+        sql="SELECT 1",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=real["row_count"],
+        truncated=False,
+    )
+    assert "| dept | hours |" in p["result"]
+    assert "| A | 3 |" in p["result"]
+    assert "| B | 5 |" in p["result"]
+    assert "{'dept'" not in p["result"]
+
+
+def test_check_payload_states_shown_row_cap():
+    """载荷只带前 N 行时必须明说，否则模型以为看到的就是全部。"""
+    p = build_check_payload(
+        {"channel": "sql", "sql_template": "SELECT 1"},
+        thread_id="t",
+        columns=["a"],
+        rows=[{"a": i} for i in range(3)],
+        sql="",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=1001,
+        truncated=True,
+    )
+    assert "1001" in p["result"]
+    assert "前 3 行" in p["result"]

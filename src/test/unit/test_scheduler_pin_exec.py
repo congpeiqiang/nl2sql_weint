@@ -194,3 +194,48 @@ async def test_readonly_sql_clamps_oversized_limit(monkeypatch):
     out = await pin_exec.run_readonly_sql("d", "SELECT a FROM t LIMIT 999999", 5000)
     assert "LIMIT 5000" in seen["sql"]
     assert out["executed_sql"] == seen["sql"]
+
+
+async def test_payload_row_cap_marks_truncated(monkeypatch, now):
+    """载荷只带前 200 行 ⇒ truncated 必须为真（row_count 仍是全量）。"""
+    rows = [[i] for i in range(250)]
+
+    async def fake_run(db_name, sql, limit=1000):
+        return {"columns": ["a"], "rows": rows, "truncated": False}
+
+    monkeypatch.setattr(pin_exec, "run_readonly_sql", fake_run)
+    res = await pin_exec.run_pinned_spec(_sql_spec(), now=now)
+    assert res.row_count == 250
+    assert len(res.rows) == 200
+    assert res.truncated is True
+
+
+async def test_readonly_sql_truncated_at_sql_own_limit(monkeypatch):
+    """SQL 自带的 LIMIT 才是真实取数上限（语义层 plan 会追加 LIMIT 1001）。
+
+    截断判据只比 `limit` 参数的话永远不会命中（1001 < 5000）⇒ 被截断的数据集
+    会被当作完整结果写进报告。
+    """
+    import pandas as pd
+
+    import mcp_server.db_mcp_server.db.config as config_mod
+    import mcp_server.db_mcp_server.db.db_server as db_server
+
+    class _Cfg:
+        db_type = "sqlite"
+        config = {}
+
+    monkeypatch.setattr(
+        config_mod.McpSqlConfig, "from_env", classmethod(lambda cls, db="": _Cfg())
+    )
+
+    class _Runner:
+        def __init__(self, **kw):
+            pass
+
+        async def run_sql(self, args, ctx):
+            return pd.DataFrame({"a": [1, 2, 3]})
+
+    monkeypatch.setattr(db_server, "_load_runner_class", lambda t: _Runner)
+    out = await pin_exec.run_readonly_sql("d", "SELECT a FROM t LIMIT 3", 5000)
+    assert out["truncated"] is True

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -97,6 +98,16 @@ def _json_safe(v: Any) -> Any:
     return str(v)
 
 
+#: 语句结尾的整数 LIMIT（`_apply_default_limit` 的收敛/追加都落成这个形状）。
+_TRAILING_LIMIT_RE = re.compile(r"\bLIMIT\s+(\d+)\s*$", re.IGNORECASE)
+
+
+def _effective_limit(stmt: str, default: int) -> int:
+    """这条语句**实际**的取数上限：结尾有整数 LIMIT 就用它，否则是传入的默认值。"""
+    m = _TRAILING_LIMIT_RE.search(stmt or "")
+    return int(m.group(1)) if m else default
+
+
 def _run_engine_blocking(runner, args, context):
     """在工作线程里把 engine 的 ``run_sql`` 跑完（引擎是同步实心）。"""
     return asyncio.run(runner.run_sql(args, context))
@@ -132,15 +143,14 @@ async def run_readonly_sql(db_name: str, sql: str, limit: int = 1000) -> dict:
     statements = split_sql_statements(sql)
     all_results: list = []
     executed: list[str] = []
+    caps: list[int] = []
     for stmt in statements:
-        # clamp_existing=True：固化回放是**无人值守**通道，SQL 里自带的
-        # `LIMIT 999999` 必须收敛到 row_limit，否则一次定时就把全表拉进内存。
-        # （只往下压，不会压小本来就小于上限的 LIMIT。）
         # clamp_existing=True：固化回放是**无人值守**通道，SQL 里自带的
         # `LIMIT 999999` 必须收敛到 row_limit，否则一次定时就把全表拉进内存。
         # （只往下压，不会压小本来就小于上限的 LIMIT。）
         stmt = _apply_default_limit(stmt, limit, clamp_existing=True)
         executed.append(stmt)
+        caps.append(_effective_limit(stmt, limit))
         df = await asyncio.to_thread(
             _run_engine_blocking, runner, RunSqlToolArgs(sql=stmt), context
         )
@@ -148,10 +158,14 @@ async def run_readonly_sql(db_name: str, sql: str, limit: int = 1000) -> dict:
 
     result = combine_multi_results(all_results)
     rows = [_json_safe(r) for r in result.get("rows", [])]
+    # 真实取数上限 = 最后一条语句**生效的** LIMIT。语义层 plan 会给固化下来的
+    # dialect_sql 追加 `LIMIT 1001`，它小于 row_limit ⇒ 只比 `limit` 参数的判据
+    # 永远不会命中，被截断的数据集会被当作完整结果写进报告（评审 I1）。
+    cap = caps[-1] if caps else limit
     return {
         "columns": [str(c) for c in result.get("columns", [])],
         "rows": rows,
-        "truncated": bool(result.get("truncated", False)) or len(rows) >= limit,
+        "truncated": bool(result.get("truncated", False)) or len(rows) >= cap,
         "executed_sql": ";\n".join(executed),
     }
 
@@ -233,6 +247,7 @@ async def run_pinned_spec(
         columns=columns,
         rows=rows[:_MAX_PAYLOAD_ROWS],
         row_count=len(rows),
-        truncated=bool(raw.get("truncated")),
+        # 砍到 200 行也是截断：不置位的话报告头会写「共 1001 行」却只列出 200 行
+        truncated=bool(raw.get("truncated")) or len(rows) > _MAX_PAYLOAD_ROWS,
         params=rendered["params"],
     )
