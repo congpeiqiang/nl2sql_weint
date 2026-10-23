@@ -28,7 +28,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from agent.scheduler import service
+from agent.scheduler import pin_service, service
+from agent.scheduler.pin_exec import PinExecError, run_pinned_spec
+from agent.scheduler.query_spec import build_check_payload, validate_columns
 from agent.scheduler.store import FIRING, ScheduledTaskStore, get_store
 from agent.utils.sdk_errors import is_thread_gone
 
@@ -337,6 +339,117 @@ def _make_client():
     return get_client(url=_api_base_url())
 
 
+# ── 固化回放 ──────────────────────────────────────────────────────────
+#
+# 回放 = 把「已经跑对过的那条查询」的结果，伪装成一次成功到 check_async_task
+# 结果喂给主 agent。为什么不走图内执行：图内执行要先跑起一整个 agent run
+# 才发现固化失效，而 _fire 里预检失败只要不注入就行——回退路径就是今天的代码。
+
+PIN_TASK_ID = "pin-replay"
+"""回放载荷里的伪任务 id（不是真实 thread，别去 fetch）。"""
+
+PIN_CALL_ID = "pin-replay-call"
+"""伪 tool_call id：AI 消息与 Tool 消息靠它配对。"""
+
+
+def _build_replay_input(content: str, payload: dict) -> dict:
+    """合成 ``runs.create(input=...)``：user 提问 + 一次 check_async_task 调用与结果。
+
+    ``build_report`` 的唯一数据源就是「最近一条 status=success 的 check 结果」，
+    所以这里要造出**形状完全一致**的一对消息（签名见 ``_find_last_check_result``）。
+    """
+    return {
+        "messages": [
+            {"role": "user", "content": content},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": PIN_CALL_ID,
+                        "name": "check_async_task",
+                        "args": {"task_id": PIN_TASK_ID},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": PIN_CALL_ID,
+                "name": "check_async_task",
+                "content": json.dumps(payload, ensure_ascii=False),
+            },
+        ]
+    }
+
+
+async def _try_pinned_fire(
+    row: dict,
+    store: ScheduledTaskStore,
+    now: datetime,
+    client: Any,
+    thread_id: str = "",
+    content: str = "",
+) -> tuple[bool, str, str, dict | None]:
+    """尝试走固化回放。**绝不抛**——抛出去会走 ``_fail_fire``，任务被误标 fire 失败。
+
+    Returns: ``(是否回放成功, pin_mode, pin_reason, replay_input)``。
+    失败时已把任务标成 ``pin_status='invalid'``，本次触发回退到正常 agent 执行。
+    """
+    task_id = row["id"]
+    now_iso = _utc_iso(now)
+
+    def _fallback(reason: str) -> tuple[bool, str, str, None]:
+        try:
+            store.invalidate_pin(task_id, reason, now_iso)
+        except Exception:  # noqa: BLE001  标失效失败也不能拦住本次触发
+            logger.exception("sched: 标记固化失效失败 id=%s", task_id)
+        logger.warning("sched: 固化失效，本次回退正常执行 id=%s: %s", task_id, reason)
+        return False, "fallback", reason, None
+
+    try:
+        spec = json.loads(row.get("pin_spec") or "{}")
+    except (json.JSONDecodeError, ValueError) as e:
+        return _fallback(f"render_failed: pin_spec 不是合法 JSON（{e}）")
+    if not isinstance(spec, dict) or not spec:
+        return _fallback("render_failed: pin_spec 为空")
+
+    # 语义库换了 commit 就不能再按老 spec 回放：MDL 一改，物理 SQL 的口径就变了。
+    try:
+        current = await pin_service.semantic_version_of(row.get("db_name") or "")
+    except Exception as e:  # noqa: BLE001  查版本失败按「不敢回放」处理
+        return _fallback(f"semantic_version_changed: 读取版本失败（{type(e).__name__}: {e}）")
+    saved = row.get("pin_semantic_version") or spec.get("semantic_version") or ""
+    if current != saved:
+        return _fallback(
+            f"semantic_version_changed: {saved or '(空)'} -> {current or '(空)'}"
+        )
+
+    try:
+        res = await run_pinned_spec(spec, now=now)
+    except PinExecError as e:
+        return _fallback(f"{e.code}: {e.detail}" if e.detail else e.code)
+    except Exception as e:  # noqa: BLE001
+        return _fallback(f"render_failed: {type(e).__name__}: {e}"[:300])
+
+    ok, detail = validate_columns(spec, res.columns)
+    if not ok:
+        return _fallback(f"columns_changed: {detail}")
+
+    payload = build_check_payload(
+        spec,
+        thread_id=thread_id,
+        columns=res.columns,
+        rows=res.rows,
+        sql=res.sql,
+        cube_query=res.cube_query,
+        cube_args=res.cube_args,
+        cube_tool=res.cube_tool,
+        row_count=res.row_count,
+        truncated=res.truncated,
+    )
+    return True, "replay", "", _build_replay_input(content, payload)
+
+
 async def _fire(
     task_id: str,
     store: Optional[ScheduledTaskStore] = None,
@@ -381,14 +494,31 @@ async def _fire(
             configurable["llm_route"] = row["llm_route"]
         if row["llm_model"]:
             configurable["llm_model"] = row["llm_model"]
+
+        # 固化回放：预检 + 只读执行放在 runs.create **之前**——不成立就直接用
+        # 今天的正常路径，不必为一个注定要回退的触发先起一个 agent run。
+        # 回放载荷要带本次新开的 thread_id，所以 thread 先建好再判断（建了不删：
+        # 失败要复用它跑正常 run，删了会撞 is_thread_gone 分支）。
+        pin_mode, pin_reason = "normal", ""
+        replay_input = None
+        if row.get("pin_status") == "active":
+            ok_pin, pin_mode, pin_reason, replay_input = await _try_pinned_fire(
+                row, st, now, client, thread_id=thread_id, content=content
+            )
+            if ok_pin:
+                # 只在本轮禁用派发工具：回放已有结果，再派子任务就是重复取数。
+                configurable["pinned_replay"] = True
         run = await client.runs.create(
             thread_id=thread_id,
             assistant_id="chat_agent",
-            input={"messages": [{"role": "user", "content": content}]},
+            input=replay_input or {"messages": [{"role": "user", "content": content}]},
             config={"recursion_limit": 500, "configurable": configurable},
         )
         run_id = run.get("run_id", "") if isinstance(run, dict) else ""
-        st.record_run(task_id, thread_id, run_id, now_iso)
+        st.record_run(
+            task_id, thread_id, run_id, now_iso,
+            pin_mode=pin_mode, pin_reason=pin_reason,
+        )
         st.set_running_thread(task_id, thread_id, run_id)
         # 归属自动正确：threads.create 钩子先打 internal，langfuse_metadata
         # ._apply_ownership 按 run configurable 的真实 user_id 补打（子 agent 同款）。
