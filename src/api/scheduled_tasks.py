@@ -27,8 +27,10 @@ _logger = logging.getLogger(__name__)
 #: 固化失效码 → 用户可读提示。没列到的码回落成 ``code: detail``（机读优先，
 #: 前端弹窗原样展示也说得过去）。这些 message 会直接出现在前端对话框里。
 _PIN_HINT = {
-    "ambiguous_date": "日期歧义：同一个日期同时匹配多个口径锚点，请指定 date_bindings 消歧",
-    "unmatched_date": "SQL 里有对不上任何日期锚点的字面量；若确认是业务常量，请勾选「保留常量」",
+    # 这两条的文案要落在**用户界面上真能做的动作**上：date_bindings 没有界面，
+    # 让用户「去指定 date_bindings」等于让他去改一个他看不到的字段。
+    "ambiguous_date": "日期歧义：同一个日期同时匹配多个口径锚点。请在会话里把它改成更明确的说法（如「上月1号」）后重新固化",
+    "unmatched_date": "SQL 里有对不上任何日期锚点的字面量。若它确实是业务常量，点「保留常量重试」；否则请先在会话里改成相对日期再固化",
     "no_source_run": "该任务还没有成功执行过一次，没有可固化的查询",
     "no_check_result": "来源会话里没有成功的查询结果（check_async_task status=success）",
     "columns_changed": "本次执行返回的列与固化时不一致（口径或表结构变了）",
@@ -53,8 +55,12 @@ def _pin_error_text(e: Exception) -> str:
     return hint or (f"{code}: {detail}" if detail else str(e))
 
 
-def _err(msg: str, status: int = 400) -> JSONResponse:
-    return json_response({"ok": False, "error": msg}, status=status)
+def _err(msg: str, status: int = 400, code: str = "") -> JSONResponse:
+    """``code`` 只在有值时出现（机读失效码），``error`` 契约保持不变。"""
+    body: dict[str, Any] = {"ok": False, "error": msg}
+    if code:
+        body["code"] = code
+    return json_response(body, status=status)
 
 
 def _user(request: Request) -> dict[str, Any] | JSONResponse:
@@ -225,7 +231,7 @@ async def pin_task_api(request: Request) -> JSONResponse:
             accept_constants=bool(body.get("accept_constants")),
         )
     except pin_service.PinError as e:
-        return _err(_pin_error_text(e), 400)
+        return _err(_pin_error_text(e), 400, code=str(getattr(e, "code", "") or ""))
     except Exception as e:  # noqa: BLE001
         _logger.exception("[sched-api] 固化失败 id=%s", task_id)
         return _err(f"固化失败: {e}", 500)

@@ -199,3 +199,21 @@ def test_pin_own_thread_allowed(client, seeded_task, monkeypatch):
     )
     assert r.status_code == 200
     assert seen["thread_id"] == "mine"
+
+
+def test_pin_error_carries_machine_readable_code(client, seeded_task, monkeypatch):
+    """失效码要机读化：前端靠它决定给不给「保留常量重试」这类动作，
+    光有中文文案（`.error`）做不到——那是给人看的，不是给程序判断的。"""
+    from agent.scheduler.pin_service import PinError
+
+    async def fake_pin(task, **kw):
+        raise PinError("unmatched_date", "2025-01-01")
+
+    monkeypatch.setattr(api_module.pin_service, "pin_task", fake_pin)
+    r = client.post(f"/api/scheduled-tasks/{seeded_task}/pin", json={})
+    assert r.status_code == 400
+    body = r.json()
+    assert body["code"] == "unmatched_date"
+    assert body["ok"] is False and body["error"]  # `.error` 契约不变
+    # 文案必须指得出用户**实际能点的下一步**（否则等于让人去改没人见过的 date_bindings）
+    assert "保留常量" in body["error"]
