@@ -358,6 +358,13 @@ def update_task(
         st.reschedule(task_id, rebuilt["next_run_at"])
     elif fields:
         st.update_task(task_id, fields)
+
+    # 换库必须解绑固化：回放执行的是 spec 里记的**旧库**，而触发前的权限复验
+    # 验的是任务行的**新库** ⇒ 既可能拿旧库数据冒充新库报表，也等于绕开授权。
+    old_db = str(row.get("db_name") or "")
+    new_db = str(fields.get("db_name") or old_db)
+    if "db_name" in fields and new_db != old_db:
+        st.clear_pin(task_id, f"db_changed: {old_db} -> {new_db}", _utc_iso(_now_utc()))
     return st.get_task(task_id)
 
 

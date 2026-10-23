@@ -311,3 +311,32 @@ class TestFireTimeRecheck:
         monkeypatch.setattr("agent.auth.users.find_user", _boom)
         monkeypatch.setattr(service, "can_access_db", lambda u, db: False)
         assert service.recheck_db_access("u1", "db1") is True
+
+    def test_update_db_name_clears_pin(self, store, admin):
+        """换库即解绑固化：回放执行的是 spec 里的旧库，而权限复验验的是新库。"""
+        row = service.create_task(admin, _payload(), store=store)
+        store.set_pin(
+            row["id"],
+            spec_json='{"v":1,"db_name":"db1"}',
+            semantic_version="abc",
+            source_thread_id="th",
+            now_iso="2026-10-23T00:00:00+00:00",
+        )
+        assert store.get_task(row["id"])["pin_status"] == "active"
+        updated = service.update_task(admin, row["id"], {"db_name": "db2"}, store=store)
+        assert updated["pin_status"] == ""
+        assert updated["pin_spec"] == ""
+        assert updated["pin_invalid_reason"].startswith("db_changed: db1 -> db2")
+
+    def test_update_same_db_name_keeps_pin(self, store, user):
+        """只改名字不该把固化弄丢。"""
+        row = service.create_task(user, _payload(), store=store)
+        store.set_pin(
+            row["id"],
+            spec_json='{"v":1,"db_name":"db1"}',
+            semantic_version="abc",
+            source_thread_id="th",
+            now_iso="2026-10-23T00:00:00+00:00",
+        )
+        updated = service.update_task(user, row["id"], {"db_name": "db1", "name": "改名"}, store=store)
+        assert updated["pin_status"] == "active"

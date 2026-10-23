@@ -413,6 +413,14 @@ async def _try_pinned_fire(
     if not isinstance(spec, dict) or not spec:
         return _fallback("render_failed: pin_spec 为空")
 
+    # 库一致性闸（读侧）：回放执行的是 spec 里的库，而 `_fire` 的权限复验验的是
+    # 任务行的库。两者不一致时既会“拿旧库数据冒充新库报表”，也等于绕开授权。
+    # 写路径（service.update_task 换库即解绑）盖不住存量 active 行，这道闸盖得住。
+    spec_db = str(spec.get("db_name") or "")
+    row_db = str(row.get("db_name") or "")
+    if spec_db != row_db:
+        return _fallback(f"db_changed: {spec_db or '(空)'} -> {row_db or '(空)'}")
+
     # 语义库换了 commit 就不能再按老 spec 回放：MDL 一改，物理 SQL 的口径就变了。
     try:
         current = await pin_service.semantic_version_of(row.get("db_name") or "")
@@ -431,23 +439,28 @@ async def _try_pinned_fire(
     except Exception as e:  # noqa: BLE001
         return _fallback(f"render_failed: {type(e).__name__}: {e}"[:300])
 
-    ok, detail = validate_columns(spec, res.columns)
-    if not ok:
-        return _fallback(f"columns_changed: {detail}")
+    # 契约是「绝不抛」：抛出去会被 `_fire` 当成 fire 失败并回拨重试，而回退
+    # 正常路径本来就能出结果。所以连校验/载荷组装也一起兜住，不只是 I/O 那几行。
+    try:
+        ok, detail = validate_columns(spec, res.columns)
+        if not ok:
+            return _fallback(f"columns_changed: {detail}")
 
-    payload = build_check_payload(
-        spec,
-        thread_id=thread_id,
-        columns=res.columns,
-        rows=res.rows,
-        sql=res.sql,
-        cube_query=res.cube_query,
-        cube_args=res.cube_args,
-        cube_tool=res.cube_tool,
-        row_count=res.row_count,
-        truncated=res.truncated,
-    )
-    return True, "replay", "", _build_replay_input(content, payload)
+        payload = build_check_payload(
+            spec,
+            thread_id=thread_id,
+            columns=res.columns,
+            rows=res.rows,
+            sql=res.sql,
+            cube_query=res.cube_query,
+            cube_args=res.cube_args,
+            cube_tool=res.cube_tool,
+            row_count=res.row_count,
+            truncated=res.truncated,
+        )
+        return True, "replay", "", _build_replay_input(content, payload)
+    except Exception as e:  # noqa: BLE001
+        return _fallback(f"render_failed: {type(e).__name__}: {e}"[:300])
 
 
 async def _fire(

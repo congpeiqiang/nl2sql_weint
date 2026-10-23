@@ -218,3 +218,40 @@ async def test_payload_carries_new_thread_id(monkeypatch, store, client, now, ac
 
     payload = _json.loads(replay_input["messages"][2]["content"])
     assert payload["thread_id"] == "th-new"
+
+
+async def test_db_changed_falls_back(monkeypatch, store, client, now, active_row):
+    """任务行换了库 ⇒ 不许拿 spec 里的旧库回放。
+
+    `_fire` 的权限复验验的是**任务行**的库，而回放执行的是 **spec** 的库：两者
+    不一致时，回放既可能拿旧库数据冒充新库报表，也等于绕开授权。写路径
+    （service.update_task）已经解绑，这道读侧闸保护的是存量 active 行。
+    """
+    monkeypatch.setattr(worker.pin_service, "semantic_version_of", _async("abc"))
+    row = {**active_row, "db_name": "other"}
+    ok, mode, reason, replay_input = await worker._try_pinned_fire(row, store, now, client)
+    assert ok is False and mode == "fallback" and replay_input is None
+    assert reason.startswith("db_changed")
+    assert store.get_task("t1")["pin_status"] == "invalid"
+
+
+async def test_pinned_fire_never_raises_on_payload_build(monkeypatch, store, client, now, active_row):
+    """契约：`_try_pinned_fire` 绝不抛——载荷组装炸了也要走回退，不能变成 fire 失败。"""
+    monkeypatch.setattr(worker.pin_service, "semantic_version_of", _async("abc"))
+
+    class _Res:
+        sql, cube_query, cube_args, cube_tool = "SELECT 1", "", {}, ""
+        columns, rows, row_count, truncated = ["a"], [[1]], 1, False
+        params = {}
+
+    monkeypatch.setattr(worker, "run_pinned_spec", _async(_Res()))
+
+    def boom(*a, **k):
+        raise TypeError("payload build exploded")
+
+    monkeypatch.setattr(worker, "build_check_payload", boom)
+    ok, mode, reason, replay_input = await worker._try_pinned_fire(
+        active_row, store, now, client
+    )
+    assert ok is False and mode == "fallback" and replay_input is None
+    assert reason.startswith("render_failed")
