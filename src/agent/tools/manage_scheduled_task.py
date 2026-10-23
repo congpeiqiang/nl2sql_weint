@@ -83,6 +83,8 @@ def _brief(row: dict[str, Any]) -> dict[str, Any]:
         "last_run_at": row.get("last_run_at"),
         "last_status": row.get("last_status"),
         "last_error": (row.get("last_error") or "")[:200],
+        "pin_status": row.get("pin_status") or "",
+        "pin_invalid_reason": (row.get("pin_invalid_reason") or "")[:200],
         "running": bool(row.get("running_thread_id")),
         "repeat_times": row.get("repeat_times"),
         "repeat_completed": row.get("repeat_completed"),
