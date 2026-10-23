@@ -208,10 +208,19 @@ async def pin_task_api(request: Request) -> JSONResponse:
         return _err(f"无权访问数据库: {task['db_name']}（授权已回收）", 403)
 
     body = await parse_body(request)
+    source_thread = str(body.get("thread_id") or "").strip()
+    if source_thread:
+        # `pin_task` 走内部自调用读该 thread 的状态（不带 cookie），handler 是唯一
+        # 能判归属的地方。不校验 ⇒ 知道别人 thread_id 就能把别人的查询固化进自己
+        # 的任务，`preview_sql` 还会把别人的 SQL 原文回给人（跨用户 IDOR）。
+        from agent.auth.grants import owned_thread
+
+        if not owned_thread(user, source_thread):
+            return _err("无权访问该会话", 403)
     try:
         res = await pin_service.pin_task(
             task,
-            thread_id=(str(body.get("thread_id") or "") or None),
+            thread_id=(source_thread or None),
             date_bindings=body.get("date_bindings") or None,
             accept_constants=bool(body.get("accept_constants")),
         )

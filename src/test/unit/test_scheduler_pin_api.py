@@ -160,3 +160,42 @@ def test_get_pin_other_owner_404(client, other_user_task):
     r = client.get(f"/api/scheduled-tasks/{other_user_task}/pin")
     assert r.status_code == 404
     assert r.json()["error"] == "任务不存在"
+
+
+def test_pin_foreign_thread_rejected(client, seeded_task, monkeypatch):
+    """来源会话归属必须校验：`pin_task` 走内部自调用读 thread 状态，不带用户身份。
+
+    不校验的话，知道他人 thread_id 就能把**别人**那次查询固化进自己的任务，
+    `preview_sql` 还会原样返回他人的 SQL 文本（跨用户 IDOR）。
+    """
+    import agent.auth.grants as grants
+
+    monkeypatch.setattr(grants, "owned_thread", lambda user, tid: False)
+
+    async def fake_pin(task, **kw):  # pragma: no cover - 不该被调用
+        raise AssertionError("会话不归本人时不许固化")
+
+    monkeypatch.setattr(api_module.pin_service, "pin_task", fake_pin)
+    r = client.post(
+        f"/api/scheduled-tasks/{seeded_task}/pin", json={"thread_id": "someone-elses"}
+    )
+    assert r.status_code == 403
+    assert "会话" in r.json()["error"]
+
+
+def test_pin_own_thread_allowed(client, seeded_task, monkeypatch):
+    import agent.auth.grants as grants
+
+    seen = {}
+    monkeypatch.setattr(grants, "owned_thread", lambda user, tid: tid == "mine")
+
+    async def fake_pin(task, **kw):
+        seen.update(kw)
+        return {"pin_status": "active", "pin": {"preview_sql": "SELECT 1"}}
+
+    monkeypatch.setattr(api_module.pin_service, "pin_task", fake_pin)
+    r = client.post(
+        f"/api/scheduled-tasks/{seeded_task}/pin", json={"thread_id": "mine"}
+    )
+    assert r.status_code == 200
+    assert seen["thread_id"] == "mine"
