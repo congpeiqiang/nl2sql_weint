@@ -13,12 +13,15 @@ at-most-once 不变量（hermes jobs.py:1389 同款取舍）：``claim()`` 在**
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+_logger = logging.getLogger(__name__)
 
 FIRING = "-"
 """在飞占位符：claim 成功后、真实 thread_id 落地前的 running_thread_id 值。
@@ -54,6 +57,12 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
     last_status       TEXT NOT NULL DEFAULT '',
     last_error        TEXT NOT NULL DEFAULT '',
     origin_thread_id  TEXT NOT NULL DEFAULT '',
+    pin_status        TEXT NOT NULL DEFAULT '',
+    pin_spec          TEXT NOT NULL DEFAULT '',
+    pin_semantic_version TEXT NOT NULL DEFAULT '',
+    pin_saved_at      TEXT NOT NULL DEFAULT '',
+    pin_invalid_reason TEXT NOT NULL DEFAULT '',
+    pin_source_thread_id TEXT NOT NULL DEFAULT '',
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
@@ -67,7 +76,9 @@ CREATE TABLE IF NOT EXISTS task_runs (
     fired_at    TEXT NOT NULL,
     finished_at TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'running',
-    error       TEXT NOT NULL DEFAULT ''
+    error       TEXT NOT NULL DEFAULT '',
+    pin_mode    TEXT NOT NULL DEFAULT 'normal',
+    pin_reason  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, id);
 """
@@ -77,8 +88,24 @@ _COLUMNS = (
     "sched_kind", "sched_expr", "sched_display", "tz", "next_run_at",
     "enabled", "state", "repeat_times", "repeat_completed",
     "running_thread_id", "retry_count", "last_run_at", "last_status",
-    "last_error", "origin_thread_id", "created_at", "updated_at",
+    "last_error", "origin_thread_id",
+    "pin_status", "pin_spec", "pin_semantic_version", "pin_saved_at",
+    "pin_invalid_reason", "pin_source_thread_id",
+    "created_at", "updated_at",
 )
+
+_PIN_COLUMNS = (
+    "pin_status", "pin_spec", "pin_semantic_version", "pin_saved_at",
+    "pin_invalid_reason", "pin_source_thread_id",
+)
+"""固化查询字段：只能走 ``set_pin`` / ``invalidate_pin`` / ``clear_pin``。
+
+三条不变量（计划 §A）：
+- ``active``  ⇒ ``pin_spec`` 与 ``pin_semantic_version`` 可读；
+- ``invalid`` ⇒ ``pin_invalid_reason`` 非空，且 ``pin_spec`` **保留**（供人工排查）；
+- ``''``      ⇒ 其余 pin 字段全空（``pin_invalid_reason`` 例外：清 pin 时写入原因）。
+"""
+
 _UPDATABLE = frozenset(_COLUMNS) - {
     "id", "owner", "created_at",
     # 认领/收口字段只能走 claim/complete/fail 专用方法（保住 CAS 语义）。
@@ -86,6 +113,9 @@ _UPDATABLE = frozenset(_COLUMNS) - {
     # （claim/fail_fire 各自会重置/递增，允许直写是为了可测「已重试 N 次」状态）。
     "next_run_at", "running_thread_id", "repeat_completed",
     "last_status", "last_run_at",
+    # pin 六列同上：普通「编辑任务」不许顺手改固化状态，否则 spec 与
+    # semantic_version 会各自被改一半，失效判定就永远对不上了。
+    *_PIN_COLUMNS,
 }
 
 
@@ -112,6 +142,40 @@ class ScheduledTaskStore:
             self._conn.execute("PRAGMA busy_timeout=15000")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """存量库增量迁移（幂等）：补 pin 六列 / task_runs 两列。
+
+        ``CREATE TABLE IF NOT EXISTS`` 对**已存在**的表不会加列——老库重启后
+        必须靠这里补。每列独立 try：某列失败不该挡住其余列，更不能挡住启动
+        （同 ``agent/feedback/store.py`` 的 ``_migrate_schema``）。
+        """
+        pending = tuple(
+            ("scheduled_tasks", col, "TEXT NOT NULL DEFAULT ''")
+            for col in _PIN_COLUMNS
+        ) + (
+            ("task_runs", "pin_mode", "TEXT NOT NULL DEFAULT 'normal'"),
+            ("task_runs", "pin_reason", "TEXT NOT NULL DEFAULT ''"),
+        )
+        with self._lock:
+            for table, col, decl in pending:
+                try:
+                    cols = {
+                        r["name"]
+                        for r in self._conn.execute(f"PRAGMA table_info({table})")
+                    }
+                    if cols and col not in cols:
+                        self._conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {col} {decl}"
+                        )
+                        self._conn.commit()
+                        _logger.info("[scheduler] 迁移：%s 表新增 %s 列", table, col)
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning(
+                        "[scheduler] %s.%s 列迁移失败（按已有结构继续）: %s",
+                        table, col, e,
+                    )
 
     def close(self) -> None:
         with self._lock:
@@ -138,6 +202,9 @@ class ScheduledTaskStore:
                 "repeat_completed": 0, "running_thread_id": "", "retry_count": 0,
                 "last_run_at": "", "last_status": "", "last_error": "",
                 "origin_thread_id": "",
+                "pin_status": "", "pin_spec": "", "pin_semantic_version": "",
+                "pin_saved_at": "", "pin_invalid_reason": "",
+                "pin_source_thread_id": "",
                 **row,
                 "created_at": now, "updated_at": now,
             }
@@ -170,9 +237,14 @@ class ScheduledTaskStore:
         return [dict(r) for r in rows]
 
     def update_task(self, task_id: str, fields: dict[str, Any]) -> bool:
+        unknown = set(fields) - set(_COLUMNS)
+        if unknown:
+            # 拼错的列名是编程错误，静默返回 False 会让人以为更新成功了。
+            raise ValueError(f"未知字段: {sorted(unknown)}")
         bad = set(fields) - _UPDATABLE
         if bad:
-            raise ValueError(f"字段不可更新或未知: {sorted(bad)}")
+            # 已知但只能走专用方法（认领/收口/pin）的列：策略拒绝，不抛。
+            return False
         if not fields:
             return False
         fields = dict(fields)
@@ -205,6 +277,61 @@ class ScheduledTaskStore:
                 "SELECT COUNT(*) AS n FROM scheduled_tasks WHERE owner=?", (owner,)
             ).fetchone()
         return int(row["n"])
+
+    # ── 固化查询 ──────────────────────────────────────────────────────
+
+    def set_pin(
+        self,
+        task_id: str,
+        *,
+        spec_json: str,
+        semantic_version: str,
+        source_thread_id: str,
+        now_iso: str,
+    ) -> bool:
+        """写入（或覆盖）固化 spec 并置 ``pin_status='active'``。
+
+        覆盖是有意的：重新固化 = 用人新确认的那次执行替换旧的，
+        旧 spec 连同它的 semantic_version 一起作废。
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE scheduled_tasks
+                   SET pin_status='active', pin_spec=?, pin_semantic_version=?,
+                       pin_saved_at=?, pin_invalid_reason='', pin_source_thread_id=?,
+                       updated_at=?
+                   WHERE id=?""",
+                (spec_json, semantic_version, now_iso, source_thread_id,
+                 now_iso, task_id),
+            )
+            self._conn.commit()
+        return cur.rowcount == 1
+
+    def invalidate_pin(self, task_id: str, reason: str, now_iso: str) -> bool:
+        """标失效：**保留** pin_spec（人工排查要看它），只记原因。"""
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE scheduled_tasks
+                   SET pin_status='invalid', pin_invalid_reason=?, updated_at=?
+                   WHERE id=?""",
+                ((reason or "")[:500], now_iso, task_id),
+            )
+            self._conn.commit()
+        return cur.rowcount == 1
+
+    def clear_pin(self, task_id: str, reason: str, now_iso: str) -> bool:
+        """彻底解绑：spec 与版本一并清空，只留原因备查。"""
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE scheduled_tasks
+                   SET pin_status='', pin_spec='', pin_semantic_version='',
+                       pin_saved_at='', pin_source_thread_id='',
+                       pin_invalid_reason=?, updated_at=?
+                   WHERE id=?""",
+                ((reason or "")[:500], now_iso, task_id),
+            )
+            self._conn.commit()
+        return cur.rowcount == 1
 
     # ── 调度核心：due 选取 + CAS 认领 ─────────────────────────────────
 
@@ -316,12 +443,22 @@ class ScheduledTaskStore:
 
     # ── 运行流水 ──────────────────────────────────────────────────────
 
-    def record_run(self, task_id: str, thread_id: str, run_id: str, fired_at: str) -> int:
+    def record_run(
+        self,
+        task_id: str,
+        thread_id: str,
+        run_id: str,
+        fired_at: str,
+        pin_mode: str = "normal",
+        pin_reason: str = "",
+    ) -> int:
+        """落一条运行流水。``pin_mode``: normal / replay / fallback（见计划 §C）。"""
         with self._lock:
             cur = self._conn.execute(
-                """INSERT INTO task_runs (task_id, thread_id, run_id, fired_at, status)
-                   VALUES (?, ?, ?, ?, 'running')""",
-                (task_id, thread_id, run_id, fired_at),
+                """INSERT INTO task_runs
+                       (task_id, thread_id, run_id, fired_at, status, pin_mode, pin_reason)
+                   VALUES (?, ?, ?, ?, 'running', ?, ?)""",
+                (task_id, thread_id, run_id, fired_at, pin_mode, (pin_reason or "")[:500]),
             )
             self._conn.commit()
         return int(cur.lastrowid)
