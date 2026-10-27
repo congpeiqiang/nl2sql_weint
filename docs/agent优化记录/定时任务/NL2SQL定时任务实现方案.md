@@ -33,9 +33,92 @@ custom_app._lifespan ── yield 前 start_worker()：daemon 线程，每 60s t
 
 ## 2. 数据模型（`agent/scheduler/store.py`）
 
-SQLite 库：`<AGENT_DATA_ROOT>/scheduled_tasks/scheduled_tasks.db`。
+SQLite 库：`<AGENT_DATA_ROOT>/scheduled_tasks/scheduled_tasks.sqlite`（落点见下节）。
 - 接入 `agent/utils/sqlite_paths.py::adopt_all_stores()` 的归位清单（custom_app lifespan 第一步，先于 worker 启动）。
 - 遵守既有铁律：**共享连接 + 一把锁，读也要进锁**（并发读互踩是已发过版的教训）。
+
+### 存储位置与连接信息
+
+**没有网络连接**。这是嵌在后端进程里的 SQLite 文件库，不起独立服务、没有 host/port/账号/密码，也不需要配连接串——所谓「连接信息」只有三样：**库文件路径**、**进程内连接参数**、**同目录的附属文件**。
+
+| 项 | 值 |
+|---|---|
+| 库文件 | `<AGENT_DATA_ROOT>/scheduled_tasks/scheduled_tasks.sqlite` |
+| 目录规则 | 一库一目录：`<root>/<name>/<name>.sqlite`（`sqlite_paths.store_db_path()`，目录名即库名） |
+| 容器内（prod 64 / dev 34） | `AGENT_DATA_ROOT=/app/data`（`.env.prod:56` / `.env.dev:13`）→ `/app/data/scheduled_tasks/scheduled_tasks.sqlite` |
+| 宿主机落点 | 命名卷 `agent_data` 挂到 `/app/data`（`docker-compose.yml:38`）。**蓝绿两色共用同一个卷**，切色不丢任务；卷名见线上 `docker inspect` 的 Mounts |
+| 本机开发 | `.env:117` 的 `AGENT_DATA_ROOT=D:\nl2sql_data` → `D:\nl2sql_data\scheduled_tasks\scheduled_tasks.sqlite` |
+| 未配置 `AGENT_DATA_ROOT` | 回退仓库内 `src/agent/scheduled_tasks/`（旧部署兼容；`sqlite_paths.data_root()`） |
+
+> ⚠️ `AGENT_DATA_ROOT` 是**进程 import 期冻结**的（`workspace_manager/manager.py:61` 模块级读取）：运行中改 `.env` 或改环境变量都不会换路径，必须重启进程。给测试/脚本设暂时目录时也一样——只 `os.environ` 不重启 = 静默写到真实数据根。
+
+同目录附属文件（**备份/迁移必须一起带走**）：
+
+| 文件 | 作用 |
+|---|---|
+| `scheduled_tasks.sqlite-wal` / `-shm` | WAL 模式附属文件。只拷主库会丢掉「已提交但未 checkpoint」的事务 |
+| `.tick.lock` | 跨进程 tick 互斥（`fcntl` / `msvcrt` 文件锁）。蓝绿两色同时在线时，**只有抢到锁的那一色在跑调度** |
+| `heartbeat` | 每 tick 写一次 UTC ISO；`/metrics` 与排障用它判断「调度线程还活着吗」 |
+
+连接参数（`ScheduledTaskStore.__init__`，`agent/scheduler/store.py:129`）：
+
+- `sqlite3.connect(path, check_same_thread=False, timeout=15.0)` —— **进程内单例共享一条连接**（`get_store()`），所以关掉 `check_same_thread`；
+- `PRAGMA journal_mode=WAL` + `PRAGMA busy_timeout=15000`；
+- **所有访问（含读）都进同一把 `threading.RLock`**——共享连接下并发读会互踩；
+- 建库时机：首次 `get_store()` 自动建目录 + 建表 + 增量迁移（`PRAGMA table_info` 逐列 `ALTER TABLE`，幂等）；老位置 `<root>/scheduled_tasks.sqlite` 三件套由 `adopt_all_stores()` 在 lifespan 首步原子搬运归位（先搬 `-wal/-shm`，主库最后）。
+
+排障速查（容器内）。⚠️ **镜像没有 `sqlite3` CLI**（Dockerfile 只装了 gcc/libmariadb3/curl/git/openssh-client），用容器自带的 python 查：
+
+```bash
+# 目录 + 心跳 + 锁（不需要 sqlite3）
+ls -l /app/data/scheduled_tasks/        # 库 + -wal/-shm + .tick.lock + heartbeat
+cat /app/data/scheduled_tasks/heartbeat # 调度线程最近一次心跳（UTC ISO），很久不更新=worker 没跑
+
+# 任务清单（谁、什么状态、下次何时跑、固化状态）
+docker exec <后端容器> python -c "
+import sqlite3
+c = sqlite3.connect('/app/data/scheduled_tasks/scheduled_tasks.sqlite', timeout=15)
+for r in c.execute('select id,owner,name,state,enabled,next_run_at,last_status,pin_status '
+                   'from scheduled_tasks order by created_at desc limit 20'):
+    print(r)
+"
+
+# 最近流水（含固化走的是 replay 还是 fallback）
+docker exec <后端容器> python -c "
+import sqlite3
+c = sqlite3.connect('/app/data/scheduled_tasks/scheduled_tasks.sqlite', timeout=15)
+for r in c.execute('select id,task_id,fired_at,status,pin_mode,pin_reason '
+                   'from task_runs order by id desc limit 20'):
+    print(r)
+"
+```
+
+常见排查口：
+
+```sql
+-- 「现在就该跑却没跑」：下次触发时间已过、仍是 scheduled
+select id,name,next_run_at from scheduled_tasks
+ where enabled=1 and state='scheduled' and next_run_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now');
+-- 「卡在 running」：running_thread_id 非空的都是没收到终态的
+select id,name,running_thread_id,last_run_at from scheduled_tasks where state='running';
+-- 「固化为什么失效」
+select id,name,pin_status,pin_invalid_reason from scheduled_tasks where pin_status='invalid';
+```
+
+备份用在线热备，**别裸 `cp`**（WAL 下会拿到不一致快照）：
+
+```bash
+docker exec <后端容器> python -c "
+import sqlite3
+src = sqlite3.connect('/app/data/scheduled_tasks/scheduled_tasks.sqlite', timeout=15)
+dst = sqlite3.connect('/tmp/scheduled_tasks.bak')
+src.backup(dst); dst.close(); src.close()
+print('ok')
+"
+docker cp <后端容器>:/tmp/scheduled_tasks.bak ./scheduled_tasks.bak
+```
+
+**数据保留**：`task_runs` 保留 **90 天**（`RUNS_RETENTION_DAYS`），worker 每 **1 小时**至多清一次（`PURGE_INTERVAL_S`，进程内节流；蓝绿各清一次，`DELETE` 幂等）。`scheduled_tasks` 本体不自动清理——删任务时连带删该任务的流水。
 
 ### 表 `scheduled_tasks`
 
@@ -57,10 +140,11 @@ SQLite 库：`<AGENT_DATA_ROOT>/scheduled_tasks/scheduled_tasks.db`。
 | `running_thread_id` | TEXT NULL | 非空 = 在飞（防重入 + reconcile 锚点） |
 | `last_run_at` / `last_status` / `last_error` | TEXT | 最近一次执行结果 |
 | `created_at` / `updated_at` | TEXT | UTC ISO |
+| `pin_*`（6 列） | TEXT | 固化查询：`pin_status` / `pin_spec` / `pin_semantic_version` / `pin_saved_at` / `pin_invalid_reason` / `pin_source_thread_id`（2026-10-23 新增） |
 
 ### 表 `task_runs`（运行历史）
 
-`id, task_id, thread_id, run_id, fired_at, finished_at, status, error`。
+`id, task_id, thread_id, run_id, fired_at, finished_at, status, error, pin_mode, pin_reason`。
 reconcile 写终态；前端运行历史直接查这张表并链到 thread。
 
 ## 3. 调度器（`agent/scheduler/worker.py`）
