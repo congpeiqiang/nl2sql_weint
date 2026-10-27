@@ -55,6 +55,7 @@ class DBConfig:
     password: str = ""       # 加密落盘，读时解密
     extra_config: dict = field(default_factory=dict)  # 额外 KV（如 sslmode）
     wren_project: str = ""   # 关联的 Wren 项目绝对路径；空=未配置（该库走 dbmcp 直连）
+    is_default: bool = False  # 默认库（全局唯一；前端「没本地选择」时用它，见 DatabaseSelector）
 
     @classmethod
     def from_mapping(cls, data: dict) -> "DBConfig":
@@ -69,6 +70,7 @@ class DBConfig:
             password=str(data.get("password", "")),
             extra_config=dict(data.get("extra_config", {}) or {}),
             wren_project=str(data.get("wren_project", "")),
+            is_default=bool(data.get("is_default", False)),
         )
 
     def to_mapping(self, masked: bool = False) -> dict:
@@ -197,7 +199,12 @@ class DbConfigStore:
             return out
 
     def upsert(self, cfg: DBConfig) -> None:
-        """新增或更新。password 为明文时自动加密落盘。"""
+        """新增或更新。password 为明文时自动加密落盘。
+
+        默认库单值不变量（2026-10-23）：`cfg.is_default=True` 时清掉其它库的
+        默认标——允许两个默认等于「前端落哪个看列表序」，管理员的选择就失效了。
+        `is_default=False` 只清自己：编辑另一个库不得把默认库弄丢。
+        """
         if cfg.db_type not in _SUPPORTED_DB_TYPES:
             raise ValueError(
                 f"不支持的 db_type: {cfg.db_type!r}。支持: {', '.join(_SUPPORTED_DB_TYPES)}"
@@ -234,6 +241,10 @@ class DbConfigStore:
                 existing.update(data)
             else:
                 dbs.append(data)
+            if cfg.is_default:
+                for d in dbs:
+                    if d.get("name") != cfg.name:
+                        d["is_default"] = False
             raw["databases"] = dbs
             self._write_raw(raw)
             _logger.info("[db_config] upsert 数据库 '%s' (%s)", cfg.name, cfg.db_type)
