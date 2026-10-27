@@ -33,6 +33,14 @@ SQL。三重后果（用户看到的那张报告）：
 而非裸子串（`92` 命中 `92 天（2212 h）`，但 `2` 不命中 `2026-…`）；③ 值匹配补一条**行内
 取证**（候选某行的非空值全部落在答案同一行即算覆盖），使 NULL 占位文案不成反证。
 
+本脚本还覆盖第三类失效（2026-10-21 修，prod thread 01a15d6d）：Cube 通道下 DISTINCT
+探值的**单值行**（`AI与数据产品线/产品管理部`）经 `cc in vv` 双向子串命中答案短单元格
+（`产品管理部`）⇒ 行内取证判「整行被覆盖」⇒ tier0 假阳性（线上 26/26 人员行全命中）
+**绕过通道闸**，§4 又是探值 SQL + 「未使用 Cube 具名指标」那句反话。修法：① 单值行
+不作行内证据（NULL 占位场景候选行本就是多值的，b816d442 的救回不受影响）；② 答案行
+含纯数字单元格时至少一个须被候选值命中（探值无数值列；「至少一个」容忍模型派生列如
+百分比）。`_pick_by_value_match` 是 run_sql 与 cube 两锚点共用实现，一处修两边生效。
+
 本脚本断言：五层启发式各自的选取（tier0 压过行数 / 0b 标量对齐 / 1 列名 / 2、3 兜底
 仍在）、通道闸的正例与**五条负对照**、闸与 `judge_sql_origin.evidence.cube_data_calls`
 **同源**、以及「先选到探值 ⇒ 报告那行说反话 / 修好后 ⇒ 说 Cube」的对照。
@@ -540,6 +548,133 @@ def f_render_norm_and_row_scope() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# ⑦ tier0 子串假阳性（prod thread 01a15d6d，2026-10-21）：
+#   单值探值行不得经 `cc in vv` 子串「覆盖」数值答案行、劫持锚点绕过通道闸
+# ══════════════════════════════════════════════════════════════════════
+_SQL_DEPT_PROBE = (
+    "SELECT DISTINCT department_full_name FROM do_work_hour_detail_extend "
+    "WHERE deleted = 0 AND department_full_name LIKE '%产品线%'"
+)
+_SQL_PERSON_HOURS = (
+    "SELECT user_name, department_full_name, "
+    "SUM(CASE WHEN MONTH(work_date)=8 THEN work_hour END) AS m8, "
+    "SUM(CASE WHEN MONTH(work_date)=9 THEN work_hour END) AS m9 "
+    "FROM do_work_hour_detail_extend WHERE deleted = 0 GROUP BY 1, 2"
+)
+
+# 答案表的「部门」只写短名（`产品管理部`），是探值全路径的真子串 ⇒ 双向子串命中
+_FINAL_WORKHOUR = (
+    "AI与数据产品线 8-9 月人员工时明细：\n\n"
+    "| 姓名 | 部门 | 8月工时 | 9月工时 |\n"
+    "| --- | --- | --- | --- |\n"
+    "| 李四 | 产品管理部 | 1744.5 | 1156.5 |\n"
+    "| 张三 | 产品管理部 | 182.5 | 168.0 |\n"
+)
+
+
+def _dept_probe_13() -> dict:
+    """探值：单列 DISTINCT，13 行「产品线/部门」全路径（线上 `%产品线%` 的形状）。"""
+    prefixes = ["AI与数据产品线", "智造运营产品线", "新能源产品线", "数字能源产品线"]
+    suffixes = ["产品管理部", "智造运营部", "数据平台部"]
+    names = [f"{p}/{s}" for p in prefixes for s in suffixes]  # 12
+    names.append("AI与数据产品线/产品管理部/算法一组")          # 13
+    return _res(["department_full_name"],
+                [{"department_full_name": n} for n in names], 13)
+
+
+def _person_hours_rows() -> dict:
+    return _res(["user_name", "department_full_name", "m8", "m9"],
+                [{"user_name": "李四", "department_full_name": "产品管理部",
+                  "m8": "1744.5", "m9": "1156.5"},
+                 {"user_name": "张三", "department_full_name": "产品管理部",
+                  "m8": "182.5", "m9": "168.0"}], 2)
+
+
+def _trace_workhour(*, producer: bool = False) -> Trace:
+    """prod 01a15d6d 形状：探值在前 + cube 成功取数（答案数值全部来自 cube）。
+
+    `producer=True` 时额外插入一条能与答案表逐行对上的 run_sql（负对照：有产出
+    证据时仍须胜出，通道闸不得介入）。
+    """
+    t = Trace()
+    t.call("wrenai_witops_run_sql", {"sql": _SQL_DEPT_PROBE}, result=_dept_probe_13())
+    if producer:
+        t.call("wrenai_witops_run_sql", {"sql": _SQL_PERSON_HOURS},
+               result=_person_hours_rows())
+    t.call("wrenai_witops_describe_cube", {"cube": "workhour_analysis"},
+           result=_res(["field"], [{"field": "total_work_hour"}], 1))
+    t.call("wrenai_witops_query_cube",
+           {"cube": "workhour_analysis",
+            "dimensions": ["user_name", "department_full_name"],
+            "measures": ["total_work_hour"],
+            "time_dimension": "work_date:month:2026-08-01,2026-10-01"},
+           result=_person_hours_rows())
+    t.ai(_FINAL_WORKHOUR)
+    return t
+
+
+def g_tier0_probe_substring_false_positive() -> None:
+    section("⑦ tier0 子串假阳性：单值探值行不得劫持锚点（prod 01a15d6d）")
+    from agent.subagents.check_progress import (  # noqa: E402
+        _final_answer_data_rows,
+        _final_row_covered_by,
+        _row_values_covered,
+        _run_sql_cell_values,
+        _run_sql_row_values,
+    )
+
+    t = _trace_workhour()
+    check(_cube_produced_data(t.msgs) is True,
+          "夹具自检：cube 取数成功 ⇒ 通道闸条件成立（闸本该拦住探值）")
+
+    # ── 轨迹级：探值必须当不上产出 SQL；无证据 ⇒ 交回 Cube 通道 ──
+    got = _extract_last_sql(t.msgs)
+    check(got == "", "★ 探值零证据 ⇒ tier0 落空 ⇒ 通道闸交回 Cube（空串）",
+          repr(got[:60]))
+    check(got != _SQL_DEPT_PROBE, "★ 且明确不是那条 DISTINCT 探值")
+
+    # 探值的 tier0 命中必须为 0（线上是全部人员行被子串「覆盖」⇒ 劫持锚点）
+    probe_i = _tool_idx_of_sql(t.msgs, _SQL_DEPT_PROBE)
+    p_vals = _run_sql_cell_values(t.msgs, probe_i)
+    p_rvals = _run_sql_row_values(t.msgs, probe_i)
+    final_rows = _final_answer_data_rows(t.msgs)
+    hit = sum(1 for cells in final_rows
+              if _final_row_covered_by(cells, p_vals, p_rvals))
+    check(hit == 0, f"★ 探值 tier0 命中 0/{len(final_rows)}（实际 {hit}）")
+
+    # 交回目标存在：cube 锚点拿得到那次工时取数（否则「交回」是空头支票）
+    cube = extract_last_cube_call(t.msgs)
+    check((cube.get("args") or {}).get("measures") == ["total_work_hour"],
+          "★ 交回目标存在：extract_last_cube_call 拿到工时取数调用",
+          str((cube.get("args") or {}).get("measures")))
+
+    # ── 单元级 ①：单值行不作行内证据（DISTINCT 探值行的形状）──
+    check(not _row_values_covered(["产品管理部"], {"AI与数据产品线/产品管理部"}),
+          "★① 单值候选行不作行内证据（子串命中也不算）")
+
+    # ── 单元级 ②：答案行含纯数字单元格时，至少一个须被候选值命中 ──
+    cells = ["产品管理部", "智造运营部", "182.5"]
+    txt_vals = {"AI与数据产品线/产品管理部", "AI与数据产品线/智造运营部"}
+    check(not _final_row_covered_by(cells, txt_vals, [set(txt_vals)]),
+          "★② 多值文本行子串全覆盖、但数值格 182.5 无候选佐证 ⇒ 不算覆盖")
+    num_vals = txt_vals | {"182.5"}
+    check(_final_row_covered_by(cells, num_vals, [set(num_vals)]),
+          "② 正对照：数值格被候选命中 ⇒ 仍算覆盖（派生列容忍不误伤）")
+
+    # ── 负对照：b816d442 的 NULL 占位救回（多值行 + 数值佐证）不得被 ①② 破坏 ──
+    ph_cells = ["60379", "B", "（空，未匹配到项目）"]
+    check(_final_row_covered_by(ph_cells, {"60379", "B"}, [{"60379", "B"}]),
+          "负对照：多值候选行 + NULL 占位仍被行内取证救回（60379 有数值佐证）")
+
+    # ── 负对照（轨迹级）：有产出证据的 run_sql 在 cube 通道下仍然胜出 ──
+    t2 = _trace_workhour(producer=True)
+    got2 = _extract_last_sql(t2.msgs)
+    check(got2 == _SQL_PERSON_HOURS,
+          "★ 负对照：与答案逐行对上的 run_sql 仍胜出（收紧只打零证据候选）",
+          got2[:60])
+
+
+# ══════════════════════════════════════════════════════════════════════
 def main() -> None:
     s0_fixture_sanity()
     a_tier0_value_match()
@@ -548,6 +683,7 @@ def main() -> None:
     d_cube_channel_gate()
     e_cube_channel_gate_negative()
     f_render_norm_and_row_scope()
+    g_tier0_probe_substring_false_positive()
 
     print()
     passed = sum(1 for ok, _ in results if ok)

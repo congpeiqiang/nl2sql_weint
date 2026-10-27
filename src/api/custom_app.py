@@ -37,6 +37,7 @@ import api.report_file  # noqa: E402
 import api.sql_approval  # noqa: E402
 import api.task_cancel  # noqa: E402
 import api.thread_compact  # noqa: E402
+import api.thread_delete  # noqa: E402
 import api.thread_export  # noqa: E402
 import api.thread_fork  # noqa: E402
 import api.thread_run_status  # noqa: E402
@@ -49,6 +50,7 @@ import api.experiment  # noqa: E402
 import api.auth_routes  # noqa: E402
 import api.auth_middleware  # noqa: E402
 import api.auth_admin  # noqa: E402
+import api.scheduled_tasks  # noqa: E402
 
 # ⚠️ 模块级别名，专供 `_lifespan` 用：函数体里那句 `import api.drain` 会让 `api`
 # 变成**局部名**（import 也是赋值），在它之前写 `api.metrics.xxx` 会 UnboundLocalError
@@ -69,6 +71,7 @@ ROUTES: list[BaseRoute] = [
     *api.sql_approval.routes,
     *api.task_cancel.routes,
     *api.thread_compact.routes,
+    *api.thread_delete.routes,     # 删会话 = 取消这次 run + 删注册表（定时下轮照跑）
     *api.thread_export.routes,
     *api.thread_fork.routes,
     *api.thread_run_status.routes,
@@ -79,6 +82,7 @@ ROUTES: list[BaseRoute] = [
     *api.feedback_annotation.routes,
     *api.experiment.routes,
     *api.eval_flags.routes,
+    *api.scheduled_tasks.routes,  # 定时任务（cron/interval/once → 服务端自建 run）
     # 后期新增：import api.<name> + 展开 *api.<name>.routes
 ]
 
@@ -161,7 +165,23 @@ async def _lifespan(app: "Starlette"):
         start_warmer()
     except Exception as e:  # noqa: BLE001
         _logger.warning("[custom_app] 启动嵌入预热失败: %s", e)
+    # 定时任务调度 worker（方案 docs/NL2SQL定时任务实现方案.md §3）：60s tick、
+    # CAS at-most-once、`.tick.lock` 防蓝绿双色双触发。必须在 adopt_all_stores
+    # 之后（它会建 scheduled_tasks 库连接）。同款纪律：起不来只 warning，不拦启动。
+    try:
+        from agent.scheduler.worker import start_worker
+
+        start_worker()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[custom_app] 启动定时任务调度器失败: %s", e)
     yield
+    # 停机段**最先**停调度器：排空窗口内不再产生新的定时 run（方案 §3）。
+    try:
+        from agent.scheduler.worker import stop_worker
+
+        stop_worker()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("[custom_app] 停定时任务调度器失败: %s", e)
     try:
         import api.drain  # 惰性 import：与 langgraph 的 import 顺序解耦
 

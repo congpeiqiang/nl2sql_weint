@@ -170,6 +170,14 @@ async def upsert_config(request: Request):
         return json_response({"error": "name 必填"}, status=400)
     try:
         cfg = DBConfig.from_mapping(data)
+        # 缺键 ≠ 取消默认（2026-10-23）：请求体没带 is_default 的老客户端（旧前端 /
+        # 脚本）编辑连接信息时，保留库里原值，否则每次保存都会静默清掉默认库。
+        # 显式传 false 才表示「取消默认」。
+        if "is_default" not in data:
+            try:
+                cfg.is_default = get_store().get(name).is_default
+            except KeyError:
+                pass
         get_store().upsert(cfg)
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)

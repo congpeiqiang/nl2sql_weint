@@ -17,13 +17,20 @@ from deepagents import create_deep_agent, AsyncSubAgent, DeepAgentState
 from deepagents.backends import FilesystemBackend, CompositeBackend
 from agent.backends.dynamic_workspace import DynamicFilesystemBackend, DynamicLocalShellBackend
 from deepagents.middleware import SkillsMiddleware
-from langchain.agents.middleware import ModelRequest, dynamic_prompt
+from langchain.agents.middleware import (
+    HumanInTheLoopMiddleware,
+    InterruptOnConfig,
+    ModelRequest,
+    dynamic_prompt,
+)
 from agent.llms.model import deepseek_model
 from agent.tools.mcp_tool import main_tools as mcp_tools
 from agent.tools.report_builder import build_report_tool
 # 归因分解（S3）：与 build_report 同层 —— 指纹在主 state（读指纹是一次取值，
 # 无跨图协议），cube 元信息有进程内 reader，追问归因不必再起子 run（方案 §4.4）。
 from agent.tools.attribution_analyze import attribution_analyze_tool
+# 定时任务（阶段3）：单工具多 action，只调 agent.scheduler.service（与 REST 同一实现层）
+from agent.tools.manage_scheduled_task import manage_scheduled_task_tool
 from agent.settings.file_permissions import FILE_PERMISSIONS
 from agent.middlewares.query_keywords import QueryKeywordsMiddleware
 from agent.middlewares.thinking_toggle import ThinkingToggleMiddleware
@@ -39,6 +46,7 @@ from agent.middlewares.execute_guard import ExecuteGuardMiddleware
 from agent.middlewares.chart_artifact_owner import ChartArtifactOwnerMiddleware
 from agent.middlewares.quota_error import QuotaErrorMiddleware
 from agent.middlewares.model_timeout import ModelTimeoutMiddleware
+from agent.middlewares.pinned_replay import PINNED_REPLAY_SECTION, PinnedReplayMiddleware
 # 账号级模型门禁（2026-09-28）：新账号不继承共享模型配置，没配就明确报错、绝不回落。
 # 必须最外层（列表首元素）：命中时连模型实例都不构造。
 from agent.middlewares.model_required import ModelRequiredMiddleware
@@ -98,6 +106,23 @@ def _build_system_prompt() -> str:
 SYSTEM_PROMPT = _build_system_prompt()
 
 
+def _get_configurable() -> dict:
+    """当前 run 的 configurable（``request.runtime.config`` 恒空，必须走这里）。
+
+    单独成函数是为了测试 monkeypatch——与 ``middlewares/pinned_replay._cfg``
+    各自独立实现，不互相 import（一个读 db_name、一个读 pinned_replay，
+    合在一起会让两个模块平白耦合）。
+    """
+    try:
+        from langgraph.config import get_config as _cfg
+
+        if _cfg is not None:
+            return _cfg().get("configurable", {}) or {}
+    except Exception:  # noqa: BLE001  读取失败则走默认
+        pass
+    return {}
+
+
 @dynamic_prompt
 def dynamic_prompt(request: ModelRequest) -> str:
     """从 configurable 读当前数据库名并注入系统提示词。
@@ -106,19 +131,17 @@ def dynamic_prompt(request: ModelRequest) -> str:
     前端切库后 configurable.db_name 是最新的，但主 agent LLM 读不到——委派子 agent 时
     【数据库名称】会写错（默认 imdb）。本函数把当前库名动态注入，
     保证 start_async_task 的 description 写对库名（与子 agent 的 dynamic_prompt 同构）。
+
+    固化回放 run（``pinned_replay``）额外在最前面拼 ``PINNED_REPLAY_SECTION``：
+    数据已经在上下文里了，必须先讲清楚「不要再派子任务」。
     """
     # 用 .text 属性取纯文本（content 可能是 str 也可能是 block 列表，
     # 子 agent 是列表故用 content[-1]["text"]，主 agent 是 str 会炸）。
     prompt = getattr(request.system_message, "text", None) or ""
     if not prompt:
         return ""
-    db_name = ""
-    try:
-        from langgraph.config import get_config as _cfg
-        if _cfg is not None:
-            db_name = (_cfg().get("configurable", {}) or {}).get("db_name", "") or ""
-    except Exception:  # noqa: BLE001  读取失败则走默认
-        db_name = ""
+    cfg = _get_configurable()
+    db_name = cfg.get("db_name", "") or ""
     if db_name:
         # 前置到提示词最顶部（实证 2026-08-11：追加在末尾时，模型对对话历史/总结里
         # 自己上轮说过的库名信任度更高，切库后仍按旧库委派——clickhouse→imdb 回归）。
@@ -132,6 +155,10 @@ def dynamic_prompt(request: ModelRequest) -> str:
             f"`{db_name}`，禁止使用其他库名或默认值（尤其禁止写 imdb）。\n\n"
         )
         prompt = db_section + prompt
+    if cfg.get("pinned_replay"):
+        # 回放段再前置一次：它比「当前数据库」还硬——本轮连委派都不许，
+        # 而 db_section 的通篇都在讲「委派时怎么报库名」。
+        prompt = PINNED_REPLAY_SECTION + prompt
     return prompt
 
 
@@ -198,6 +225,55 @@ execute_guard = ExecuteGuardMiddleware()
 # P1-17：execute 产出的图表（chart-saver skill 的 .svg/.png）登记归属。挂在这里是唯一
 # 能做对的地方——子进程拿不到请求身份（见 chart_artifact_owner.py 文件头）。
 chart_owner = ChartArtifactOwnerMiddleware()
+# 定时任务审批闸门（2026-10-22）：manage_scheduled_task 的变更类动作会让 agent 安排
+# 无人值守的未来运行，执行前必须经用户确认；list/runs 只读放行，避免每问一句都弹卡。
+# 允许 edit：模型把「每天九点」解析成 cron 有偏差时，用户可在卡上直接改参数再批准
+# （edit 后的 args 仍过 pydantic + service 校验，坏参数只会返回机读错误，不会静默
+#  写坏任务）。action 缺失/非法时交给工具自身校验报错，不弹无意义的审批卡。
+_SCHEDULED_MUTATING_ACTIONS = frozenset(
+    {"create", "pause", "resume", "remove", "run_now"}
+)
+
+
+def _current_configurable() -> dict:
+    """读当前 run 的 configurable。
+
+    项目定式：必须走 ``langgraph.config.get_config()``（thinking_toggle.py
+    2026-08-14 实证；直接读 runtime 拿不到）。读不到时返回空 dict。
+    """
+    try:
+        from langgraph.config import get_config as _get_config
+
+        cfg = _get_config() or {}
+    except Exception:  # noqa: BLE001 —— 无 run 上下文（测试/离线调用）
+        return {}
+    return cfg.get("configurable") or {}
+
+
+def _scheduled_hitl_when(request) -> bool:
+    """manage_scheduled_task 是否需要人工审批（True=弹卡）。
+
+    - 只读 action（list/runs）→ 不审批；
+    - 定时触发的后台 run（configurable.scheduled_run，worker._fire 写入）→ 不审批：
+      无人值守，interrupt 会被 langgraph 顶层图抑制（工具不执行、也没有卡片可点），
+      这里直接放行（副作用仍过 service 校验 + owner 权限）；
+    - 其余交互式 run → 审批；读不到 config 也按审批兜底（fail-closed 到人）。
+    """
+    action = (request.tool_call.get("args") or {}).get("action")
+    if action not in _SCHEDULED_MUTATING_ACTIONS:
+        return False
+    return not bool(_current_configurable().get("scheduled_run"))
+
+
+scheduled_hitl = HumanInTheLoopMiddleware(
+    interrupt_on={
+        "manage_scheduled_task": InterruptOnConfig(
+            allowed_decisions=["approve", "reject", "edit"],
+            description="该操作会创建或修改定时任务，请确认参数后批准。",
+            when=_scheduled_hitl_when,
+        )
+    },
+)
 
 nl2sql_async = AsyncSubAgent(
     name="nl2sql",
@@ -271,6 +347,13 @@ MAIN_AGENT_MIDDLEWARE: list = [
     ModelRequiredMiddleware(),
     QuotaErrorMiddleware(),
     ModelTimeoutMiddleware(),
+    # 定时任务审批闸门：紧跟三道模型门禁之后。after_model 钩子按列表**逆序**执行
+    # （langchain factory 从列表尾节点起链），放这里等于「trace/langfuse/瘦身等
+    # 都处理完这轮模型输出之后才拦」，被拦那轮的记录不会丢。
+    scheduled_hitl,
+    # 固化回放：紧跟审批闸门（同属「拦截模型可见能力」这一层）。回放 run 已有数据，
+    # 摘掉 start_async_task 让模型根本看不到委派能力。
+    PinnedReplayMiddleware(),
     execute_guard,
     chart_owner,
     skills_middleware,
@@ -289,7 +372,7 @@ MAIN_AGENT_MIDDLEWARE: list = [
 
 agent = create_deep_agent(
     model=_agent_model,
-    tools=[*mcp_tools, build_report_tool, attribution_analyze_tool],
+    tools=[*mcp_tools, build_report_tool, attribution_analyze_tool, manage_scheduled_task_tool],
     subagents=[nl2sql_async],
     memory=["/shared/memory/ORCHESTRATOR.md"],  # AGENTS.md 改为按需加载，由主智能体在委派 nl2sql 时读取并拼入 prompt
     middleware=MAIN_AGENT_MIDDLEWARE,

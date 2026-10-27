@@ -159,7 +159,22 @@ class TestInterruptedStuckSeconds:
 
 
 class TestInterruptedTriage:
-    """interrupted 有两个同形来源，分诊必须靠证据而不是猜。"""
+    """interrupted 有三个同形来源，分诊必须靠证据而不是猜。"""
+
+    @pytest.fixture(autouse=True)
+    def _process_has_been_up_for_an_hour(self, monkeypatch):
+        """把「本进程启动时刻」钉在一小时前。
+
+        本文件所有时间戳都是「本进程内发生的」（`_iso_ago`），语义上不该被判成
+        「上一任进程留下的 run」。不钉锚点时，测试进程本身只活了几秒，
+        `_iso_ago(180)` 会早于进程启动 ⇒ 被正确地判成重启中断 —— 但那是测试
+        夹具的假象，不是被测行为。重启判据本身另见 test_restart_kill_state.py。
+        """
+        import time as _t
+
+        from agent.subagents import sync_subagent_todos as sst
+
+        monkeypatch.setattr(sst, "_PROCESS_STARTED_AT", _t.time() - 3600)
 
     @staticmethod
     def _result(run):

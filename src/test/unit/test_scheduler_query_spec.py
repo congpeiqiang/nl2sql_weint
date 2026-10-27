@@ -1,0 +1,475 @@
+"""定时任务固化查询：日期锚点与模板化（纯函数，无 I/O）。"""
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from agent.scheduler.query_spec import (
+    SpecError,
+    build_check_payload,
+    extract_spec,
+    render_spec,
+    render_text,
+    resolve_anchors,
+    templatize,
+    validate_columns,
+)
+
+TZ = "Asia/Shanghai"
+
+
+def _anchors(y=2026, m=10, d=23):
+    return resolve_anchors(datetime(y, m, d, 11, 0, tzinfo=ZoneInfo(TZ)), TZ)
+
+
+def test_anchors_basic():
+    a = _anchors()
+    assert a["today"] == "2026-10-23"
+    assert a["yesterday"] == "2026-10-22"
+    assert a["tomorrow"] == "2026-10-24"
+    assert a["month_start"] == "2026-10-01"
+    assert a["last_month_start"] == "2026-09-01"
+    assert a["last_month_end"] == "2026-09-30"
+    assert a["year_start"] == "2026-01-01"
+    assert a["week_start"] == "2026-10-19"  # 2026-10-23 是周五
+
+
+def test_anchors_cross_year_and_leap():
+    assert _anchors(2026, 1, 5)["last_month_start"] == "2025-12-01"
+    assert _anchors(2026, 1, 5)["last_month_end"] == "2025-12-31"
+    assert _anchors(2028, 3, 3)["last_month_end"] == "2028-02-29"
+
+
+def test_anchors_use_task_timezone_not_utc():
+    """UTC 03:00 = 北京 11:00；若按 UTC 算，today 会错一天（Review Focus #5）。"""
+    utc = datetime(2026, 10, 23, 3, 0, tzinfo=ZoneInfo("UTC"))
+    assert resolve_anchors(utc, TZ)["today"] == "2026-10-23"
+    # 同一时刻按 UTC 时区算应仍是 23 日，但北京时间 08:00 前的 UTC 时刻会分叉：
+    early = datetime(2026, 10, 22, 20, 0, tzinfo=ZoneInfo("UTC"))  # 北京 23 日 04:00
+    assert resolve_anchors(early, TZ)["today"] == "2026-10-23"
+
+
+def test_templatize_single_match():
+    out, used, warns = templatize(
+        "SELECT 1 WHERE dt >= '2026-10-01' AND dt <= '2026-10-22'", _anchors()
+    )
+    assert out == "SELECT 1 WHERE dt >= '{{p:month_start}}' AND dt <= '{{p:yesterday}}'"
+    assert used == ["month_start", "yesterday"]
+    assert warns == []
+
+
+def test_templatize_replaces_repeated_literal():
+    out, used, _ = templatize("a = '2026-10-22' OR b = '2026-10-22'", _anchors())
+    assert out == "a = '{{p:yesterday}}' OR b = '{{p:yesterday}}'"
+    assert used == ["yesterday"]
+
+
+def test_templatize_keeps_time_part():
+    out, used, _ = templatize("dt > '2026-10-23 00:00:00'", _anchors())
+    assert out == "dt > '{{p:today}} 00:00:00'"
+    assert used == ["today"]
+
+
+def test_templatize_ambiguous_on_first_of_month():
+    # 2026-11-01 同时是 today 与 month_start
+    a = resolve_anchors(datetime(2026, 11, 1, 9, 0, tzinfo=ZoneInfo(TZ)), TZ)
+    with pytest.raises(SpecError) as e:
+        templatize("dt = '2026-11-01'", a)
+    assert e.value.code == "ambiguous_date"
+    assert "month_start" in e.value.detail and "today" in e.value.detail
+
+
+def test_templatize_binding_resolves_ambiguity():
+    a = resolve_anchors(datetime(2026, 11, 1, 9, 0, tzinfo=ZoneInfo(TZ)), TZ)
+    out, used, _ = templatize(
+        "dt >= '2026-11-01'", a, bindings={"2026-11-01": "month_start"}
+    )
+    assert out == "dt >= '{{p:month_start}}'"
+    assert used == ["month_start"]
+
+
+def test_binding_must_match_that_day():
+    a = _anchors()
+    with pytest.raises(SpecError) as e:
+        templatize("dt = '2026-10-09'", a, bindings={"2026-10-09": "month_start"})
+    assert e.value.code == "bad_binding"
+
+
+def test_binding_with_unknown_anchor_is_rejected():
+    with pytest.raises(SpecError) as e:
+        templatize("dt = '2026-10-01'", _anchors(), bindings={"2026-10-01": "last_week"})
+    assert e.value.code == "bad_binding"
+
+
+def test_zero_match_needs_accept_constants():
+    with pytest.raises(SpecError) as e:
+        templatize("dt >= '1990-01-01'", _anchors())
+    assert e.value.code == "unmatched_date"
+
+
+def test_zero_match_kept_as_constant_when_accepted():
+    out, used, warns = templatize("dt >= '1990-01-01'", _anchors(), accept_constants=True)
+    assert out == "dt >= '1990-01-01'"
+    assert used == []
+    assert warns == ["常量日期保留: 1990-01-01"]
+
+
+def test_render_roundtrip():
+    a = _anchors()
+    out, _, _ = templatize("dt = '2026-10-01'", a)
+    assert render_text(out, a) == "dt = '2026-10-01'"
+
+
+def test_render_moves_with_time():
+    tmpl, _, _ = templatize("dt = '2026-10-01'", _anchors())
+    later = resolve_anchors(datetime(2026, 11, 15, 9, 0, tzinfo=ZoneInfo(TZ)), TZ)
+    assert render_text(tmpl, later) == "dt = '2026-11-01'"
+
+
+# ── spec 提取 / 渲染 / 列漂移 ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def now():
+    """固化参考时刻：2026-10-23 11:00 北京（UTC 03:00，见 Review Focus #5）。"""
+    return datetime(2026, 10, 23, 11, 0, tzinfo=ZoneInfo(TZ))
+
+
+def _check_sql():
+    return {
+        "status": "success",
+        "thread_id": "t-sub",
+        "result": "| a | b |\n|---|---|\n| 1 | 2 |",
+        "sql": "SELECT dept, SUM(hours) FROM t WHERE dt >= '2026-10-01'",
+        "dialect_sql": "SELECT `dept`, SUM(`hours`) FROM `t` WHERE `dt` >= '2026-10-01'",
+    }
+
+
+def test_extract_sql_prefers_dialect_sql(now):
+    spec, warns = extract_spec(
+        _check_sql(),
+        db_name="witops",
+        tz="Asia/Shanghai",
+        semantic_version="abc123",
+        source_thread_id="t-main",
+        now=now,
+    )
+    assert spec["channel"] == "sql"
+    assert spec["sql_template"].startswith("SELECT `dept`")
+    assert "{{p:month_start}}" in spec["sql_template"]
+    assert spec["params"] == ["month_start"]
+    assert spec["v"] == 1 and spec["semantic_version"] == "abc123"
+    assert warns == []
+
+
+def test_extract_cube(now):
+    check = {
+        "status": "success",
+        "thread_id": "t-sub",
+        "result": "x",
+        "sql_kind": "cube",
+        "cube_query": "x > '2026-10-01'",
+        "cube_args": {
+            "cube": "workhour",
+            "measures": ["workhour.total_hours"],
+            "dimensions": ["dept.name"],
+            "filters": ["workhour.dt:gte:2026-10-01"],
+            "time_dimension": "workhour.dt:day:2026-10-01,2026-10-24",
+        },
+        "cube_tool": "query_cube",
+    }
+    spec, _ = extract_spec(
+        check,
+        db_name="witops",
+        tz="Asia/Shanghai",
+        semantic_version="",
+        source_thread_id="t",
+        now=now,
+    )
+    assert spec["channel"] == "cube"
+    assert spec["cube_template"]["filters"] == ["workhour.dt:gte:{{p:month_start}}"]
+    assert (
+        spec["cube_template"]["time_dimension"]
+        == "workhour.dt:day:{{p:month_start}},{{p:tomorrow}}"
+    )
+    assert set(spec["cube_template"]) <= {
+        "cube",
+        "measures",
+        "dimensions",
+        "filters",
+        "time_dimension",
+    }
+
+
+def test_extract_refuses_without_sql_or_cube(now):
+    with pytest.raises(SpecError) as e:
+        extract_spec(
+            {"status": "success", "thread_id": "t", "result": "x"},
+            db_name="d",
+            tz="Asia/Shanghai",
+            semantic_version="",
+            source_thread_id="t",
+            now=now,
+        )
+    assert e.value.code == "no_query"
+
+
+def test_extract_strips_cube_window_keys(now):
+    check = {
+        "status": "success",
+        "thread_id": "t",
+        "result": "x",
+        "sql_kind": "cube",
+        "cube_args": {
+            "cube": "c",
+            "measures": ["c.m"],
+            "limit": 100,
+            "offset": 0,
+            "granularity": "day",
+        },
+    }
+    with pytest.raises(SpecError) as e:
+        extract_spec(
+            check,
+            db_name="d",
+            tz="Asia/Shanghai",
+            semantic_version="",
+            source_thread_id="t",
+            now=now,
+        )
+    assert e.value.code == "cube_key_unsupported"
+
+
+def test_render_moves_with_time(now):
+    spec, _ = extract_spec(
+        _check_sql(),
+        db_name="d",
+        tz="Asia/Shanghai",
+        semantic_version="",
+        source_thread_id="t",
+        now=now,
+    )
+    later = now.replace(month=11, day=15)
+    out = render_spec(spec, later)
+    assert "'2026-11-01'" in out["sql"]
+    assert out["params"] == {"month_start": "2026-11-01"}
+
+
+def test_render_rejects_unknown_spec_version(now):
+    with pytest.raises(SpecError) as e:
+        render_spec({"v": 99, "channel": "sql", "sql_template": "SELECT 1"}, now)
+    assert e.value.code == "spec_version_unknown"
+
+
+def test_render_rejects_placeholder_not_in_params(now):
+    spec = {"v": 1, "channel": "sql", "sql_template": "SELECT '{{p:today}}'", "params": []}
+    with pytest.raises(SpecError) as e:
+        render_spec(spec, now)
+    assert e.value.code == "render_failed"
+
+
+def test_validate_columns_case_and_order_insensitive():
+    spec = {"expect_columns": ["dept", "Sum_Hours"]}
+    assert validate_columns(spec, ["SUM_HOURS", "DEPT"])[0] is True
+
+
+def test_validate_columns_detects_drift():
+    spec = {"expect_columns": ["dept", "hours"]}
+    ok, detail = validate_columns(spec, ["dept", "cost"])
+    assert ok is False
+    assert "missing=[hours]" in detail and "extra=[cost]" in detail
+
+
+def test_check_payload_has_signature_keys():
+    spec = {"channel": "sql", "sql_template": "SELECT 1", "expect_columns": ["a"]}
+    p = build_check_payload(
+        spec,
+        thread_id="t-new",
+        columns=["a"],
+        rows=[(1,)],
+        sql="SELECT 1",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=1,
+        truncated=False,
+    )
+    assert {"status", "thread_id", "result", "sql"} <= p.keys()
+    assert p["status"] == "success" and p["thread_id"] == "t-new"
+    assert "固化回放" in p["result"] and "| a |" in p["result"]
+    assert p["pinned_replay"] is True
+
+
+def test_check_payload_renders_dict_rows_by_columns():
+    """真实行形状是 list[dict]（`db.multi_sql.df_to_result`），必须按列取值渲染。
+
+    只认 list/tuple 会把整行渲染成一个 `str(dict)` 单元格 ⇒ 报告 §1 的数据表
+    列数与表头对不上，模型据此汇总/画图必错。
+    """
+    import pandas as pd
+
+    from mcp_server.db_mcp_server.db.multi_sql import df_to_result
+
+    real = df_to_result(pd.DataFrame({"dept": ["A", "B"], "hours": [3, 5]}))
+    p = build_check_payload(
+        {"channel": "sql", "sql_template": "SELECT 1"},
+        thread_id="t",
+        columns=real["columns"],
+        rows=real["rows"],
+        sql="SELECT 1",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=real["row_count"],
+        truncated=False,
+    )
+    assert "| dept | hours |" in p["result"]
+    assert "| A | 3 |" in p["result"]
+    assert "| B | 5 |" in p["result"]
+    assert "{'dept'" not in p["result"]
+
+
+def test_check_payload_states_shown_row_cap():
+    """载荷只带前 N 行时必须明说，否则模型以为看到的就是全部。"""
+    p = build_check_payload(
+        {"channel": "sql", "sql_template": "SELECT 1"},
+        thread_id="t",
+        columns=["a"],
+        rows=[{"a": i} for i in range(3)],
+        sql="",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=1001,
+        truncated=True,
+    )
+    assert "1001" in p["result"]
+    assert "前 3 行" in p["result"]
+
+
+def test_extract_spec_carries_caliber_block(now):
+    """来源答复里的「业务口径」节必须随 spec 一起固化。
+
+    回放时没有子 agent、也没有 knowledge 正文，`build_report` 只能从结果文本里
+    抽口径节 —— 不带上它，固化报告就永久缺「业务口径」且不会有任何说明。
+    """
+    check = {
+        "dialect_sql": "SELECT 1 WHERE dt >= '2026-10-22'",
+        "result": (
+            "已查询完成：共 2 行。\n\n"
+            "## 业务口径\n"
+            "- 工时 | 仅统计已审批的报工单 | 工时制度 §3.1\n"
+            "- 部门 | 按在职人员所属部门 | 组织架构说明\n"
+        ),
+    }
+    spec, _ = extract_spec(
+        check, db_name="d", tz=TZ, semantic_version="abc",
+        source_thread_id="t", now=now,
+    )
+    assert "## 业务口径" in spec["caliber_block"]
+    assert "工时制度 §3.1" in spec["caliber_block"]
+
+
+def test_extract_spec_without_caliber_block():
+    spec, _ = extract_spec(
+        {"dialect_sql": "SELECT 1", "result": "已完成，共 3 行。"},
+        db_name="d", tz=TZ, semantic_version="abc",
+        source_thread_id="t", now=datetime(2026, 10, 23, 11, tzinfo=ZoneInfo(TZ)),
+    )
+    assert spec["caliber_block"] == ""
+
+
+def test_check_payload_replays_caliber_block():
+    p = build_check_payload(
+        {
+            "channel": "sql",
+            "sql_template": "SELECT 1",
+            "caliber_block": "## 业务口径\n- 工时 | 已审批 | 工时制度 §3.1\n",
+        },
+        thread_id="t",
+        columns=["a"],
+        rows=[{"a": 1}],
+        sql="SELECT 1",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=1,
+        truncated=False,
+    )
+    assert "## 业务口径" in p["result"]
+    assert "工时制度 §3.1" in p["result"]
+
+
+# ── 结果事实表：确定性统计（回放摘要不许模型自己数）────────────────────
+
+#: 2026-10-27 线上实证的两次回放：同一份 15 行数据，一次数对（5 已填报）、
+#: 一次数成 6。SQL 与数据逐字相同，错在模型自己数表格。
+FACT_ROWS = [
+    {"user_name": "王刚", "job_number": "Z0011", "is_reported": "未填报", "total_hours": 0.0},
+    {"user_name": "苏林", "job_number": "Z0045", "is_reported": "未填报", "total_hours": 0.0},
+    {"user_name": "丛培强", "job_number": "Z0051", "is_reported": "已填报", "total_hours": 8.0},
+    {"user_name": "甘辛", "job_number": "Z0277", "is_reported": "已填报", "total_hours": 8.0},
+    {"user_name": "刘小康", "job_number": "Z0375", "is_reported": "已填报", "total_hours": 8.0},
+]
+
+
+def _fact_payload(**kw):
+    args = dict(
+        thread_id="t",
+        columns=["user_name", "job_number", "is_reported", "total_hours"],
+        rows=FACT_ROWS,
+        sql="SELECT 1",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=len(FACT_ROWS),
+        truncated=False,
+    )
+    args.update(kw)
+    return build_check_payload({"channel": "sql", "sql_template": "SELECT 1"}, **args)
+
+
+def test_result_facts_count_categorical_column():
+    """分类列的取值计数由程序算好——模型自己数会错。"""
+    text = _fact_payload()["result"]
+    assert "程序统计" in text
+    assert "已填报 3" in text and "未填报 2" in text
+
+
+def test_result_facts_sum_numbers_but_skip_id_like_columns():
+    """数值列给合计；工号这类标识列不给「合计」（那是无意义的大数）。"""
+    text = _fact_payload()["result"]
+    assert "合计 24" in text          # 8+8+8+0+0
+    assert "Z0051" in text            # 表格里当然有
+    job_line = [ln for ln in text.splitlines() if ln.startswith("- job_number")]
+    assert not job_line, "标识列不该出现在统计里"
+
+
+def test_result_facts_skip_high_cardinality_column():
+    """每行都不同的列（姓名）出分布没有意义，只会污染提示词。"""
+    text = _fact_payload()["result"]
+    assert "程序统计" in text  # 先钉住块确实生成了，避免「什么都没有」也通过
+    assert not [ln for ln in text.splitlines() if ln.startswith("- user_name")]
+
+
+def test_result_facts_flag_partial_window_when_truncated():
+    """只取回前 N 行时必须写明统计口径，否则「已填报 2」会被当成全量。"""
+    text = _fact_payload(rows=FACT_ROWS[:2], row_count=15)["result"]
+    assert "仅统计已取回的前 2 行" in text
+
+
+def test_result_facts_block_precedes_caliber_block():
+    """业务口径节必须仍在最末尾——`_parse_caliber_block` 只认末尾那块。"""
+    p = build_check_payload(
+        {"channel": "sql", "sql_template": "SELECT 1",
+         "caliber_block": "## 业务口径\n- 工时 | 已审批\n"},
+        thread_id="t", columns=["is_reported"],
+        rows=[{"is_reported": "已填报"}, {"is_reported": "已填报"},
+              {"is_reported": "未填报"}, {"is_reported": "未填报"}],
+        sql="", cube_query="", cube_args={}, cube_tool="",
+        row_count=4, truncated=False,
+    )
+    text = p["result"]
+    assert text.index("程序统计") < text.index("## 业务口径")
+    assert text.split("## 业务口径")[-1].strip().endswith("已审批")

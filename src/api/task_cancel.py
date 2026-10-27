@@ -82,6 +82,53 @@ async def _get_latest_run(
         return None
 
 
+def _restart_killed(run_record: dict | None) -> bool:
+    """该 run 是否被「发版/重启换进程」带走（判据只有一处，见 sync 模块）。
+
+    延迟导入 + fail-open：读不到判据就当不是重启，退回老语义（写 cancelled）。
+    """
+    try:
+        from agent.subagents.sync_subagent_todos import _killed_by_restart
+
+        return bool(_killed_by_restart(run_record))
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[task_cancel] 重启判据不可用（按非重启处理）: %s", e)
+        return False
+
+
+def _terminal_override(
+    run_status: str | None, run_record: dict | None
+) -> tuple[str, dict]:
+    """用户点「停止」时子 run 已终态 ⇒ 回写什么状态 + 附带字段（2026-10-22）。
+
+    背景：刷新/发版后卡片卡住时，用户的自然动作就是点「停止」，于是**发版把 run
+    带走**和**用户真的取消**被写成同一个 `cancelled`，前端只能都渲染「已被取消」。
+    区分靠时间证据（`_killed_by_restart`）：
+
+    - `interrupted` 且 run 的最后状态变化早于本进程启动 ⇒ 它在上一任进程里就已经
+      死了，这次点击只是清理：写 `error` + `terminal_cause=service_restart`，
+      界面/汇报可以说「因服务重启中断，可重试」。
+    - 其它 `interrupted`（这次取消造成的 / 上下文压缩暂停）⇒ `cancelled`：
+      2026-10-16 事故证明 interrupted **不能**原样写进 async_tasks（watcher 不认它
+      是终态 ⇒ 卡片复活）。
+    - 非 interrupted 终态 ⇒ 原样回写。
+    """
+    status = str(run_status or "")
+    if status != "interrupted":
+        return (status or "cancelled"), {}
+    if _restart_killed(run_record):
+        from agent.subagents.sync_subagent_todos import (
+            CAUSE_SERVICE_RESTART,
+            RESTART_KILLED_TEXT,
+        )
+
+        return "error", {
+            "terminal_cause": CAUSE_SERVICE_RESTART,
+            "error": RESTART_KILLED_TEXT,
+        }
+    return "cancelled", {}
+
+
 def _ensure_sync_watcher(main_thread_id: str, task_id: str, task_entry: dict):
     """sync watcher 已退出时重新拉起（保证取消后的终态/active_queries 同步不丢）。"""
     try:
@@ -108,6 +155,7 @@ async def _mark_main_cancelled(
     entry: dict,
     status_override: str = "cancelled",
     auth_headers: dict[str, str] | None = None,
+    extra: dict | None = None,
 ) -> None:
     """回写主线程 async_tasks[task_id] → 终态（重试 + watcher 保活）。
 
@@ -117,11 +165,14 @@ async def _mark_main_cancelled(
     status_override 默认 "cancelled"（用户主动取消）；当子 run 已自然终态
     （success/error）而 async_tasks 还 running 时，回写 run 的实际终态，
     让前端进度条不再永久转圈（见 cancel_task 幂等分支）。
+    extra：随终态一起写的附加字段（如重启中断的 `terminal_cause`/`error`）。
     """
     updated = dict(entry)
     updated["task_id"] = task_id
     updated["thread_id"] = task_id
     updated["status"] = status_override
+    for _k, _v in (extra or {}).items():
+        updated[_k] = _v
     updated.pop("awaiting_approval", None)
     updated["last_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -138,8 +189,8 @@ async def _mark_main_cancelled(
                 )
                 if resp.status_code == 200:
                     _logger.info(
-                        "[task_cancel] 主线程 async_tasks[%s] 已标记 cancelled",
-                        task_id[:8],
+                        "[task_cancel] 主线程 async_tasks[%s] 已标记 %s",
+                        task_id[:8], status_override,
                     )
                     _ensure_sync_watcher(main_thread_id, task_id, updated)
                     return
@@ -225,7 +276,10 @@ async def cancel_task(request: Request):
             # `active_queries=true` + 重派发占位 → 卡片复活转圈
             # （事故里 17:04 点停止后卡片又活 120s 就是这条）。
             # 停止的语义就是取消 ⇒ 落 `cancelled`（用户意图 + 合法的 watcher 终态）。
-            _override = run_status if run_status != "interrupted" else "cancelled"
+            # 2026-10-22 例外：run 是**上一任进程**（发版/重启）带走的 ⇒ 见
+            # `_terminal_override`，写 error + terminal_cause=service_restart，
+            # 免得「重启丢了」和「用户取消」在前端都是同一句「已被取消」。
+            _override, _extra = _terminal_override(run_status, latest)
             if entry.get("status") not in _TERMINAL_STATUSES:
                 await _mark_main_cancelled(
                     base,
@@ -234,6 +288,7 @@ async def cancel_task(request: Request):
                     entry,
                     status_override=_override or "cancelled",
                     auth_headers=auth_headers,
+                    extra=_extra,
                 )
             return json_response(
                 {
@@ -241,7 +296,7 @@ async def cancel_task(request: Request):
                     "task_id": task_id,
                     "main_thread_id": main_thread_id,
                     # run 已终态时优先返回实际终态（entry 可能还是旧的 running）；
-                    # 同样把 interrupted 归一到 cancelled（见上）
+                    # interrupted 归一到 cancelled / service_restart（见上）
                     "status": _override or entry.get("status") or "cancelled",
                 }
             )

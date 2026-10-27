@@ -98,6 +98,13 @@ DISK_USED_RATIO = Gauge("nl2sql_disk_used_ratio", "数据卷已用比例 0~1", l
 DATA_BYTES = Gauge("nl2sql_data_bytes", "各区域占用字节（从保留策略那轮缓存，非实时）", labelnames=("area",))
 ALERT_ACTIVE = Gauge("nl2sql_alert_active", "该告警此刻是否在响（1=在响 / 0=已恢复）", labelnames=("alert",))
 SAMPLES = Counter("nl2sql_metrics_samples_total", "采样轮次（按结果分：ok/error）", labelnames=("result",))
+# 定时任务调度器（agent/scheduler/worker.py）：三态诊断 —— 进程活着（本模块在采样）
+# ≠ worker 线程活着（alive）≠ tick 持续成功（last_tick_age）。hermes heartbeat 同款思路。
+SCHED_ALIVE = Gauge("nl2sql_sched_worker_alive", "定时任务 worker 线程是否存活（1/0）")
+SCHED_TASKS = Gauge("nl2sql_sched_tasks_enabled", "启用且处于 scheduled 状态的定时任务数")
+SCHED_FIRES_OK = Gauge("nl2sql_sched_fires_ok_total", "tick 认领并派发成功的累计次数")
+SCHED_FIRES_ERR = Gauge("nl2sql_sched_fires_error_total", "fire 失败（含回拨重试）的累计次数")
+SCHED_TICK_AGE = Gauge("nl2sql_sched_last_tick_age_seconds", "距最近一次成功 tick 的秒数（>180 该查了）")
 
 
 # ── 采样：系统层（内存 / 子进程）────────────────────────────────────
@@ -562,6 +569,26 @@ async def sample_once(lag: Optional[float] = None) -> dict[str, Any]:
     readings["lock_contention_delta"] = _delta(
         "lock_contention", _sum_counter("nl2sql_sqlite_lock_contention_total")
     )
+
+    # 定时任务调度器（worker 快照；坏了不影响其他指标）
+    try:
+        from agent.scheduler import worker as sched_worker
+
+        snap = sched_worker.metrics_snapshot()
+        SCHED_ALIVE.set(1 if snap.get("alive") else 0)
+        SCHED_TASKS.set(float(snap.get("tasks_enabled") or 0))
+        SCHED_FIRES_OK.set(float(snap.get("fires_ok") or 0))
+        SCHED_FIRES_ERR.set(float(snap.get("fires_error") or 0))
+        last_tick = snap.get("last_tick_at") or ""
+        if last_tick:
+            from datetime import datetime, timezone
+
+            age = (
+                datetime.now(timezone.utc) - datetime.fromisoformat(last_tick)
+            ).total_seconds()
+            SCHED_TICK_AGE.set(max(0.0, age))
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("[metrics] 读定时任务快照失败: %s", e)
 
     _evaluate_alerts(readings)
     return readings

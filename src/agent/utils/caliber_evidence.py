@@ -115,6 +115,25 @@ def parse_caliber_block(text: str) -> list[str]:
 _NEXT_HEADING_RE = re.compile(r"^[ \t]*#{1,6}[ \t]+\S", re.M)
 
 
+def extract_caliber_block(text: str) -> str:
+    """取出**最后一个**「业务口径」节的原文（没有该节返回空串）。
+
+    与 `strip_caliber_block` 同一套边界规则（标题行 → 下一个标题行）。用于把一次
+    跑对过的答复里的口径节**逐字**存进固化 spec：回放时没有子 agent 可抽取，
+    报告只能靠这段原文。
+    """
+    if not text:
+        return ""
+    s = str(text)
+    hits = list(CALIBER_HEADING_RE.finditer(s))
+    if not hits:
+        return ""
+    start = hits[-1].start()
+    nxt = _NEXT_HEADING_RE.search(s, hits[-1].end())
+    end = nxt.start() if nxt else len(s)
+    return s[start:end].strip()
+
+
 def strip_caliber_block(text: str) -> str:
     """摘掉**最后一个**「业务口径」节（返回新文本；没有该节则原样返回）。
 
