@@ -399,3 +399,77 @@ def test_check_payload_replays_caliber_block():
     )
     assert "## 业务口径" in p["result"]
     assert "工时制度 §3.1" in p["result"]
+
+
+# ── 结果事实表：确定性统计（回放摘要不许模型自己数）────────────────────
+
+#: 2026-10-27 线上实证的两次回放：同一份 15 行数据，一次数对（5 已填报）、
+#: 一次数成 6。SQL 与数据逐字相同，错在模型自己数表格。
+FACT_ROWS = [
+    {"user_name": "王刚", "job_number": "Z0011", "is_reported": "未填报", "total_hours": 0.0},
+    {"user_name": "苏林", "job_number": "Z0045", "is_reported": "未填报", "total_hours": 0.0},
+    {"user_name": "丛培强", "job_number": "Z0051", "is_reported": "已填报", "total_hours": 8.0},
+    {"user_name": "甘辛", "job_number": "Z0277", "is_reported": "已填报", "total_hours": 8.0},
+    {"user_name": "刘小康", "job_number": "Z0375", "is_reported": "已填报", "total_hours": 8.0},
+]
+
+
+def _fact_payload(**kw):
+    args = dict(
+        thread_id="t",
+        columns=["user_name", "job_number", "is_reported", "total_hours"],
+        rows=FACT_ROWS,
+        sql="SELECT 1",
+        cube_query="",
+        cube_args={},
+        cube_tool="",
+        row_count=len(FACT_ROWS),
+        truncated=False,
+    )
+    args.update(kw)
+    return build_check_payload({"channel": "sql", "sql_template": "SELECT 1"}, **args)
+
+
+def test_result_facts_count_categorical_column():
+    """分类列的取值计数由程序算好——模型自己数会错。"""
+    text = _fact_payload()["result"]
+    assert "程序统计" in text
+    assert "已填报 3" in text and "未填报 2" in text
+
+
+def test_result_facts_sum_numbers_but_skip_id_like_columns():
+    """数值列给合计；工号这类标识列不给「合计」（那是无意义的大数）。"""
+    text = _fact_payload()["result"]
+    assert "合计 24" in text          # 8+8+8+0+0
+    assert "Z0051" in text            # 表格里当然有
+    job_line = [ln for ln in text.splitlines() if ln.startswith("- job_number")]
+    assert not job_line, "标识列不该出现在统计里"
+
+
+def test_result_facts_skip_high_cardinality_column():
+    """每行都不同的列（姓名）出分布没有意义，只会污染提示词。"""
+    text = _fact_payload()["result"]
+    assert "程序统计" in text  # 先钉住块确实生成了，避免「什么都没有」也通过
+    assert not [ln for ln in text.splitlines() if ln.startswith("- user_name")]
+
+
+def test_result_facts_flag_partial_window_when_truncated():
+    """只取回前 N 行时必须写明统计口径，否则「已填报 2」会被当成全量。"""
+    text = _fact_payload(rows=FACT_ROWS[:2], row_count=15)["result"]
+    assert "仅统计已取回的前 2 行" in text
+
+
+def test_result_facts_block_precedes_caliber_block():
+    """业务口径节必须仍在最末尾——`_parse_caliber_block` 只认末尾那块。"""
+    p = build_check_payload(
+        {"channel": "sql", "sql_template": "SELECT 1",
+         "caliber_block": "## 业务口径\n- 工时 | 已审批\n"},
+        thread_id="t", columns=["is_reported"],
+        rows=[{"is_reported": "已填报"}, {"is_reported": "已填报"},
+              {"is_reported": "未填报"}, {"is_reported": "未填报"}],
+        sql="", cube_query="", cube_args={}, cube_tool="",
+        row_count=4, truncated=False,
+    )
+    text = p["result"]
+    assert text.index("程序统计") < text.index("## 业务口径")
+    assert text.split("## 业务口径")[-1].strip().endswith("已审批")

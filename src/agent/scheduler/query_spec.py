@@ -343,6 +343,105 @@ def _row_cells(row: Any, cols: list[str]) -> list[str]:
     return [str(row)]
 
 
+#: 分类列最多列几个取值（更多的按「其他」合并）。
+_MAX_FACT_CATEGORIES = 12
+#: 事实表最多覆盖几列——宽表逐列统计会把提示词撑爆。
+_MAX_FACT_COLUMNS = 8
+#: 看起来是标识符的列不做数值合计：工号/ID 相加是没有意义的巨数，
+#: 模型一旦引用就是把错东西写进日报。
+_ID_LIKE = re.compile(r"(^id$|_id$|^id_|number|code|uuid)", re.I)
+
+
+def _fact_value(row: Any, col: str, idx: int) -> str:
+    if isinstance(row, dict):
+        v = row.get(col)
+    elif isinstance(row, (list, tuple)):
+        v = row[idx] if idx < len(row) else None
+    else:
+        v = row if idx == 0 else None
+    return "" if v is None else str(v).strip()
+
+
+def _fmt_num(v: float) -> str:
+    return str(int(v)) if float(v).is_integer() else f"{v:.2f}"
+
+
+def build_result_facts(
+    columns: list[str],
+    rows: list[Any],
+    *,
+    row_count: int,
+    truncated: bool,
+) -> str:
+    """对已取回的行做确定性统计，供回放摘要直接引用。
+
+    **为什么必须由程序算**：固化只固化了「取数」，摘要仍由模型写。2026-10-27
+    线上两轮回放，同一份 15 行数据、同一条 SQL、逐字相同的 ToolMessage，一次写
+    「已填报 5 人」、一次写「已填报 6 人」（表格里只有 5 行）。错不在取数，在
+    模型自己数表格。把「数」这件事退回代码，摘要只负责措辞。
+
+    规则按列的**形状**决定，不按具体业务问题硬编码：
+
+    - 数值列且不像标识符 → 合计 / 最小 / 最大；
+    - 非数值列且取值种类少（≤ ``_MAX_FACT_CATEGORIES``）→ 取值分布；
+    - 高基数列（姓名、流水号）、标识列 → 不统计（分布无意义，合计是错的）。
+
+    取回的行少于总行数时（载荷只带前 N 行 / 结果截断）必须在标题里写明，
+    否则模型会把「已取回的样本」当成全量。
+    """
+    if not rows:
+        return ""
+    cols = [str(c) for c in columns][:_MAX_FACT_COLUMNS]
+    lines: list[str] = []
+
+    head = f"- 行数：{row_count}"
+    if row_count > len(rows) or truncated:
+        head += f"（仅统计已取回的前 {len(rows)} 行）"
+    lines.append(head)
+
+    for idx, col in enumerate(cols):
+        values = [_fact_value(r, col, idx) for r in rows]
+        filled = [v for v in values if v]
+        if len(filled) < 2:
+            continue
+        empty = len(values) - len(filled)
+        suffix = f"（空值 {empty}）" if empty else ""
+
+        nums: list[float] = []
+        for v in filled:
+            try:
+                nums.append(float(v.replace(",", "")))
+            except ValueError:
+                nums = []
+                break
+
+        if len(nums) == len(filled):
+            if _ID_LIKE.search(col):
+                continue
+            lines.append(
+                f"- {col}：合计 {_fmt_num(sum(nums))}、"
+                f"最小 {_fmt_num(min(nums))}、最大 {_fmt_num(max(nums))}{suffix}"
+            )
+            continue
+
+        distinct = sorted(set(filled))
+        # 每行都不重样（姓名、工号、流水号）= 没有分布可言，列出来只是噪音。
+        if 1 < len(distinct) < len(filled) and len(distinct) <= _MAX_FACT_CATEGORIES:
+            counts = {v: filled.count(v) for v in distinct}
+            parts = [
+                f"{v} {n}"
+                for v, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            ]
+            lines.append(f"- {col}：{'、'.join(parts)}{suffix}")
+
+    if len(lines) == 1:  # 只有「行数」一行时没必要占版面
+        return ""
+    return (
+        "### 程序统计（确定性事实，直接引用；计数与合计一律以此为准，不得自行重算）\n"
+        + "\n".join(lines)
+    )
+
+
 def build_check_payload(
     spec: dict,
     *,
@@ -376,6 +475,14 @@ def build_check_payload(
             lines.append("| " + " | ".join(_row_cells(r, cols)) + " |")
 
     result_text = "\n".join(lines)
+
+    # 事实表紧跟表格、**在业务口径节之前**：`_parse_caliber_block` 只认末尾那块。
+    facts = build_result_facts(
+        cols, rows, row_count=row_count, truncated=truncated
+    )
+    if facts:
+        result_text = f"{result_text}\n\n{facts}"
+
     caliber = str(spec.get("caliber_block") or "").strip()
     if caliber:
         # 回放没有子 agent 可写口径节 ⇒ 把固化时逐字存下的那段接回结果末尾。
