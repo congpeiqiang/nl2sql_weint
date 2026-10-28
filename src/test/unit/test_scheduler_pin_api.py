@@ -124,6 +124,47 @@ def test_pin_ambiguous_returns_400(client, seeded_task, monkeypatch):
     assert "歧义" in r.json()["error"] or "ambiguous" in r.json()["error"]
 
 
+def test_pin_ambiguous_carries_candidates_and_drops_internal_param(
+    client, seeded_task, monkeypatch
+):
+    """歧义：候选锚点要跟着 400 一起回给前端（前端据此弹选择框）。
+
+    同时 ``.error`` 里**不许**再出现 ``date_bindings`` —— 界面上没有这个字段，
+    旧文案等于让用户去改一个他看不到的东西。
+    """
+    from agent.scheduler.pin_service import PinError
+
+    async def fake_pin(task, **kw):
+        raise PinError(
+            "ambiguous_date",
+            "日期 2026-10-26 同时匹配 2 个口径锚点",
+            extra={"literal": "2026-10-26", "candidates": ["yesterday", "week_start"]},
+        )
+
+    monkeypatch.setattr(api_module.pin_service, "pin_task", fake_pin)
+    r = client.post(f"/api/scheduled-tasks/{seeded_task}/pin", json={})
+    assert r.status_code == 400
+    body = r.json()
+    assert body["code"] == "ambiguous_date"
+    assert body["extra"] == {
+        "literal": "2026-10-26",
+        "candidates": ["yesterday", "week_start"],
+    }
+    assert "date_bindings" not in body["error"]
+    assert "口径" in body["error"]  # 文案指向用户真能做的动作：选口径
+
+
+def test_pin_ok_has_no_extra_key(client, seeded_task, monkeypatch):
+    """正常路径不许多出 ``extra``（契约保持最小）。"""
+
+    async def fake_pin(task, **kw):
+        return {"pin_status": "active", "pin": {"preview_sql": "SELECT 1"}}
+
+    monkeypatch.setattr(api_module.pin_service, "pin_task", fake_pin)
+    r = client.post(f"/api/scheduled-tasks/{seeded_task}/pin", json={})
+    assert r.status_code == 200 and "extra" not in r.json()
+
+
 def test_unpin_clears(client, seeded_task, monkeypatch):
     called = {}
 

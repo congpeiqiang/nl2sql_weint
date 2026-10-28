@@ -14,8 +14,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from agent.scheduler.pin_exec import PinExecError, run_pinned_spec
 from agent.scheduler.query_spec import SpecError, extract_spec
@@ -27,12 +30,17 @@ _logger = logging.getLogger(__name__)
 
 
 class PinError(Exception):
-    """固化失败（API 层折成 400）。``code`` 见计划 §C.2。"""
+    """固化失败（API 层折成 400）。``code`` 见计划 §C.2。
 
-    def __init__(self, code: str, detail: str = "") -> None:
+    ``extra`` 原样透到响应体（如 ``ambiguous_date`` 的 ``literal``/候选锚点），
+    给前端渲染选择框用；``detail`` 只负责给人看的措辞。
+    """
+
+    def __init__(self, code: str, detail: str = "", extra: Optional[dict] = None) -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
         self.detail = detail
+        self.extra = extra or {}
 
 
 def project_path_for(db_name: str) -> Optional[str]:
@@ -82,6 +90,148 @@ def _latest_success_thread(store: ScheduledTaskStore, task_id: str) -> str:
     return ""
 
 
+def _source_run_time(
+    store: ScheduledTaskStore, task_id: str, thread_id: str
+) -> Optional[datetime]:
+    """来源 run 的触发时刻（``task_runs.fired_at``）；查不到返回 None。
+
+    日期锚点必须按**产生这条 SQL 那次运行**当天解析：字面量 ``2026-10-26`` 在
+    10-27（周二）是 ``yesterday``，在 10-28（周三）却恰好是 ``week_start``。拿
+    固化当天解析会静默固化成「上个周一」起的窗口——2026-10-28 生产实证：来源 run
+    是 10-27 跑的、10-28 重新固化，回放查的还是 10-26，且窗口本周内逐日变宽、
+    下周一（week_start > yesterday）起止倒挂恒空。
+
+    显式传入的 thread 可能不是本任务的（如从交互会话固化）→ 查不到就回落到固化
+    时刻，也就是改动前的行为。
+    """
+    for run in store.list_runs(task_id, limit=20):
+        if str(run.get("thread_id") or "") != thread_id:
+            continue
+        raw = str(run.get("fired_at") or "")
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    return None
+
+
+async def _thread_last_run_time(client: Any, thread_id: str) -> Optional[datetime]:
+    """该 thread 最近一次 run 的时刻——本任务没有流水时的回落（交互会话固化）。
+
+    取 ``created_at`` 的最大值：结果载荷总出自这个 thread 上最后一次真跑，
+    续跑（continue）不产生新数据。拿不到就返回 None（调用方回落到固化时刻）。
+    """
+    try:
+        runs = await client.runs.list(thread_id=thread_id, limit=10)
+    except Exception:  # noqa: BLE001 —— 客户端桩/接口不可用都只是「拿不到时间」
+        return None
+    best: Optional[datetime] = None
+    for run in runs or []:
+        raw = str((run or {}).get("created_at") or "")
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if best is None or dt > best:
+            best = dt
+    return best
+
+
+#: 连接器追加在语句**末尾**的那条 ``LIMIT n``（见 ``wren_plan.mirror_connector_limit``）。
+_CONNECTOR_LIMIT_RE = re.compile(r"\bLIMIT\s+(\d+)\s*$", re.IGNORECASE)
+
+
+def _workspace_root() -> str:
+    """活跃工作区磁盘根（``dialect_sql_file`` 是 ``/workspace/…`` 形式的 VFS 指针）。
+
+    包成模块级函数是为了可打桩——工作区根在 import 期就冻住了（见
+    workspace_manager 的 data_root 坑），测试不能靠改 env 生效。
+    """
+    from agent.workspace_manager import get_workspace_manager
+
+    return str(get_workspace_manager().active_workspace)
+
+
+def _read_plan_sql(ptr: str) -> str:
+    """读回 ``/workspace/…`` 指针指向的物理 SQL；读不到返回 ``""``（由调用方定性）。"""
+    if not isinstance(ptr, str) or not ptr.startswith("/workspace/"):
+        return ""
+    try:
+        disk = Path(_workspace_root()) / ptr[len("/workspace/"):]
+        if disk.is_file():
+            return disk.read_text(encoding="utf-8").strip()
+        _logger.warning("[pin] 物理 SQL 文件缺失: %s", ptr)
+    except Exception as e:  # noqa: BLE001  读盘失败按「读不到」处理
+        _logger.warning("[pin] 读物理 SQL 文件失败 %s: %s", ptr, e)
+    return ""
+
+
+def _split_connector_limit(sql: str) -> tuple[str, Optional[int]]:
+    """剥掉连接器**无条件**追加的尾部 ``LIMIT n``，返回 ``(SQL, n)``。
+
+    只剥**末尾那一条**：模型自己写的 top-N（``… ORDER BY x LIMIT 10``）在它前一
+    行，留下不动（``wren_plan`` 的 ``dup_limit`` 场景）。不剥的后果是每次回放都
+    被静默截在 ``n`` 行——而 ``n`` 只是 wren 的探测上限+1，与业务口径无关。
+    """
+    s = (sql or "").rstrip()
+    m = _CONNECTOR_LIMIT_RE.search(s)
+    if not m:
+        return s, None
+    return s[: m.start()].rstrip(), int(m.group(1))
+
+
+def _last_user_text(messages: list) -> str:
+    """来源会话最后一条**真实**用户提问的文本。
+
+    用途只有一个：日期字面量同时命中多个锚点时当消歧证据（``templatize``）。
+    「[系统自动通知]」是子任务超时/完成后的续跑注入，不是用户提的问题，跳过。
+    """
+    from agent.tools.report_builder import _msg_content
+
+    for m in reversed(messages or []):
+        if isinstance(m, dict):
+            role = m.get("type") or m.get("role")
+        else:
+            role = getattr(m, "type", "")
+        if role not in ("human", "user"):
+            continue
+        text = (_msg_content(m) or "").strip()
+        if not text or text.startswith("[系统自动通知]"):
+            continue
+        return text
+    return ""
+
+
+def _physical_sql_of(check: dict) -> tuple[str, Optional[int], bool]:
+    """check 结果 → 真正下发物理库执行的 SQL。
+
+    Returns: ``(sql, 连接器 LIMIT, 是否存在物理 SQL)``；``sql`` 为空串表示这次
+    结果根本没有物理 SQL 可读。
+
+    为什么不能直接用 ``check["sql"]``：语义层库的结果里它是**模型写的 wren 方言
+    SQL**（``FROM v_workhour`` 之类是 MDL 虚拟视图，物理库里不存在），回放必炸。
+    物理版本由 ``check_progress._attach_physical_plan`` 附上——超过
+    ``PLAN_INLINE_MAX``(3000) 字符时**只落盘**、结果里只有指针（线上 2026-10-27
+    那次就是 5692 字符、无内联）。所以这里按「内联 > 读盘」解析，两者都拿不到而
+    又明确知道存在物理 SQL（``dialect_sql_chars``/``dialect_sql_file``）时报错，
+    绝不悄悄退回语义层 SQL。
+    """
+    if check.get("sql_kind") == "cube":
+        return "", None, False
+    inline = check.get("dialect_sql")
+    inline = inline.strip() if isinstance(inline, str) else ""
+    if inline:
+        sql, limit_n = _split_connector_limit(inline)
+        return sql, limit_n, True
+    ptr = check.get("dialect_sql_file") or ""
+    from_file = _read_plan_sql(ptr)
+    if from_file:
+        sql, limit_n = _split_connector_limit(from_file)
+        return sql, limit_n, True
+    exists = bool(check.get("dialect_sql_chars")) or bool(ptr)
+    return "", None, exists
+
+
 async def capture_spec(
     task: dict[str, Any],
     *,
@@ -123,20 +273,55 @@ async def capture_spec(
         )
     check, _text = hit
 
+    # 物理 SQL 的取回是 I/O ⇒ 留在编排层；`extract_spec` 只认 `dialect_sql`。
+    sql, sql_limit, has_physical = _physical_sql_of(check)
+    if sql:
+        check = {**check, "dialect_sql": sql}
+    elif has_physical:
+        raise PinError(
+            "physical_sql_unreadable",
+            "这次结果带的是语义层 SQL（物理版本只落了文件、已读不到）；"
+            "任务再跑成功一次就能重新固化",
+        )
+
     version = await semantic_version_of(str(task.get("db_name") or ""))
+    # 消歧证据：来源会话的最后一条真实提问；会话里没有（如早期 run）就用任务的
+    # 原话——定时 run 的 user 消息本来就是 ``[定时任务] 名字：prompt …``。
+    intent_text = _last_user_text(messages) or str(task.get("prompt") or "")
+    tz = str(task.get("tz") or "Asia/Shanghai")
+    # 锚点按来源 run 当天解析（见 ``_source_run_time``）；本任务没这条流水（交互
+    # 会话固化）就看该 thread 的 run 时刻；都拿不到才用固化时刻。
+    source_now = _source_run_time(st, task_id, source_thread)
+    if source_now is None:
+        source_now = await _thread_last_run_time(client, source_thread)
     try:
         spec, warns = extract_spec(
             check,
             db_name=str(task.get("db_name") or ""),
-            tz=str(task.get("tz") or "Asia/Shanghai"),
+            tz=tz,
             semantic_version=version,
             source_thread_id=source_thread,
-            now=now,
+            now=source_now or now,
+            captured_at=now,
             date_bindings=date_bindings,
             accept_constants=accept_constants,
+            intent_text=intent_text,
         )
+        if sql_limit:
+            # 剥掉的连接器 LIMIT 折算成行上限：回放再补回同一条，行数与来源 run 一致。
+            spec["row_limit"] = min(int(spec.get("row_limit") or sql_limit), sql_limit)
     except SpecError as e:
-        raise PinError(e.code, e.detail) from e
+        raise PinError(e.code, e.detail, extra=e.extra) from e
+    # 来源不是今天跑的就明说：锚点是按来源那天解析的，固化结果与「今天跑的」不同，
+    # 运营看到这句才知道「我点了固化，但用的是昨天的查询」。``warns`` 与
+    # ``spec["warnings"]`` 是同一个列表（``extract_spec`` 里同一对象），追加即双写。
+    if source_now is not None:
+        src_day = source_now.astimezone(ZoneInfo(tz)).date()
+        cap_day = now.astimezone(ZoneInfo(tz)).date()
+        if src_day != cap_day:
+            warns.append(
+                f"来源 run 是 {src_day} 跑的（今天 {cap_day}），日期锚点按 {src_day} 解析"
+            )
     return spec, warns
 
 

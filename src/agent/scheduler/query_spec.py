@@ -39,12 +39,17 @@ PLACEHOLDER = "{{{{p:{anchor}}}}}"
 
 
 class SpecError(Exception):
-    """固化失败。``code`` 是机读的失效码（见计划 §C.2），``detail`` 给人看。"""
+    """固化失败。``code`` 是机读的失效码（见计划 §C.2），``detail`` 给人看。
 
-    def __init__(self, code: str, detail: str = "") -> None:
+    ``extra`` 是机读的补充信息（如 ``ambiguous_date`` 的候选锚点），一路透到
+    API 响应里给前端渲染选择框——``detail`` 只负责措辞，不承担机读契约。
+    """
+
+    def __init__(self, code: str, detail: str = "", extra: dict | None = None) -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
         self.detail = detail
+        self.extra = extra or {}
 
 
 def resolve_anchors(now: datetime, tz: str) -> dict[str, str]:
@@ -68,11 +73,41 @@ def resolve_anchors(now: datetime, tz: str) -> dict[str, str]:
     }
 
 
+#: 用户原话里指认某个锚点的词。**只收无歧义的词**：「上月」不在此列（分不清
+#: 月初/月末），「周一」也不在（「上周一」会误命中）—— 宁可报错，不可猜错：
+#: 选错锚点下个月的口径就整体偏了。
+INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "today": ("今天", "今日", "today"),
+    "yesterday": ("昨天", "昨日", "前一天", "yesterday"),
+    "tomorrow": ("明天", "明日", "tomorrow"),
+    "week_start": ("本周", "这周", "本星期", "这个星期"),
+    "month_start": ("本月", "当月", "这个月"),
+    "last_month_start": (
+        "上个月初", "上月初", "上月1号", "上个月1号", "上个月一号", "上月一号",
+    ),
+    "last_month_end": ("上个月末", "上月末", "上个月底", "上月底"),
+    "year_start": ("今年", "本年"),
+}
+
+
+def anchors_in_intent(intent_text: str, candidates: list[str]) -> list[str]:
+    """用户原话点名的锚点（只在 ``candidates`` 里挑，其余无关）。"""
+    text = intent_text or ""
+    if not text:
+        return []
+    return [
+        k
+        for k in candidates
+        if any(w in text for w in INTENT_KEYWORDS.get(k, ()))
+    ]
+
+
 def templatize(
     text: str,
     anchors: dict[str, str],
     bindings: dict[str, str] | None = None,
     accept_constants: bool = False,
+    intent_text: str = "",
 ) -> tuple[str, list[str], list[str]]:
     """把文本里的日期字面量换成 ``{{p:anchor}}``。
 
@@ -82,8 +117,9 @@ def templatize(
     - 出现在 ``bindings`` 里 → 用指定锚点，但必须校验该锚点当天取值等于字面量；
     - 恰好命中 1 个锚点 → 用它；
     - 0 个 → ``accept_constants`` 为真则原样保留 + 告警，否则 ``unmatched_date``；
-    - 命中 ≥2 个（如每月 1 号 today 与 month_start 同值）→ ``ambiguous_date``，
-      必须由 ``bindings`` 消歧。选错锚点下个月口径就错了，绝不猜。
+    - 命中 ≥2 个（如周二 ``yesterday`` 与 ``week_start`` 同值）→ 先用用户原话
+      ``intent_text`` 收窄（``anchors_in_intent``）：恰好剩 1 个就用它，否则
+      ``ambiguous_date``。选错锚点下个月口径就错了，绝不猜。
     """
     bindings = bindings or {}
     mapping: dict[str, str] = {}
@@ -111,10 +147,15 @@ def templatize(
                 warns.append(f"常量日期保留: {literal}")
                 continue
             if len(candidates) > 1:
-                raise SpecError(
-                    "ambiguous_date",
-                    f"{literal}: {candidates}（用 date_bindings 指定其中一个）",
-                )
+                narrowed = anchors_in_intent(intent_text, candidates)
+                if len(narrowed) != 1:
+                    raise SpecError(
+                        "ambiguous_date",
+                        f"日期 {literal} 同时匹配 {len(candidates)} 个口径锚点",
+                        extra={"literal": literal, "candidates": candidates},
+                    )
+                warns.append(f"日期 {literal} 按用户原话固化为 {narrowed[0]}")
+                candidates = narrowed
             anchor = candidates[0]
         mapping[literal] = anchor
 
@@ -169,13 +210,23 @@ def extract_spec(
     semantic_version: str,
     source_thread_id: str,
     now: datetime,
+    captured_at: datetime | None = None,
     date_bindings: dict[str, str] | None = None,
     accept_constants: bool = False,
+    intent_text: str = "",
 ) -> tuple[dict, list[str]]:
     """check_async_task 结果 → 固化 spec。
 
     通道由 ``check["sql_kind"]`` 决定：``"cube"`` 走 cube 定义，其余走物理 SQL。
     ``expect_columns`` 这里留空——它必须来自**验证执行**的真实列（Task 5 填）。
+    ``intent_text`` 是用户原话（来源会话最后一条真实提问），日期字面量同时命中多
+    个锚点时只拿它当消歧证据，见 ``templatize``。
+
+    ``now`` 是**日期锚点的解析基准**：必须是**产生这条 SQL 那次 run** 的时刻，
+    不是固化时刻。字面量的含义由那天决定（``2026-10-26`` 在 10-27 是 yesterday、
+    在 10-28 周三却是 week_start）；用固化时刻解析会静默换成别的锚点，源 run 与
+    固化不同日时必然错（2026-10-28 生产实证）。``captured_at`` 才是真实固化时刻，
+    默认同 ``now``，仅供排查。
     """
     anchors = resolve_anchors(now, tz)
     base = {
@@ -184,7 +235,9 @@ def extract_spec(
         "tz": tz,
         "semantic_version": semantic_version,
         "source_thread_id": source_thread_id,
-        "captured_at": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        "captured_at": (captured_at or now).astimezone(timezone.utc).isoformat(
+            timespec="seconds"
+        ),
         # 「业务口径」节逐字随 spec 走：回放时没有子 agent、也拿不到 knowledge
         # 正文，报告的口径节只能从这段原文里抽。
         "caliber_block": extract_caliber_block(str(check.get("result") or "")),
@@ -219,13 +272,19 @@ def extract_spec(
         if args.get("filters"):
             rendered_filters = []
             for f in args["filters"]:
-                t, u, w = templatize(str(f), anchors, date_bindings, accept_constants)
+                t, u, w = templatize(
+                    str(f), anchors, date_bindings, accept_constants, intent_text
+                )
                 rendered_filters.append(t)
                 _add(u, w)
             template["filters"] = rendered_filters
         if args.get("time_dimension"):
             t, u, w = templatize(
-                str(args["time_dimension"]), anchors, date_bindings, accept_constants
+                str(args["time_dimension"]),
+                anchors,
+                date_bindings,
+                accept_constants,
+                intent_text,
             )
             template["time_dimension"] = t
             _add(u, w)
@@ -246,7 +305,9 @@ def extract_spec(
     sql = (check.get("dialect_sql") or "").strip() or (check.get("sql") or "").strip()
     if not sql:
         raise SpecError("no_query", "既没有物理 SQL 也没有 cube 定义")
-    template_sql, used, warns = templatize(sql, anchors, date_bindings, accept_constants)
+    template_sql, used, warns = templatize(
+        sql, anchors, date_bindings, accept_constants, intent_text
+    )
     return (
         {
             **base,

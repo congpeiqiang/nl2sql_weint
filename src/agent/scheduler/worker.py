@@ -499,6 +499,14 @@ async def _fire(
             "langgraph_auth_user_id": row["owner"],
             "user_id": row["owner"],
             "db_name": row["db_name"],
+            # 思考开关必须显式带上：ThinkingToggleMiddleware 只在「三元组至少缺一个」
+            # 之外才重建模型（thinking_toggle.py:160 `return request`）。三个键全缺时
+            # 模型仍是 import 期建的模块级 `deepseek_model`（`create_model()` 不带
+            # user_id ⇒ 读**全局** store），于是 owner 配的 provider/key 被完全忽略，
+            # 直连 DeepSeek 的思考模式还会因回放消息缺 reasoning_content 直接 400
+            # （2026-10-27 生产实证：定时回放 run 必失败、手动点重试才成功）。
+            # 值取 false：回放只剩写报告，不需要思考。
+            "enable_thinking": "false",
             # 定时 run 标记：主 agent 的 HITL 审批闸门据此跳过审批——后台 run 无人
             # 值守，interrupt 会被 langgraph 顶层图抑制（工具不执行、也没有卡片可点）。
             "scheduled_run": True,

@@ -250,6 +250,21 @@ class TestFire:
         cfg = fake_client.runs_created[0]["config"]["configurable"]
         assert "llm_route" not in cfg and "llm_model" not in cfg
 
+    def test_fire_passes_enable_thinking_to_rebuild_owner_model(self, store, fake_client):
+        """必须带 enable_thinking，否则 ThinkingToggle 不重建模型。
+
+        缺这个键时 `_maybe_swap` 走 `return request`，模型仍是 import 期建的
+        模块级 `deepseek_model`（`create_model()` 不带 user_id ⇒ 读**全局** store）
+        ⇒ 定时任务用别的账号的接入点/key，owner 配的 provider 被完全忽略；
+        直连 DeepSeek 思考模式还会因回放消息缺 reasoning_content 直接 400
+        （2026-10-27 生产实证）。值取 false：回放只剩写报告，不需要思考。
+        """
+        tid = _row(store)
+        store.claim(tid, "2026-01-01T11:00:00+00:00", "2026-01-01T13:00:00+00:00", NOW_ISO)
+        asyncio.run(worker._fire(tid, store=store, now=NOW))
+        cfg = fake_client.runs_created[0]["config"]["configurable"]
+        assert cfg["enable_thinking"] == "false"
+
     def test_fire_db_revoked_fail_closed(self, store, fake_client, monkeypatch):
         """触发前 grants 复验不过 → 不建线程不发 run，记 error 排下一周期。"""
         monkeypatch.setattr(service, "recheck_db_access", lambda owner, db: False)

@@ -27,10 +27,13 @@ _logger = logging.getLogger(__name__)
 #: 固化失效码 → 用户可读提示。没列到的码回落成 ``code: detail``（机读优先，
 #: 前端弹窗原样展示也说得过去）。这些 message 会直接出现在前端对话框里。
 _PIN_HINT = {
-    # 这两条的文案要落在**用户界面上真能做的动作**上：date_bindings 没有界面，
-    # 让用户「去指定 date_bindings」等于让他去改一个他看不到的字段。
-    "ambiguous_date": "日期歧义：同一个日期同时匹配多个口径锚点。请在会话里把它改成更明确的说法（如「上月1号」）后重新固化",
+    # 这些文案要落在**用户界面上真能做的动作**上：date_bindings 是 API 参数、
+    # 界面上没有对应字段，让用户「去指定 date_bindings」等于让他改一个他看不到
+    # 的东西（线上 2026-10-27 的原提示就是这么写的）。歧义的正解是弹选择框，
+    # 候选锚点走 `extra.candidates`。
+    "ambiguous_date": "日期歧义：SQL 里的同一个日期同时对应多个口径锚点，请选择这条报表要按哪个口径（选定后按该口径重新固化）",
     "unmatched_date": "SQL 里有对不上任何日期锚点的字面量。若它确实是业务常量，点「保留常量重试」；否则请先在会话里改成相对日期再固化",
+    "physical_sql_unreadable": "这次结果里只有语义层 SQL（可执行的物理版本没能读回来）。让任务再成功跑一次后重新固化即可",
     "no_source_run": "该任务还没有成功执行过一次，没有可固化的查询",
     "no_check_result": "来源会话里没有成功的查询结果（check_async_task status=success）",
     "columns_changed": "本次执行返回的列与固化时不一致（口径或表结构变了）",
@@ -42,7 +45,7 @@ _PIN_HINT = {
     "render_failed": "固化模板渲染失败（spec 被改坏了？）",
     "cube_key_unsupported": "cube 查询定义里有无法固化的键（limit/offset/granularity 等）",
     "no_query": "来源结果里既没有物理 SQL 也没有 cube 定义",
-    "bad_binding": "date_bindings 的指定与当天日期对不上",
+    "bad_binding": "所选日期口径与当天日期对不上（锚点取值已变），请重新固化",
 }
 
 
@@ -55,11 +58,15 @@ def _pin_error_text(e: Exception) -> str:
     return hint or (f"{code}: {detail}" if detail else str(e))
 
 
-def _err(msg: str, status: int = 400, code: str = "") -> JSONResponse:
-    """``code`` 只在有值时出现（机读失效码），``error`` 契约保持不变。"""
+def _err(
+    msg: str, status: int = 400, code: str = "", extra: dict | None = None
+) -> JSONResponse:
+    """``code``/``extra`` 只在有值时出现（机读失效码与补充数据），``error`` 契约不变。"""
     body: dict[str, Any] = {"ok": False, "error": msg}
     if code:
         body["code"] = code
+    if extra:
+        body["extra"] = extra
     return json_response(body, status=status)
 
 
@@ -231,7 +238,12 @@ async def pin_task_api(request: Request) -> JSONResponse:
             accept_constants=bool(body.get("accept_constants")),
         )
     except pin_service.PinError as e:
-        return _err(_pin_error_text(e), 400, code=str(getattr(e, "code", "") or ""))
+        return _err(
+            _pin_error_text(e),
+            400,
+            code=str(getattr(e, "code", "") or ""),
+            extra=getattr(e, "extra", None),
+        )
     except Exception as e:  # noqa: BLE001
         _logger.exception("[sched-api] 固化失败 id=%s", task_id)
         return _err(f"固化失败: {e}", 500)

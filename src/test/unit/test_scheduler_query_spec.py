@@ -1,6 +1,6 @@
 """定时任务固化查询：日期锚点与模板化（纯函数，无 I/O）。"""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -77,7 +77,9 @@ def test_templatize_ambiguous_on_first_of_month():
     with pytest.raises(SpecError) as e:
         templatize("dt = '2026-11-01'", a)
     assert e.value.code == "ambiguous_date"
-    assert "month_start" in e.value.detail and "today" in e.value.detail
+    # 候选锚点走 `extra`（机读，喂前端选择框），`detail` 只留人话
+    assert e.value.extra["candidates"] == ["today", "month_start"]
+    assert "2026-11-01" in e.value.detail
 
 
 def test_templatize_binding_resolves_ambiguity():
@@ -87,6 +89,76 @@ def test_templatize_binding_resolves_ambiguity():
     )
     assert out == "dt >= '{{p:month_start}}'"
     assert used == ["month_start"]
+
+
+def _tue():
+    """2026-10-27 是周二 ⇒ ``yesterday`` 与 ``week_start`` 同为 2026-10-26。
+
+    线上 2026-10-27 那次固化就死在这里：同一天撞两个口径锚点，而**措辞再怎么
+    改也区分不了**（「昨日工时」「本周工时」都会写出同一个日期字面量）。用户的
+    原话才是唯一证据。
+    """
+    a = _anchors(d=27)
+    assert a["yesterday"] == a["week_start"] == "2026-10-26"
+    return a
+
+
+def test_anchors_collide_on_tuesday():
+    assert _tue()["yesterday"] == "2026-10-26"
+
+
+def test_intent_disambiguates_yesterday():
+    out, used, _ = templatize(
+        "SELECT 1 WHERE dt = '2026-10-26'", _tue(), intent_text="昨日各人填报工时"
+    )
+    assert out == "SELECT 1 WHERE dt = '{{p:yesterday}}'"
+    assert used == ["yesterday"]
+
+
+def test_intent_disambiguates_week_start():
+    out, used, _ = templatize(
+        "SELECT 1 WHERE dt >= '2026-10-26'", _tue(), intent_text="本周填报工时"
+    )
+    assert out == "SELECT 1 WHERE dt >= '{{p:week_start}}'"
+    assert used == ["week_start"]
+
+
+def test_intent_without_date_words_still_ambiguous():
+    """用户原话里没有日期词 ⇒ 不猜，照旧报错（选错锚点下个月口径就错了）。"""
+    with pytest.raises(SpecError) as e:
+        templatize("SELECT 1 WHERE dt = '2026-10-26'", _tue(), intent_text="各人填报工时")
+    assert e.value.code == "ambiguous_date"
+
+
+def test_intent_naming_two_anchors_still_ambiguous():
+    with pytest.raises(SpecError) as e:
+        templatize(
+            "SELECT 1 WHERE dt = '2026-10-26'", _tue(), intent_text="昨日与本周进行对比"
+        )
+    assert e.value.code == "ambiguous_date"
+
+
+def test_ambiguous_error_carries_candidates_for_the_picker():
+    """歧义要**机读**地带上候选锚点，前端才能让用户点选。
+
+    文案里不许出现 ``date_bindings``：那是 API 参数，界面上没有这个字段，
+    让用户去指定它等于让他改一个看不到的东西（线上 2026-10-27 的提示原文）。
+    """
+    with pytest.raises(SpecError) as e:
+        templatize("SELECT 1 WHERE dt = '2026-10-26'", _tue(), intent_text="")
+    assert e.value.code == "ambiguous_date"
+    assert e.value.extra == {
+        "literal": "2026-10-26",
+        "candidates": ["yesterday", "week_start"],
+    }
+    assert "date_bindings" not in e.value.detail
+
+
+def test_intent_last_week_monday_is_not_week_start():
+    """「上周一」里的「周一」不是「本周」的证据——含歧义词也不许瞎配。"""
+    with pytest.raises(SpecError) as e:
+        templatize("SELECT 1 WHERE dt = '2026-10-26'", _tue(), intent_text="上周一的工时")
+    assert e.value.code == "ambiguous_date"
 
 
 def test_binding_must_match_that_day():
@@ -161,6 +233,51 @@ def test_extract_sql_prefers_dialect_sql(now):
     assert spec["params"] == ["month_start"]
     assert spec["v"] == 1 and spec["semantic_version"] == "abc123"
     assert warns == []
+
+
+def test_extract_spec_resolves_anchors_at_source_run_day(now):
+    """锚点必须按**来源 run 那天**解析，不按固化那天（2026-10-28 生产实证）。
+
+    来源 run 是 10-27 跑的、窗口 ``[10-26, 10-27)`` 是那天的「昨天」；若按固化
+    当天 10-28（周三）解析，``2026-10-26`` 恰好等于 ``week_start`` —— 静默固化出
+    一个「上个周一」起的窗口：回放还在查 10-26，且本周内窗口逐日变宽，下周一
+    起止倒挂恒空。
+    """
+    check = {
+        "status": "success",
+        "thread_id": "t-sub",
+        "result": "| a |",
+        "sql_kind": "cube",
+        "cube_query": "x",
+        "cube_args": {
+            "cube": "bug_quality",
+            "measures": ["bug_count"],
+            "dimensions": ["project_name"],
+            "time_dimension": "complete_time:day:2026-10-26,2026-10-27",
+        },
+        "cube_tool": "query_cube",
+    }
+    source_day = datetime(2026, 10, 27, 16, 16, tzinfo=ZoneInfo(TZ))   # 来源 run（周二）
+    pin_day = datetime(2026, 10, 28, 10, 2, tzinfo=ZoneInfo(TZ))       # 固化（周三）
+    spec, _ = extract_spec(
+        check,
+        db_name="witops",
+        tz="Asia/Shanghai",
+        semantic_version="",
+        source_thread_id="t",
+        now=source_day,
+        captured_at=pin_day,
+        # 10-27（周二）10-26 同时是 yesterday 与 week_start ⇒ 靠原话「前一天」消歧
+        intent_text="统计前一天的缺陷数量",
+    )
+    td = spec["cube_template"]["time_dimension"]
+    assert "{{p:week_start}}" not in td
+    assert spec["params"] == ["yesterday", "today"]
+    # captured_at 仍记真实固化时刻（排查要看「谁什么时候固化的」）
+    assert spec["captured_at"].startswith("2026-10-28T02:02")
+    # 次日 09:00 回放渲染出「运行日的前一天」
+    out = render_spec(spec, datetime(2026, 10, 29, 1, 0, tzinfo=timezone.utc))
+    assert out["cube"]["time_dimension"] == "complete_time:day:2026-10-28,2026-10-29"
 
 
 def test_extract_cube(now):
@@ -369,6 +486,18 @@ def test_extract_spec_carries_caliber_block(now):
     )
     assert "## 业务口径" in spec["caliber_block"]
     assert "工时制度 §3.1" in spec["caliber_block"]
+
+
+def test_extract_spec_passes_intent_text():
+    """``extract_spec`` 必须把用户原话透传下去，否则消歧在编排层断链。"""
+    spec, _ = extract_spec(
+        {"dialect_sql": "SELECT 1 WHERE dt = '2026-10-26'", "result": "共 1 行。"},
+        db_name="d", tz=TZ, semantic_version="abc",
+        source_thread_id="t", now=datetime(2026, 10, 27, 11, tzinfo=ZoneInfo(TZ)),
+        intent_text="昨日各人填报工时",
+    )
+    assert spec["sql_template"] == "SELECT 1 WHERE dt = '{{p:yesterday}}'"
+    assert spec["params"] == ["yesterday"]
 
 
 def test_extract_spec_without_caliber_block():
