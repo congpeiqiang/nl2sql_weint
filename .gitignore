@@ -64,3 +64,12 @@ src/agent/workspace-temp/*/.wren/
 
 # BIRD Mini-Dev 基准数据（4.1GB，本机评测用；未跟踪，发版 tar 亦排除）
 benchmarks/
+
+# ── 运行时数据根（db_config.json / model_config.json / eval 产物均属运行期生成）──
+src/agent/workspace/
+
+# ── 敏感资料：数据库账号密码汇总，绝不入库 ──
+docs/bird_minidev数据库连接信息/
+
+# ── 本体建模产物（ontology-business-map skill 输出，属外部产物）──
+ontology_witops/
