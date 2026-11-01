@@ -95,13 +95,15 @@ async def reload_users(request: Request):
 
 
 async def add_user(request: Request):
-    """新增用户。body: user_id, password, display_name(可选), is_admin(可选)"""
+    """新增用户。body: user_id, password, display_name(可选), is_admin(可选),
+    emp_no(可选，运营平台免登工号，Z + 3 位数字)"""
     require_admin(request)
     data = await parse_body(request)
     user_id = str(data.get("user_id", "") or "").strip()
     password = str(data.get("password", "") or "")
     display_name = str(data.get("display_name", "") or "").strip()
     is_admin = bool(data.get("is_admin", False))
+    emp_no = str(data.get("emp_no", "") or "").strip() or None
     if not user_id:
         return json_response({"error": "user_id 必填"}, status=400)
     if not password:
@@ -110,7 +112,8 @@ async def add_user(request: Request):
         from agent.auth.users import add_user as _add
         # P1-14：内部是 PBKDF2-260k（~百毫秒级 **CPU**）+ 原子写盘，
         # 卡在事件循环上等于每次建号都让全站等一次哈希
-        user = await offload(_add, user_id, password, display_name, is_admin)
+        # 第 5 个参数（must_change_password）传 None = 走默认：工号账号 False、其余 True
+        user = await offload(_add, user_id, password, display_name, is_admin, None, emp_no)
     except ValueError as e:
         return json_response({"error": str(e)}, status=400)
     return json_response({"ok": True, "user": user}, status=201)

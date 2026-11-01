@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "NL2SQL 智能体系统架构",
+    "output": "NL2SQL-系统架构图.html",
+    "quality_profile": "showcase",
+    "locale": "zh-CN",
+    "viewBox": [1080, 592],
+    "views": [
+      { "id": "query-path", "label": "主查询链路", "focus": ["ui", "api", "chat", "sub"], "note": "用户提问经 LangGraph API 进入主 Agent，再委派 nl2sql 子 Agent。" },
+      { "id": "dual-channel", "label": "双通道取数", "focus": ["sub", "wren", "dbmcp", "db"], "note": "已建模库走语义层，未建模库走直连，同一条只读边界。" },
+      { "id": "cross-cutting", "label": "模型与可观测", "focus": ["chat", "sub", "llm", "langfuse", "store"], "note": "两个 graph 共用模型工厂，写入同一 trace 与 checkpoint。" }
+    ]
+  },
+  "components": [
+    { "id": "ui", "type": "frontend", "label": "Web 前端", "sublabel": "Next.js · SSE 流", "pos": [40, 190], "size": [130, 72], "tag": "1s 轮询" },
+    { "id": "api", "type": "backend", "label": "LangGraph API", "sublabel": "uvicorn :2026", "pos": [290, 188], "size": [150, 76], "tag": "组合根路由" },
+    { "id": "chat", "type": "backend", "label": "主 Agent", "sublabel": "chat_agent · 意图路由", "pos": [560, 182], "size": [160, 88], "tag": "17 中间件" },
+    { "id": "sub", "type": "backend", "label": "NL2SQL 子 Agent", "sublabel": "nl2sql_agent · Wren SOP", "pos": [860, 182], "size": [160, 88], "tag": "六步主循环" },
+    { "id": "wren", "type": "backend", "label": "WrenAI 语义层", "sublabel": "wrenai_<库>_* · Cube", "pos": [660, 400], "size": [155, 66] },
+    { "id": "dbmcp", "type": "backend", "label": "dbmcp 直连", "sublabel": "dbmcp_run_sql", "pos": [860, 400], "size": [160, 66] },
+    { "id": "db", "type": "database", "label": "业务数据库", "sublabel": "MySQL · CH · PG · SQLite", "pos": [655, 500], "size": [165, 60] },
+    { "id": "llm", "type": "external", "label": "模型工厂", "sublabel": "deepseek · glm · kimi", "pos": [560, 40], "size": [160, 62] },
+    { "id": "langfuse", "type": "external", "label": "Langfuse", "sublabel": "trace · 五维评分", "pos": [860, 40], "size": [160, 62] },
+    { "id": "store", "type": "database", "label": "会话持久化", "sublabel": "checkpoint · traces", "pos": [290, 400], "size": [150, 66] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Agent 进程（单端口 :2026 · 两个 graph 同进程）", "wraps": ["api", "chat", "sub"], "pad": 16 },
+    { "kind": "security-group", "label": "只读 SQL 通道（写 / DDL 硬拦截）", "wraps": ["wren", "dbmcp"], "pad": 16 }
+  ],
+  "connections": [
+    { "id": "ui-to-api", "from": "ui", "to": "api", "label": "HTTPS · SSE 流", "variant": "emphasis" },
+    { "id": "api-to-chat", "from": "api", "to": "chat", "label": "chat_agent", "variant": "emphasis" },
+    { "id": "chat-to-sub", "from": "chat", "to": "sub", "label": "start_async_task 委派", "variant": "emphasis" },
+    { "id": "sub-to-wren", "from": "sub", "to": "wren", "label": "已建模库", "fromSide": "left", "toSide": "top", "via": [[737.5, 226]] },
+    { "id": "sub-to-dbmcp", "from": "sub", "to": "dbmcp", "label": "未建模库", "labelDy": 24 },
+    { "id": "wren-to-db", "from": "wren", "to": "db", "label": "SQL", "labelDy": 24 },
+    { "id": "dbmcp-to-db", "from": "dbmcp", "to": "db", "label": "SQL", "fromSide": "bottom", "toSide": "right", "via": [[940, 530]] },
+    { "id": "chat-to-llm", "from": "chat", "to": "llm", "label": "模型调用" },
+    { "id": "sub-to-langfuse", "from": "sub", "to": "langfuse", "label": "skill span + 五维评分", "variant": "dashed" },
+    { "id": "api-to-store", "from": "api", "to": "store", "label": "checkpoint（PG / SQLite）", "variant": "dashed", "labelDy": 24 }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "主查询链路",
+      "items": [
+        "前端 POST /threads/{id}/runs/stream，与自定义路由同端口 :2026",
+        "主 Agent 委派后本轮结束，前端轮询到终态才发 auto-continue"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "双通道取数",
+      "items": [
+        "已建模库走 wrenai_<库>_*，未建模库走 dbmcp_*",
+        "SemanticDbDetector 按 db_name 实时判定并注入路由指引"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "横切能力",
+      "items": [
+        "门禁层：ModelRequired / ModelTimeout / QuotaError / CaliberGate / SqlReadOnly",
+        "一次查询 = 一条 chat-turn trace，子 Agent 嵌套归入同一 trace"
+      ]
+    }
+  ]
+}

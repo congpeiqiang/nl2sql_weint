@@ -50,11 +50,15 @@ def cookie_secure(request: Request) -> bool:
 
 
 def _user_payload(user) -> dict:
-    """用户信息响应体（登录 / me 共用；前端据 must_change_password 提示改密）。"""
+    """用户信息响应体（登录 / me / 工号免登共用；前端据 must_change_password 提示改密）。
+
+    除 `user_id` 外一律 `.get` 兜底：工号免登把 `auth_users.json` 的**原始记录**直接
+    传进来（手工补 `emp_no` 的记录可能缺别的键），而这里 KeyError 就是 500。
+    """
     return {
         "user_id": user["user_id"],
-        "display_name": user["display_name"],
-        "is_admin": user["is_admin"],
+        "display_name": user.get("display_name") or user["user_id"],
+        "is_admin": bool(user.get("is_admin", False)),
         "must_change_password": bool(user.get("must_change_password", False)),
     }
 

@@ -5,6 +5,7 @@
 校验失败 → 401 JSON {"error": "unauthorized"}。
 
 白名单路径直接放行（不校验）：
+- /api/sso/login（工号换 Cookie，运营平台 iframe 免登）
 - /api/auth/login（登录本身）
 - /api/auth/logout
 - /ok（compose healthcheck）
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 # 白名单前缀（path 以这些开头则放行）
 _WHITELIST_PREFIXES = (
+    "/api/sso/login",   # 换凭证的请求本身不能要求凭证，漏了就是 401 死循环
     "/api/auth/login",
     "/api/auth/logout",
     "/ok",

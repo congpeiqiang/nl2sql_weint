@@ -1,16 +1,16 @@
 # NL2SQL 平台 API 文档（总览）
 
-> 代码位置：`src/api/`（25 个路由模块 + 组合根 `custom_app.py` + 共享工具 `_common.py`
+> 代码位置：`src/api/`（26 个路由模块 + 组合根 `custom_app.py` + 共享工具 `_common.py`
 > + 3 个纯 ASGI 中间件 `auth_middleware.py` / `request_log.py` / `langfuse_metadata.py`），
 > 由 `src/api/custom_app.py` 的 `ROUTES` 聚合，经 `LANGGRAPH_HTTP.app`
 > 钩子与 LangGraph 原生路由**合并进同一 Starlette app、同一进程/端口（2026）**。
-> 整理日期：2026-10-28 ｜ 共 **30 个模块 / 110 个自定义路由**
+> 整理日期：2026-10-28 ｜ 共 **31 个模块 / 111 个自定义路由**
 
 ## 一、阅读顺序
 
 | 文档 | 覆盖模块 | 路由数 |
 |---|---|---|
-| [01-认证与配置.md](01-认证与配置.md) | auth_routes / auth_admin / db_config / model_config / deployment_info / eval_flags | 31 |
+| [01-认证与配置.md](01-认证与配置.md) | auth_routes / sso_routes / auth_admin / db_config / model_config / deployment_info / eval_flags | 32 |
 | [02-会话与查询交互.md](02-会话与查询交互.md) | auto_title / thread_* / task_cancel / sql_approval / report_file | 11 |
 | [03-定时任务.md](03-定时任务.md) | scheduled_tasks（含固化回放 pin） | 10 |
 | [04-反馈标注与数据集.md](04-反馈标注与数据集.md) | message_feedback / feedback_stats / feedback_annotation | 19 |
@@ -34,7 +34,7 @@
   | 会话归属 | `require_thread(request, tid)` | 403 |
   | 库授权 | `can_access_db(user, db)` | 403 |
 
-- **白名单（免鉴权）**：`/api/auth/login`、`/api/auth/logout`、`/ok`、`/_next/`、`/ui`、
+- **白名单（免鉴权）**：`/api/sso/login`、`/api/auth/login`、`/api/auth/logout`、`/ok`、`/_next/`、`/ui`、
   `/docs`、`/openapi.json`、`/redoc`。
 - **内部请求**：来源 IP 属 Docker 网段（`172.` / `10.` / `127.0.0.1` / `::1`）**且**无 `Cookie`
   **且**无 `X-Forwarded-For` → 标记 `user_id="internal"`（子 agent / sync 循环自调用走这条）。
@@ -88,6 +88,7 @@
 | 方法 | 路径 | 鉴权 | 作用 |
 |---|---|---|---|
 | POST | `/api/auth/login` | 公开 | 登录，签发 Cookie |
+| POST | `/api/sso/login` | 公开 | 工号换 Cookie（运营平台 iframe 免登；首次登录自动建号；管理员拒绝） |
 | POST | `/api/auth/logout` | 公开 | 清除 Cookie（不吊销 token） |
 | GET | `/api/auth/me` | 登录 | 当前用户信息 |
 | POST | `/api/auth/change-password` | 登录 | 自助改密并换发 Cookie |

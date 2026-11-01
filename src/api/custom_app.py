@@ -48,6 +48,7 @@ import api.feedback_stats  # noqa: E402
 import api.feedback_annotation  # noqa: E402
 import api.experiment  # noqa: E402
 import api.auth_routes  # noqa: E402
+import api.sso_routes  # noqa: E402
 import api.auth_middleware  # noqa: E402
 import api.auth_admin  # noqa: E402
 import api.scheduled_tasks  # noqa: E402
@@ -59,6 +60,7 @@ _metrics = api.metrics
 
 ROUTES: list[BaseRoute] = [
     *api.auth_routes.routes,
+    *api.sso_routes.routes,     # 工号直取身份（运营平台 iframe 免登，管理员除外）
     *api.auth_admin.routes,
     *api.drain.routes,          # P2-1 优雅停机（admin 触发排空/查状态/撤销）
     *api.metrics.routes,        # P2-3 /metrics（指标 + ?format=json 队列快照）

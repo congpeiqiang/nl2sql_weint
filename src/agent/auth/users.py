@@ -33,6 +33,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -205,6 +206,28 @@ def find_user(username: str) -> dict[str, Any] | None:
     return None
 
 
+# 工号格式：Z + 3 位数字（与 `api.sso_routes.EMP_NO_RE` 同一条规则，改一处要改两处）
+EMP_NO_RE = re.compile(r"^Z\d{3}$")
+
+
+def find_by_emp_no(emp_no: str) -> dict[str, Any] | None:
+    """按工号找用户：优先 `emp_no` 字段，回落 `user_id` 精确等于工号。
+
+    双匹配免迁移：既有账号补 `emp_no` 字段，或新账号直接把工号当 `user_id`，两种都能用。
+    """
+    if not emp_no:
+        return None
+    users = load_users()
+    # 手工编辑过的记录可能没有 user_id —— 匹配上也没法签发身份，跳过（否则下游 KeyError）
+    for u in users:
+        if u.get("user_id") and u.get("emp_no") == emp_no:
+            return u
+    for u in users:
+        if u.get("user_id") and u.get("user_id") == emp_no:
+            return u
+    return None
+
+
 # ── CRUD（管理员 API，写文件 + 自动清缓存）──────────────
 
 def _atomic_write(path: Path, users: list[dict[str, Any]]) -> None:
@@ -247,30 +270,48 @@ def add_user(
     password: str,
     display_name: str = "",
     is_admin: bool = False,
-    must_change_password: bool = True,
+    must_change_password: bool | None = None,
+    emp_no: str | None = None,
 ) -> dict[str, Any]:
     """新增用户。返回新用户 dict（不含 password_hash）。
 
-    `must_change_password` 默认 True：管理员设的初始密码是**经手人知道的**，
-    首登改掉它才是标准做法（只标记，是否拦截由开关决定）。要建服务账号可显式传 False。
+    `must_change_password` 不传时：**工号账号默认 False，其余默认 True**。管理员设的
+    初始密码是**经手人知道的**，首登改掉它才是标准做法（只标记，是否拦截由开关决定）；
+    而工号免登账号根本没有"改密"这一步，标成 True 遇到 `NL2SQL_FORCE_PASSWORD_CHANGE=1`
+    就是登录成功却处处 403 的锁死。要建服务账号可显式传 False。
+
+    `emp_no`（可选，2026-10-28 运营平台免登）：给 `/api/sso/login` 用的工号。建号入口是
+    性价比最高的一道闸 —— `Z64` / `z064` / `Z064 ` 这类错号，登录只表现为「查无此人」，
+    没人知道为什么。校验格式 `^Z\\d{3}$` + 全局唯一。
     """
+    emp_no = (emp_no or "").strip()
     # 整段读-改-写必须在锁内：否则两个并发 add 各拿同一份旧列表 → 后者覆盖前者
     with _users_lock:
         if not user_id or not user_id.strip():
             raise ValueError("user_id 不能为空")
         if not password or len(password) < MIN_PASSWORD_LENGTH:
             raise ValueError(f"密码至少 {MIN_PASSWORD_LENGTH} 位")
+        if emp_no and not EMP_NO_RE.match(emp_no):
+            raise ValueError("工号格式应为 Z + 3 位数字，如 Z064")
         users = load_users()
         if any(u.get("user_id") == user_id for u in users):
             raise ValueError(f"用户 '{user_id}' 已存在")
+        if emp_no and any(u.get("emp_no") == emp_no for u in users):
+            raise ValueError(f"工号 '{emp_no}' 已被占用")
         new_user = {
             "user_id": user_id.strip(),
             "password_hash": hash_password(password),
             "display_name": display_name.strip() or user_id.strip(),
             "is_admin": bool(is_admin),
             "token_version": 0,
-            "must_change_password": bool(must_change_password),
+            "must_change_password": (
+                bool(must_change_password)
+                if must_change_password is not None
+                else not emp_no
+            ),
         }
+        if emp_no:
+            new_user["emp_no"] = emp_no
         users.append(new_user)
         _save_users(users)
     return {k: v for k, v in new_user.items() if k != "password_hash"}

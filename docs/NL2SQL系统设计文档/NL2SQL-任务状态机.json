@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "异步查询任务状态机",
+    "output": "NL2SQL-任务状态机.html",
+    "quality_profile": "showcase",
+    "locale": "zh-CN",
+    "viewBox": [1060, 566],
+    "views": [
+      { "id": "main-rail", "label": "主状态推进", "focus": ["submitted", "running", "finalize", "written", "consumed"], "note": "从委派到前端续跑的五个阶段。" },
+      { "id": "terminal-exits", "label": "终态出口", "focus": ["finalize", "error", "timeout", "cancelled"], "note": "三个非成功终态，判据是失败戳而不是文案。" },
+      { "id": "wait-and-resume", "label": "等待与续跑", "focus": ["written", "consumed"], "note": "终态写回后还要等前端轮询才继续。" }
+    ]
+  },
+  "lanes": [
+    { "id": "main", "label": "主状态推进" },
+    { "id": "terminal", "label": "终态出口" }
+  ],
+  "states": [
+    { "id": "submitted", "type": "start", "label": "已委派", "sublabel": "task_id 已返回", "lane": "main", "col": 0, "step": "01", "tag": "active_queries" },
+    { "id": "running", "type": "active", "label": "执行中", "sublabel": "子 Agent 六步主循环", "lane": "main", "col": 1, "step": "02", "tag": "0.5s 写回" },
+    { "id": "finalize", "type": "decision", "label": "终态判定", "sublabel": "watcher 读子 run", "lane": "main", "col": 2, "step": "03", "tag": "只认失败戳" },
+    { "id": "written", "type": "waiting", "label": "终态已写回", "sublabel": "async_tasks 落库", "lane": "main", "col": 3, "step": "04", "tag": "等前端轮询" },
+    { "id": "consumed", "type": "success", "label": "前端续跑", "sublabel": "check_async_task", "lane": "main", "col": 4, "step": "05", "tag": "结果被取用" },
+    { "id": "error", "type": "failure", "label": "error", "sublabel": "失败 / interrupted", "lane": "terminal", "col": 0, "width": 100, "yOffset": -80, "tag": "terminal" },
+    { "id": "timeout", "type": "failure", "label": "timeout", "sublabel": "长期无终态", "lane": "terminal", "col": 1, "yOffset": -80, "tag": "terminal" },
+    { "id": "cancelled", "type": "failure", "label": "cancelled", "sublabel": "cancel API 取消", "lane": "terminal", "col": 2, "yOffset": -80, "tag": "terminal" }
+  ],
+  "transitions": [
+    { "id": "start-run", "from": "submitted", "to": "running", "variant": "emphasis" },
+    { "id": "run-done", "from": "running", "to": "finalize", "variant": "emphasis" },
+    { "id": "write-ok", "from": "finalize", "to": "written", "variant": "emphasis", "route": "straight" },
+    { "id": "front-poll", "from": "written", "to": "consumed", "variant": "emphasis" },
+    { "id": "to-error", "from": "finalize", "to": "error", "variant": "security", "route": "bottom-channel" },
+    { "id": "to-timeout", "from": "finalize", "to": "timeout", "variant": "security", "route": "bottom-channel", "channelX": 486 },
+    { "id": "to-cancelled", "from": "finalize", "to": "cancelled", "variant": "security", "route": "bottom-channel", "channelX": 512 }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "主路径",
+      "items": [
+        "watcher 每 0.5s 写回进度，终态落 async_tasks",
+        "前端轮询到终态才发 auto-continue 取结果"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "终态与兜底",
+      "items": [
+        "success / error / timeout / cancelled，靠失败戳判定",
+        "update_state 409 时由 pending_terminal 幂等补写"
+      ]
+    }
+  ]
+}

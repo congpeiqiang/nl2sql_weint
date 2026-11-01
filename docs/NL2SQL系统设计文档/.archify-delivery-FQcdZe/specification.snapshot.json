@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "一次 NL2SQL 查询的完整时序",
+    "output": "NL2SQL-查询时序图.html",
+    "quality_profile": "showcase",
+    "locale": "zh-CN",
+    "viewBox": [1080, 566],
+    "column_fit": "spread",
+    "views": [
+      { "id": "accept-dispatch", "label": "受理与委派", "focus": ["ui", "api", "chat", "sub"], "note": "主 Agent 委派后立即结束本轮，不阻塞前端。" },
+      { "id": "retrieve-execute", "label": "取料与执行", "focus": ["sub", "wren", "db"], "note": "五路取料 → dry_run → run_sql，结果集按契约回传。" },
+      { "id": "resume-present", "label": "回传与呈现", "focus": ["api", "chat", "sub", "ui", "obs"], "note": "终态写回、auto-continue、汇总出图，trace 旁路写入。" }
+    ]
+  },
+  "participants": [
+    { "id": "ui", "type": "frontend", "label": "Web 前端" },
+    { "id": "api", "type": "backend", "label": "LangGraph API", "sublabel": ":2026" },
+    { "id": "chat", "type": "backend", "label": "主 Agent", "sublabel": "chat_agent" },
+    { "id": "sub", "type": "backend", "label": "子 Agent", "sublabel": "nl2sql_agent" },
+    { "id": "wren", "type": "backend", "label": "语义层", "sublabel": "wrenai_<库>_*" },
+    { "id": "db", "type": "database", "label": "业务库", "sublabel": "4 类引擎" },
+    { "id": "obs", "type": "external", "label": "Langfuse", "sublabel": "trace" }
+  ],
+  "segments": [
+    { "from": 150, "to": 258, "label": "① 受理 + 委派" },
+    { "from": 260, "to": 372, "label": "② 取料 · 生成 · 执行" },
+    { "from": 374, "to": 478, "label": "③ 回传 · 汇总 · 观测" }
+  ],
+  "messages": [
+    { "id": "submit-run", "from": "ui", "to": "api", "y": 160, "label": "POST /runs/stream", "variant": "emphasis" },
+    { "id": "start-chat", "from": "api", "to": "chat", "y": 188, "label": "chat_agent run", "variant": "emphasis" },
+    { "id": "dispatch", "from": "chat", "to": "sub", "y": 216, "label": "start_async_task", "variant": "emphasis" },
+    { "id": "ack", "from": "chat", "to": "ui", "y": 244, "label": "本轮「已提交」", "variant": "return" },
+    { "id": "retrieve", "from": "sub", "to": "wren", "y": 272, "label": "wren-retrieve 五路取料" },
+    { "id": "author-exec", "from": "sub", "to": "wren", "y": 300, "label": "dry_run → run_sql", "variant": "emphasis" },
+    { "id": "sql", "from": "wren", "to": "db", "y": 328, "label": "只读 SELECT", "variant": "emphasis" },
+    { "id": "rows", "from": "db", "to": "wren", "y": 356, "label": "columns / rows", "variant": "return" },
+    { "id": "span", "from": "sub", "to": "obs", "y": 384, "label": "skill span + 确定性分", "variant": "dashed" },
+    { "id": "poll", "from": "ui", "to": "api", "y": 412, "label": "轮询终态 → auto-continue", "variant": "emphasis" },
+    { "id": "check", "from": "chat", "to": "sub", "y": 440, "label": "check_async_task" },
+    { "id": "answer", "from": "chat", "to": "ui", "y": 468, "label": "SSE：图表 + 报告", "variant": "return" }
+  ],
+  "activations": [
+    { "participant": "ui", "from": 150, "to": 476, "type": "frontend" },
+    { "participant": "api", "from": 155, "to": 470, "type": "backend" },
+    { "participant": "chat", "from": 178, "to": 465, "type": "backend" },
+    { "participant": "sub", "from": 200, "to": 455, "type": "backend" },
+    { "participant": "wren", "from": 264, "to": 370, "type": "backend" },
+    { "participant": "db", "from": 320, "to": 366, "type": "database" },
+    { "participant": "obs", "from": 376, "to": 392, "type": "external" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "两步式交互",
+      "items": [
+        "start_async_task 立即返回 task_id，本轮 run 结束",
+        "子 Agent 在独立 thread / run 里跑完整流水线"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "子 Agent 与旁路",
+      "items": [
+        "六步主循环：取料 → 澄清 → 判路由 → dry_run → 执行",
+        "skill span 与确定性分在工具边界写入，不阻塞主链路"
+      ]
+    }
+  ]
+}

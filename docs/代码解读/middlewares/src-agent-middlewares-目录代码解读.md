@@ -1,8 +1,8 @@
 # src/agent/middlewares 目录代码解读
 
 > 目录路径：`src/agent/middlewares/`
-> 解读日期：2026-10-14（全面重写）
-> 共 **27 个** Python 文件（含 `__init__.py`）。本目录是 NL2SQL 系统的 **Agent 中间件层**：基于 LangChain 1.x `AgentMiddleware` 的 hook（`before_model` / `after_model` / `wrap_model_call` / `wrap_tool_call` / `after_agent`）与 Monkey-Patch，实现**配置注入、工具面控制、安全护栏、执行监督、上下文管理、上下文修复、错误翻译、可观测性**八大类能力。
+> 解读日期：2026-10-28（补充 pinned_replay.py）
+> 共 **29 个** Python 文件（含 `__init__.py`）。本目录是 NL2SQL 系统的 **Agent 中间件层**：基于 LangChain 1.x `AgentMiddleware` 的 hook（`before_model` / `after_model` / `wrap_model_call` / `wrap_tool_call` / `after_agent`）与 Monkey-Patch，实现**配置注入、工具面控制、安全护栏、执行监督、上下文管理、上下文修复、错误翻译、可观测性**八大类能力。
 
 ## 总览：文件分类
 
@@ -14,6 +14,7 @@
 | 配置注入 | model_required.py | wrap_model_call | 账号无模型时 fail-closed 返回友好 AIMessage |
 | **工具面控制** | tool_filter.py | wrap_model_call | 按当前库过滤 wrenai/dbmcp 工具，语义层独占 |
 | 工具面控制 | dynamic_mcp_tools.py | wrap_model_call | MCP 工具运行期热注册，增删库免重启 |
+| 工具面控制 | pinned_replay.py | wrap_model_call | 固化回放 run 摘掉 `start_async_task`，并导出回放提示词段供 `dynamic_prompt` 拼接 |
 | **安全护栏** | execute_guard.py | wrap_tool_call | shell 命令护栏：禁破坏性命令与工作区外路径 |
 | 安全护栏 | sql_approval.py | wrap_tool_call | SQL 只读硬拦截 + Wren LIMIT 归一 + Cube 窗口参数 |
 | 安全护栏 | filesystem_thread_guard.py | wrap_tool_call | 线程级文件隔离：读/写/grep 三维度 + 路径归一化 |
@@ -56,12 +57,15 @@
 3. **QueryGate** 位于 SqlReadOnly **之前**——被拦的 run_sql 仍在 span 里可见，写/DDL 由硬闸兜底
 4. **CubeRouteGate** 位于 QueryGate **之前**——Cube 闸门优先级更高
 5. **deepagents_async_config_patch** 必须在 `create_deep_agent` **之前**导入
+6. **主 agent 链**（前 5 条为 nl2sql 子 agent 链）：`HumanInTheLoopMiddleware` → `PinnedReplayMiddleware`（`main_agent.MAIN_AGENT_MIDDLEWARE`）——两者同属「拦截模型可见能力」层，由 `test_pinned_replay_mode.py::test_middleware_registered_right_after_hitl` 锁定
 
 ## 目录级共性模式
 
 ### 1. 配置读取统一走 `langgraph.config.get_config()`
 
 多处实证 `request.runtime.config` 恒为空 dict，这是本目录最重要的框架坑。所有需要读 `configurable` 的中间件都走这条路径。
+
+本目录内 `pinned_replay._cfg` 与 `main_agent._get_configurable` **刻意各自独立实现**：一个读 `db_name`、一个读 `pinned_replay`，合并只会制造模块耦合。
 
 ### 2. deny 消息三件套
 

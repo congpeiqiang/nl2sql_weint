@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "NL2SQL 查询数据流",
+    "output": "NL2SQL-数据流图.html",
+    "quality_profile": "showcase",
+    "locale": "zh-CN",
+    "viewBox": [1080, 560],
+    "views": [
+      { "id": "retrieve-route", "label": "取料与路由", "focus": ["q", "fetch", "route", "author"], "note": "一次并行取齐五块料，再按具名指标三条件判车道。" },
+      { "id": "gate-execute", "label": "校验与执行", "focus": ["author", "gate", "run"], "note": "dry_run 与只读硬闸都在执行之前。" },
+      { "id": "retain-consume", "label": "留存与消费", "focus": ["run", "offload", "report"], "note": "大结果落盘，进上下文只剩样例与指针。" }
+    ]
+  },
+  "stages": [
+    { "label": "输入" },
+    { "label": "取料" },
+    { "label": "生成" },
+    { "label": "执行" },
+    { "label": "留存" }
+  ],
+  "nodes": [
+    { "id": "q", "type": "external", "label": "用户问题", "sublabel": "自然语言 + db_name", "stage": 0, "row": 0, "tag": "configurable" },
+    { "id": "fetch", "type": "backend", "label": "wren-retrieve", "sublabel": "五路并行取料", "stage": 1, "row": 2, "tag": "各至多一次" },
+    { "id": "route", "type": "backend", "label": "判路由", "sublabel": "具名指标三条件", "stage": 2, "row": 0 },
+    { "id": "author", "type": "backend", "label": "SQL 产物", "sublabel": "query_cube / 手写", "stage": 2, "row": 2 },
+    { "id": "gate", "type": "security", "label": "dry_run 门", "sublabel": "未过禁止执行", "stage": 3, "row": 0 },
+    { "id": "run", "type": "backend", "label": "run_sql", "sublabel": "查业务库 · limit=N", "stage": 3, "row": 2 },
+    { "id": "offload", "type": "database", "label": "大结果落盘", "sublabel": "落盘 + 消息瘦身", "stage": 4, "row": 0 },
+    { "id": "report", "type": "backend", "label": "报告 / 图表", "sublabel": "report 目录", "stage": 4, "row": 2 }
+  ],
+  "flows": [
+    { "id": "ask", "from": "q", "to": "fetch", "label": "问题 + 库名", "classification": "请求输入", "variant": "emphasis" },
+    { "id": "fetch-route", "from": "fetch", "to": "route", "label": "取料包", "classification": "结构 / 口径 / 范例", "variant": "default" },
+    { "id": "route-author", "from": "route", "to": "author", "label": "车道决策", "classification": "cube / 手写", "variant": "default", "labelDy": 24 },
+    { "id": "author-gate", "from": "author", "to": "gate", "label": "候选 SQL", "classification": "待校验", "variant": "emphasis" },
+    { "id": "gate-run", "from": "gate", "to": "run", "label": "dry_run 通过", "classification": "放行", "variant": "emphasis", "labelDy": 24 },
+    { "id": "run-offload", "from": "run", "to": "offload", "label": "rows > 50", "classification": "超阈值落盘", "variant": "emphasis" },
+    { "id": "offload-report", "from": "offload", "to": "report", "label": "全量表 + 摘要", "classification": "交付物", "variant": "default", "labelDy": 24 }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "取料与路由",
+      "items": [
+        "五路取料全程各至多一次，下游只读取料包不做重复检索",
+        "具名指标三条件全满足必须走 query_cube，手写等价 SQL 也算违规",
+        "整体降级手写只允许两种情形：query_cube 实调失败，或需求是记录级逐条清单"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "校验与执行",
+      "items": [
+        "dry_run 未通过禁止 run_sql，改稿上限 3 次",
+        "SqlReadOnlyMiddleware 对 run_sql 做写 / DDL 硬拦截，不执行也不走审批",
+        "SQL 正文不写 LIMIT，行数由 run_sql(sql, limit=N) 控制"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "留存与消费",
+      "items": [
+        "run_sql / query_cube 的大结果由代码转 markdown 落盘，零模型开销",
+        "进 state 的消息只剩前 20 行样例 + full_result_file 指针",
+        "报告与图表落活跃工作区 report 目录，经 /api/reports 下载"
+      ]
+    }
+  ]
+}
